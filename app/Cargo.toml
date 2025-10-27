@@ -1,0 +1,20 @@
+[package]
+name = "app"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type=["cdylib", "rlib"]
+
+[dependencies]
+anyhow = "1.0.100"
+image = "0.25.8"
+log = "0.4.28"
+raw-window-handle = "0.6.2"
+simple_logger = "5.1.0"
+sparkles = {version = "0.2.0", git = "https://github.com/skibon02/sparkles.git", branch = "main"}
+winit = "0.30.12"
+vulkan-lib = {path = "../vulkan-lib"}
+
+[features]
+default = []

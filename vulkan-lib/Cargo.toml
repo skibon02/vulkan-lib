@@ -1,0 +1,14 @@
+[package]
+name = "vulkan-lib"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.100"
+ash = { version = "0.38.0", features = ["linked"] }
+ash-window = "0.13.0"
+thiserror = "2.0.17"
+sparkles = {version = "0.2.0", git = "https://github.com/skibon02/sparkles.git", branch = "main"}
+log = "0.4.28"
+raw-window-handle = { version = "0.6.2", features = ["std", "alloc"] }
+image = "0.25.8"
