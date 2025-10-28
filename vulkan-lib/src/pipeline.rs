@@ -10,6 +10,7 @@ use ash::vk::{ColorComponentFlags, CompareOp, CullModeFlags, DescriptorSetLayout
 use log::info;
 use sparkles::range_event_start;
 use crate::render_pass::RenderPassWrapper;
+use crate::shaders::layout::MemberMeta;
 use crate::wrappers::device::VkDeviceRef;
 
 pub struct VulkanPipeline {
@@ -19,29 +20,59 @@ pub struct VulkanPipeline {
     pipeline_cache: PipelineCache,
     descriptor_set_layout: DescriptorSetLayout,
 }
+#[derive(Debug, Clone)]
+pub struct VertexInputDesc {
+    attrib_desc: Vec<VertexInputAttributeDescription>,
+    binding_desc: Vec<VertexInputBindingDescription>,
+}
+impl VertexInputDesc {
+    pub fn new(members_meta: &'static [MemberMeta], size: usize) -> Self {
+
+        let binding_desc = vec![VertexInputBindingDescription::default()
+                .binding(0)
+                .input_rate(vk::VertexInputRate::INSTANCE)
+                .stride(size as u32)];
+
+        let attrib_desc = members_meta.iter().enumerate().map(|(i, member)| {
+            VertexInputAttributeDescription::default()
+                .binding(0)
+                .format(member.ty.format())
+                .offset(member.range.start as u32)
+                .location(i as u32)
+        }).collect::<Vec<_>>();
+        Self {
+            attrib_desc,
+            binding_desc,
+        }
+    }
+
+    pub fn get_input_state_create_info(&self) -> PipelineVertexInputStateCreateInfo {
+        PipelineVertexInputStateCreateInfo::default()
+            .vertex_attribute_descriptions(&self.attrib_desc)
+            .vertex_binding_descriptions(&self.binding_desc)
+    }
+}
+
+#[derive(Debug, Copy, Clone)]
+pub enum VertexAssembly {
+    TriangleStrip,
+    TriangleList,
+}
+
+pub struct VulkanPipelineDesc {
+    pub vertex_assembly: VertexAssembly,
+    pub attributes: VertexInputDesc,
+    pub vert_shader: Vec<u8>,
+    pub frag_shader: Vec<u8>,
+}
 
 impl VulkanPipeline {
-    pub fn new(device: VkDeviceRef, render_pass: &RenderPassWrapper,
-               mut pipeline_desc: PipelineDescWrapper) -> VulkanPipeline {
+    pub fn new(device: VkDeviceRef, render_pass: &RenderPassWrapper, pipeline_desc: VulkanPipelineDesc) -> VulkanPipeline {
         let g = range_event_start!("Create pipeline");
 
         // 1. Create layout
-        let uniform_bindings_desc = pipeline_desc.uniform_bindings;
-
-        let bindings_desc = uniform_bindings_desc.into_iter().map(|(binding, binding_type)| {
-            let descriptor_type = match binding_type {
-                UniformBindingType::UniformBuffer => DescriptorType::UNIFORM_BUFFER,
-                UniformBindingType::CombinedImageSampler => DescriptorType::COMBINED_IMAGE_SAMPLER,
-            };
-            DescriptorSetLayoutBinding::default()
-                .binding(binding)
-                .descriptor_count(1)
-                .descriptor_type(descriptor_type)
-                .stage_flags(ShaderStageFlags::FRAGMENT | ShaderStageFlags::VERTEX)
-        }).collect::<Vec<_>>();
-        info!("Descriptor set layout bindings: {:?}", bindings_desc);
         let descriptor_set_layout_info =
-            vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings_desc);
+            vk::DescriptorSetLayoutCreateInfo::default();
 
         let descriptor_set_layout = unsafe {
             device
@@ -55,13 +86,13 @@ impl VulkanPipeline {
         let pipeline_layout = unsafe { device.create_pipeline_layout(&pipeline_layout_info, None).unwrap() };
 
         // shaders
-        let vert_code = pipeline_desc.vertex_shader;
+        let vert_code = pipeline_desc.vert_shader;
         let vert_code: Vec<u32> = vert_code.chunks(4).map(|bytes| u32::from_le_bytes(bytes.try_into().unwrap())).collect();
         let vertex_module = unsafe { device.create_shader_module(
             &ShaderModuleCreateInfo::default().code(&vert_code), None)
         }.unwrap();
 
-        let frag_code = pipeline_desc.fragment_shader;
+        let frag_code = pipeline_desc.frag_shader;
         let frag_code: Vec<u32> = frag_code.chunks(4).map(|bytes| u32::from_le_bytes(bytes.try_into().unwrap())).collect();
         let frag_module = unsafe { device.create_shader_module(
             &ShaderModuleCreateInfo::default().code(&frag_code), None)

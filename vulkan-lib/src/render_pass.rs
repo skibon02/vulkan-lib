@@ -3,6 +3,7 @@ use ash::{vk};
 use ash::vk::{AccessFlags, AttachmentLoadOp, Extent2D, Format, Framebuffer, ImageAspectFlags, ImageTiling, ImageUsageFlags, ImageView, PipelineBindPoint, PipelineStageFlags, RenderPass, SampleCountFlags};
 use sparkles::range_event_start;
 use crate::wrappers::device::VkDeviceRef;
+use crate::wrappers::image::imageview_info_for_image;
 
 // this one depends on swapchain
 pub struct RenderPassResources {

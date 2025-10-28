@@ -17,7 +17,8 @@ mod swapchain_wrapper;
 mod render_pass;
 mod pipeline;
 mod descriptor_sets;
-mod util;
+pub mod util;
+pub mod shaders;
 
 pub struct VulkanRenderer {
     debug_report: VkDebugReport,
@@ -179,7 +180,14 @@ impl VulkanRenderer {
         }.unwrap();
         
         Ok(Self {
-            
+            device,
+            debug_report,
+            surface,
+            physical_device,
+            queue,
+            command_pool,
+            swapchain_wrapper,
+            render_pass,
         })
     }
 
@@ -204,11 +212,8 @@ impl VulkanRenderer {
 
 impl Drop for VulkanRenderer {
     fn drop(&mut self) {
+        // Called before everything is dropped
         info!("vulkan: drop");
         self.wait_idle();
-        unsafe {
-            self.render_pass_resources
-                .destroy(&mut self.resource_manager);
-        }
     }
 }

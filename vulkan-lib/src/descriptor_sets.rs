@@ -58,9 +58,7 @@ impl DescriptorSetPool {
     }
 
 
-    pub fn allocate_descriptor_sets<'a>(&mut self, descriptor_set_layout: DescriptorSetLayout,
-                                        buffer_bindings: impl Iterator<Item=(u32, BufferResource)>,
-                                        image_bindings: impl Iterator<Item=(u32, &'a UniformImage)>) -> DescriptorSet {
+    pub fn allocate_descriptor_sets<'a>(&mut self, descriptor_set_layout: DescriptorSetLayout) -> DescriptorSet {
 
         let set_layouts = [descriptor_set_layout];
         let alloc_info = DescriptorSetAllocateInfo::default()
@@ -69,60 +67,52 @@ impl DescriptorSetPool {
         let descriptor_set = unsafe { self.device.allocate_descriptor_sets(&alloc_info).unwrap()[0] };
         
 
-        let buffer_bindings: Vec<_> = buffer_bindings.collect();
-        let image_bindings: Vec<_> = image_bindings.collect();
-        
         self.allocated_sets += 1;
-        self.allocated_uniform_buffers += buffer_bindings.len() as u32;
-        self.allocated_image_samplers += image_bindings.len() as u32;
+        // self.allocated_uniform_buffers += buffer_bindings.len() as u32;
+        // self.allocated_image_samplers += image_bindings.len() as u32;
 
-        // if self.allocated_sets > self.capacity_sets ||
-        //     self.allocated_uniform_buffers > self.capacity_uniform_buffers ||
-        //     self.allocated_image_samplers > self.capacity_image_samplers {
-        //     panic!("Descriptor set pool exceeded capacity");
-        // }
-        // Update descriptor set
-        let buffer_infos: Vec<_> = buffer_bindings.iter().map(|(_, buffer)| {
-            [
-                DescriptorBufferInfo::default()
-                    .offset(0)
-                    .buffer(buffer.buffer)
-                    .range(WHOLE_SIZE)
-            ]
-        }).collect();
-        let image_infos: Vec<_> = image_bindings.iter().map(|(binding, image_sampler)| {
-            let image = image_sampler.image_view;
-            let sampler = image_sampler.sampler;
-
-            [vk::DescriptorImageInfo::default()
-                .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-                .image_view(image)
-                .sampler(sampler)
-            ]
-        }).collect();
+        // // Update descriptor set
+        // let buffer_infos: Vec<_> = buffer_bindings.iter().map(|(_, buffer)| {
+        //     [
+        //         DescriptorBufferInfo::default()
+        //             .offset(0)
+        //             .buffer(buffer.buffer)
+        //             .range(WHOLE_SIZE)
+        //     ]
+        // }).collect();
+        // let image_infos: Vec<_> = image_bindings.iter().map(|(binding, image_sampler)| {
+        //     let image = image_sampler.image_view;
+        //     let sampler = image_sampler.sampler;
+        // 
+        //     [vk::DescriptorImageInfo::default()
+        //         .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+        //         .image_view(image)
+        //         .sampler(sampler)
+        //     ]
+        // }).collect();
 
         // let mut image_info_i = 0;
-        let descriptor_writes: Vec<_> = buffer_bindings.iter().enumerate().map(|(i, (binding, _))| {
-            WriteDescriptorSet::default()
-                .descriptor_type(DescriptorType::UNIFORM_BUFFER)
-                .descriptor_count(1)
-                .dst_set(descriptor_set)
-                .dst_binding(*binding)
-                .dst_array_element(0)
-                .buffer_info(&buffer_infos[i])
-        }).chain(image_bindings.iter().enumerate().map(|(i, (binding, _))| {
-            WriteDescriptorSet::default()
-                .descriptor_type(DescriptorType::COMBINED_IMAGE_SAMPLER)
-                .descriptor_count(1)
-                .dst_set(descriptor_set)
-                .dst_binding(*binding)
-                .dst_array_element(0)
-                .image_info(&image_infos[i])
-        })).collect();
+        // let descriptor_writes: Vec<_> = buffer_bindings.iter().enumerate().map(|(i, (binding, _))| {
+        //     WriteDescriptorSet::default()
+        //         .descriptor_type(DescriptorType::UNIFORM_BUFFER)
+        //         .descriptor_count(1)
+        //         .dst_set(descriptor_set)
+        //         .dst_binding(*binding)
+        //         .dst_array_element(0)
+        //         .buffer_info(&buffer_infos[i])
+        // }).chain(image_bindings.iter().enumerate().map(|(i, (binding, _))| {
+        //     WriteDescriptorSet::default()
+        //         .descriptor_type(DescriptorType::COMBINED_IMAGE_SAMPLER)
+        //         .descriptor_count(1)
+        //         .dst_set(descriptor_set)
+        //         .dst_binding(*binding)
+        //         .dst_array_element(0)
+        //         .image_info(&image_infos[i])
+        // })).collect();
         
         // info!("Descriptor writes: {:?}", descriptor_writes);
 
-        unsafe { self.device.update_descriptor_sets(&descriptor_writes, &[]) }
+        // unsafe { self.device.update_descriptor_sets(&[], &[]) }
 
         descriptor_set
     }
@@ -150,13 +140,11 @@ pub struct ObjectDescriptorSet {
 
 impl ObjectDescriptorSet {
     pub fn new<'a>(device: VkDeviceRef, descriptor_set_pool: &mut DescriptorSetPool,
-                   descriptor_set_layout: DescriptorSetLayout,
-                   buffer_bindings: impl Iterator<Item=(u32, BufferResource)>,
-                   image_bindings: impl Iterator<Item=(u32, &'a UniformImage)>) -> ObjectDescriptorSet {
+                   descriptor_set_layout: DescriptorSetLayout) -> ObjectDescriptorSet {
         let g = range_event_start!("[Vulkan] Create descriptor sets");
 
         // Ask pool to allocate descriptor set and perform writes
-        let descriptor_set = descriptor_set_pool.allocate_descriptor_sets(descriptor_set_layout, buffer_bindings, image_bindings);
+        let descriptor_set = descriptor_set_pool.allocate_descriptor_sets(descriptor_set_layout);
         
         Self {
             device,
