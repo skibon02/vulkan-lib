@@ -10,7 +10,7 @@ use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard;
 use winit::keyboard::NamedKey;
 use winit::window::{Fullscreen, Window};
-use vulkan_lib::VulkanRenderer;
+use vulkan_lib::{BufferUsageFlags, VulkanRenderer};
 use crate::render;
 use crate::render::RenderMessage;
 
@@ -39,7 +39,12 @@ impl App {
         let raw_display_handle = window.raw_display_handle().unwrap();
         let inner_size = window.inner_size();
 
-        let vulkan_renderer = VulkanRenderer::new_for_window(raw_window_handle, raw_display_handle, (inner_size.width, inner_size.height)).unwrap();
+        let mut vulkan_renderer = VulkanRenderer::new_for_window(raw_window_handle, raw_display_handle, (inner_size.width, inner_size.height)).unwrap();
+        vulkan_renderer.test_buffer_sizes(BufferUsageFlags::empty());
+        vulkan_renderer.test_buffer_sizes(BufferUsageFlags::TRANSFER_DST);
+        vulkan_renderer.test_buffer_sizes(BufferUsageFlags::TRANSFER_SRC);
+        vulkan_renderer.test_buffer_sizes(BufferUsageFlags::VERTEX_BUFFER);
+        vulkan_renderer.test_buffer_sizes(BufferUsageFlags::UNIFORM_BUFFER);
         let (render_task, render_tx, render_ready) = render::RenderTask::new(vulkan_renderer);
         let render_jh = render_task.spawn();
 
