@@ -12,3 +12,7 @@ sparkles = {version = "0.2.0", git = "https://github.com/skibon02/sparkles.git",
 log = "0.4.28"
 raw-window-handle = { version = "0.6.2", features = ["std", "alloc"] }
 image = "0.25.8"
+
+[features]
+default = []
+validation = []

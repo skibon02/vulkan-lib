@@ -1,6 +1,8 @@
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc};
+use std::thread::JoinHandle;
 use std::time::Instant;
-use log::{info, warn};
+use log::{error, info, warn};
 use raw_window_handle::{HasRawDisplayHandle, HasRawWindowHandle};
 use sparkles::{instant_event, range_event_start};
 use winit::event::{ElementState, WindowEvent};
@@ -9,14 +11,21 @@ use winit::keyboard;
 use winit::keyboard::NamedKey;
 use winit::window::{Fullscreen, Window};
 use vulkan_lib::VulkanRenderer;
+use crate::render;
+use crate::render::RenderMessage;
 
 pub struct App {
     app_finished: bool,
     // do not render while in collapsed state
     is_collapsed: bool,
-    vulkan_renderer: VulkanRenderer,
+    start_time: Instant,
+
     window: Window,
 
+    // Rendering thread
+    render_tx: mpsc::Sender<RenderMessage>,
+    render_thread: Option<JoinHandle<()>>,
+    render_ready: Arc<AtomicBool>,
 
     // some stats
     frame_cnt: usize,
@@ -29,13 +38,21 @@ impl App {
         let raw_window_handle = window.raw_window_handle().unwrap();
         let raw_display_handle = window.raw_display_handle().unwrap();
         let inner_size = window.inner_size();
+
         let vulkan_renderer = VulkanRenderer::new_for_window(raw_window_handle, raw_display_handle, (inner_size.width, inner_size.height)).unwrap();
+        let (render_task, render_tx, render_ready) = render::RenderTask::new(vulkan_renderer);
+        let render_jh = render_task.spawn();
 
         Self {
             is_collapsed: false,
             app_finished: false,
-            vulkan_renderer,
+            start_time: Instant::now(),
+
             window,
+
+            render_tx,
+            render_ready,
+            render_thread: Some(render_jh),
 
             frame_cnt: 0,
             last_sec: Instant::now(),
@@ -90,10 +107,19 @@ impl App {
                 }
             }
 
-            WindowEvent::RedrawRequested => {
+            WindowEvent::RedrawRequested => 'handling: {
                 let g = range_event_start!("[APP] Redraw requested");
+                let g = range_event_start!("[APP] window.request_redraw call");
+                self.window.request_redraw();
+                drop(g);
                 if !self.app_finished && !self.is_collapsed {
-                    self.vulkan_renderer.render();
+                    if !self.render_ready.swap(false, Ordering::Acquire) {
+                        break 'handling;
+                    }
+
+                    let _ = self.render_tx.send(RenderMessage::Redraw {
+                        bg_color: [0.6, 0.2, 0.8],
+                    });
 
                     // handle fps
                     self.frame_cnt += 1;
@@ -104,9 +130,6 @@ impl App {
                         self.frame_cnt = 0;
                         self.last_sec = Instant::now();
                     }
-                    
-                    // schedule another redraw requested call
-                    self.window.request_redraw();
                 }
             }
             WindowEvent::Resized(size) => {
@@ -123,7 +146,11 @@ impl App {
                     if self.is_collapsed {
                         info!("Continue rendering...");
                     }
-                    self.vulkan_renderer.recreate_resize((size.width, size.height));
+
+                    let _ = self.render_tx.send(RenderMessage::Resize {
+                        width: size.width,
+                        height: size.height,
+                    });
                     self.is_collapsed = false;
                 }
             }
@@ -133,5 +160,21 @@ impl App {
         }
 
         Ok(())
+    }
+}
+
+impl Drop for App {
+    fn drop(&mut self) {
+        info!("AppState dropping, sending exit message to render thread");
+        let _ = self.render_tx.send(RenderMessage::Exit);
+
+        if let Some(thread) = self.render_thread.take() {
+            info!("Waiting for render thread to finish...");
+            if let Err(e) = thread.join() {
+                error!("Error joining render thread: {:?}", e);
+            } else {
+                info!("Render thread finished successfully");
+            }
+        }
     }
 }

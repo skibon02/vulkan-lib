@@ -17,4 +17,4 @@ winit = "0.30.12"
 vulkan-lib = {path = "../vulkan-lib"}
 
 [features]
-default = []
+default = ["vulkan-lib/validation"]

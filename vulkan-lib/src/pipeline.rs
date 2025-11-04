@@ -1,15 +1,7 @@
 use std::ffi::CStr;
 use ash::vk;
-use ash::vk::{ColorComponentFlags, CompareOp, CullModeFlags, DescriptorSetLayout, DescriptorSetLayoutBinding,
-              DescriptorType, DynamicState, Format, GraphicsPipelineCreateInfo, Pipeline, PipelineCache,
-              PipelineCacheCreateInfo, PipelineColorBlendAttachmentState, PipelineColorBlendStateCreateInfo,
-              PipelineDepthStencilStateCreateInfo, PipelineDynamicStateCreateInfo, PipelineInputAssemblyStateCreateInfo,
-              PipelineLayout, PipelineLayoutCreateInfo, PipelineMultisampleStateCreateInfo, PipelineRasterizationStateCreateInfo,
-              PipelineShaderStageCreateInfo, PipelineVertexInputStateCreateInfo, PipelineViewportStateCreateInfo, PrimitiveTopology,
-              SampleCountFlags, ShaderModuleCreateInfo, ShaderStageFlags, VertexInputAttributeDescription, VertexInputBindingDescription, FALSE};
-use log::info;
+use ash::vk::{ColorComponentFlags, CompareOp, CullModeFlags, DescriptorSetLayout, DescriptorSetLayoutBinding, DescriptorType, DynamicState, Format, GraphicsPipelineCreateInfo, Pipeline, PipelineCache, PipelineCacheCreateInfo, PipelineColorBlendAttachmentState, PipelineColorBlendStateCreateInfo, PipelineDepthStencilStateCreateInfo, PipelineDynamicStateCreateInfo, PipelineInputAssemblyStateCreateInfo, PipelineLayout, PipelineLayoutCreateInfo, PipelineMultisampleStateCreateInfo, PipelineRasterizationStateCreateInfo, PipelineShaderStageCreateInfo, PipelineVertexInputStateCreateInfo, PipelineViewportStateCreateInfo, PrimitiveTopology, RenderPass, SampleCountFlags, ShaderModuleCreateInfo, ShaderStageFlags, VertexInputAttributeDescription, VertexInputBindingDescription, FALSE};
 use sparkles::range_event_start;
-use crate::render_pass::RenderPassWrapper;
 use crate::shaders::layout::MemberMeta;
 use crate::wrappers::device::VkDeviceRef;
 
@@ -67,7 +59,7 @@ pub struct VulkanPipelineDesc {
 }
 
 impl VulkanPipeline {
-    pub fn new(device: VkDeviceRef, render_pass: &RenderPassWrapper, pipeline_desc: VulkanPipelineDesc) -> VulkanPipeline {
+    pub fn new(device: VkDeviceRef, render_pass: RenderPass, pipeline_desc: VulkanPipelineDesc) -> VulkanPipeline {
         let g = range_event_start!("Create pipeline");
 
         // 1. Create layout
@@ -109,8 +101,9 @@ impl VulkanPipeline {
             .name(main_name);
 
         // pipeline parts
+        let msaa_samples = SampleCountFlags::TYPE_1; // no MSAA by default
         let multisample_state = PipelineMultisampleStateCreateInfo::default()
-            .rasterization_samples(render_pass.get_msaa_samples().unwrap_or(SampleCountFlags::TYPE_1));
+            .rasterization_samples(msaa_samples);
         let dynamic_state = PipelineDynamicStateCreateInfo::default()
             .dynamic_states(&[DynamicState::VIEWPORT, DynamicState::SCISSOR]);
 
@@ -149,7 +142,7 @@ impl VulkanPipeline {
         let stages = [vert_stage, frag_stage];
         let pipeline_create_info = GraphicsPipelineCreateInfo::default()
             .layout(pipeline_layout)
-            .render_pass(*render_pass.get_render_pass())
+            .render_pass(render_pass)
             .dynamic_state(&dynamic_state)
             .multisample_state(&multisample_state)
 

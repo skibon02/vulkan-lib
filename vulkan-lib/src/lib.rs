@@ -1,10 +1,10 @@
 use std::ffi::{c_char, CString};
+use anyhow::Context;
 use ash::vk;
 use ash::vk::{make_api_version, ApplicationInfo, CommandPool, Extent2D, PhysicalDevice, Queue};
 use log::{debug, info, warn};
 use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
 use sparkles::range_event_start;
-use crate::render_pass::RenderPassWrapper;
 use crate::swapchain_wrapper::SwapchainWrapper;
 use crate::wrappers::capabilities_checker::CapabilitiesChecker;
 use crate::wrappers::debug_report::VkDebugReport;
@@ -14,7 +14,6 @@ use crate::wrappers::surface::{VkSurface, VkSurfaceRef};
 pub mod instance;
 mod wrappers;
 mod swapchain_wrapper;
-mod render_pass;
 mod pipeline;
 mod descriptor_sets;
 pub mod util;
@@ -29,11 +28,9 @@ pub struct VulkanRenderer {
     command_pool: CommandPool,
 
     swapchain_wrapper: SwapchainWrapper,
+    acq_semaphore: vk::Semaphore,
 
     // extensions
-
-    // Rendering stuff
-    render_pass: RenderPassWrapper,
 }
 impl VulkanRenderer {
     pub fn new_for_window(window_handle: RawWindowHandle, display_handle: RawDisplayHandle, window_size: (u32, u32)) -> anyhow::Result<Self> {
@@ -55,7 +52,7 @@ impl VulkanRenderer {
         //define desired layers
         // 1. Khronos validation layers (optional)
         let mut instance_layers = vec![];
-        if cfg!(feature = "validation_layers") {
+        if cfg!(feature = "validation") {
             instance_layers.push(CString::new("VK_LAYER_KHRONOS_validation")?);
         }
         let mut instance_layers_refs: Vec<*const c_char> =
@@ -168,16 +165,14 @@ impl VulkanRenderer {
             None,
         )?;
 
-        let render_pass = RenderPassWrapper::new(
-            device.clone(),
-            swapchain_wrapper.get_surface_format(),
-            None,
-        );
-
         let command_pool = unsafe { device.create_command_pool(&vk::CommandPoolCreateInfo::default()
             .queue_family_index(queue_family_index)
             .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER), None)
         }.unwrap();
+
+        let acq_semaphore = unsafe {
+            device.create_semaphore(&vk::SemaphoreCreateInfo::default(), None).unwrap()
+        };
         
         Ok(Self {
             device,
@@ -187,11 +182,43 @@ impl VulkanRenderer {
             queue,
             command_pool,
             swapchain_wrapper,
-            render_pass,
+            acq_semaphore,
         })
     }
 
     pub fn recreate_resize(&mut self, new_extent: (u32, u32)) {
+        let g = range_event_start!("[Vulkan] Recreate swapchain");
+        let new_extent = Extent2D {
+            width: new_extent.0,
+            height: new_extent.1,
+        };
+        // Submit all commands and wait for idle
+        self.wait_idle();
+
+        // 1. Destroy swapchain dependent resources
+        // unsafe {
+        //     self.render_pass_resources
+        //         .destroy(&mut self.resource_manager);
+        // }
+
+        // 2. Recreate swapchain
+        let old_format = self.swapchain_wrapper.get_surface_format();
+        unsafe {
+            self.swapchain_wrapper
+                .recreate(self.physical_device, new_extent, self.surface.clone())
+                .unwrap()
+        };
+        let new_format = self.swapchain_wrapper.get_surface_format();
+        if new_format != old_format {
+            unimplemented!("Swapchain returned the wrong format");
+        }
+
+        // // 3. Recreate swapchain_dependent resources
+        // self.render_pass_resources = self.render_pass.create_render_pass_resources(
+        //     self.swapchain_wrapper.get_image_views(),
+        //     self.swapchain_wrapper.get_extent(),
+        //     &mut self.resource_manager,
+        // );
 
     }
 
@@ -205,7 +232,33 @@ impl VulkanRenderer {
     }
     
     pub fn render(&mut self) -> anyhow::Result<()> {
-        
+        let (image, is_suboptimal) = unsafe {
+            self.swapchain_wrapper.swapchain_loader
+                .acquire_next_image(
+                    self.swapchain_wrapper.get_swapchain(),
+                    u64::MAX,
+                    self.acq_semaphore,
+                    vk::Fence::null(),
+                )
+        }.context("acquire next image")?;
+
+        if is_suboptimal {
+            warn!("Swapchain is suboptimal!");
+        }
+
+
+        let is_suboptimal = unsafe {
+            self.swapchain_wrapper.swapchain_loader
+                .queue_present(self.queue, &vk::PresentInfoKHR::default()
+                    .wait_semaphores(&[self.acq_semaphore])
+                    .swapchains(&[self.swapchain_wrapper.get_swapchain()])
+                    .image_indices(&[image]))
+        }.context("queue preset")?;
+
+        if is_suboptimal {
+            warn!("Swapchain is suboptimal on present!");
+        }
+
         Ok(())
     }
 }
@@ -215,5 +268,10 @@ impl Drop for VulkanRenderer {
         // Called before everything is dropped
         info!("vulkan: drop");
         self.wait_idle();
+
+        unsafe {
+            self.device.destroy_semaphore(self.acq_semaphore, None);
+            self.device.destroy_command_pool(self.command_pool, None);
+        }
     }
 }

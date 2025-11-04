@@ -8,6 +8,7 @@ use winit::window::{WindowAttributes, WindowId};
 use crate::app::App;
 
 mod app;
+pub mod render;
 
 fn sparkles_init() -> FinalizeGuard{
     sparkles::init(SparklesConfig::default()
