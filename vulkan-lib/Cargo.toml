@@ -13,6 +13,7 @@ log = "0.4.28"
 raw-window-handle = { version = "0.6.2", features = ["std", "alloc"] }
 image = "0.25.8"
 slotmap = "1.0.7"
+parking_lot = "0.12.5"
 
 [features]
 default = []

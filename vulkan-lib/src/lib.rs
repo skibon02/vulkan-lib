@@ -7,7 +7,7 @@ use ash::vk::{make_api_version, ApplicationInfo, Buffer, BufferCreateFlags, Buff
 use log::{debug, info, warn};
 use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
 use sparkles::range_event_start;
-use crate::resources::{BufferResource, ResourceStorage};
+use runtime::resources::{BufferResource, ResourceStorage};
 use crate::swapchain_wrapper::SwapchainWrapper;
 use crate::wrappers::capabilities_checker::CapabilitiesChecker;
 use crate::wrappers::debug_report::VkDebugReport;
@@ -22,7 +22,7 @@ mod pipeline;
 mod descriptor_sets;
 pub mod util;
 pub mod shaders;
-pub mod resources;
+pub mod runtime;
 
 pub struct VulkanRenderer {
     debug_report: VkDebugReport,

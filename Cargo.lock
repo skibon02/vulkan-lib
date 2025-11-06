@@ -2461,6 +2461,7 @@ dependencies = [
  "ash-window",
  "image",
  "log",
+ "parking_lot",
  "raw-window-handle",
  "slotmap",
  "sparkles",
