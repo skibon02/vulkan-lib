@@ -1,24 +1,16 @@
+use std::mem::ManuallyDrop;
 use std::ops::{Deref, DerefMut, Range};
 use std::slice::from_raw_parts_mut;
 use ash::vk::{Buffer, DeviceMemory, MemoryMapFlags};
 use slotmap::{DefaultKey, SlotMap};
 use crate::runtime::{OptionSeqNumShared, SharedState};
-use crate::wrappers::device::VkDeviceRef;
 
 pub struct BufferResource {
     shared: SharedState,
 
     state_key: DefaultKey,
-    memory: DeviceMemory,
     size: u64,
-}
-
-#[derive(Copy, Clone)]
-pub struct BufferResourceHandle<'a> {
-    state_key: DefaultKey,
-    memory: DeviceMemory,
-    size: u64,
-    host_used_in: Option<&'a OptionSeqNumShared>
+    dropped: bool,
 }
 
 impl BufferResource {
@@ -26,28 +18,35 @@ impl BufferResource {
         Self {
             shared,
             state_key,
-            memory,
-            size
+            size,
+            dropped: false,
         }
     }
-    pub fn handle(&self) -> BufferResourceHandle {
+    pub fn handle_static(&self) -> BufferResourceHandle<'static> {
         BufferResourceHandle {
             state_key: self.state_key,
-            memory: self.memory,
             size: self.size,
             host_used_in: None,
         }
+    }
+
+    fn set_dropped(&mut self) {
+        self.dropped = true
     }
 }
 
 impl Drop for BufferResource {
     fn drop(&mut self) {
-        self.shared.schedule_destroy_buffer(self.handle())
+        if !self.dropped {
+            self.shared.schedule_destroy_buffer(self.handle_static().into())
+        }
+        self.dropped = true
     }
 }
 
 pub struct MappableBufferResource{
-    inner: BufferResource,
+    inner:  BufferResource,
+    memory: DeviceMemory,
     used_in: OptionSeqNumShared,
 }
 
@@ -66,10 +65,11 @@ impl DerefMut for MappableBufferResource {
 }
 
 impl MappableBufferResource {
-    pub(crate) fn new(resource: BufferResource) -> Self {
+    pub(crate) fn new(resource: BufferResource, memory: DeviceMemory) -> Self {
         Self {
             inner: resource,
-            used_in: OptionSeqNumShared::new()
+            memory,
+            used_in: OptionSeqNumShared::new(),
         }
     }
 
@@ -88,13 +88,13 @@ impl MappableBufferResource {
 
         let device = self.inner.shared.device.clone();
         let size = range.end - range.start;
-        let ptr = unsafe { device.map_memory(self.inner.memory, range.start, size, MemoryMapFlags::empty()).unwrap() } as *mut u8;
+        let ptr = unsafe { device.map_memory(self.memory, range.start, size, MemoryMapFlags::empty()).unwrap() } as *mut u8;
         let slice = unsafe { from_raw_parts_mut(ptr, size as usize) };
 
         f(slice);
 
         unsafe {
-            device.unmap_memory(self.inner.memory);
+            device.unmap_memory(self.memory);
         }
         self.used_in.store(None);
     }
@@ -106,14 +106,55 @@ impl MappableBufferResource {
             slice.copy_from_slice(data);
         });
     }
+
+    pub fn handle(&self) -> BufferResourceHandle {
+        BufferResourceHandle {
+            state_key: self.state_key,
+            size: self.size,
+            host_used_in: Some(&self.used_in),
+        }
+    }
 }
 
-pub struct BufferInner {
-    buffer: Buffer,
-    used_in: Vec<usize>,
+impl Drop for MappableBufferResource {
+    fn drop(&mut self) {
+        self.shared.schedule_destroy_buffer(self.handle().into());
+        self.inner.set_dropped();
+    }
 }
 
-pub struct ResourceStorage {
+
+#[derive(Copy, Clone)]
+pub struct BufferResourceHandle<'a> {
+    pub(crate) state_key: DefaultKey,
+    pub(crate) size: u64,
+    pub(crate) host_used_in: Option<&'a OptionSeqNumShared>
+}
+
+impl From<BufferResourceHandle<'_>> for BufferResourceDestroyHandle {
+    fn from(handle: BufferResourceHandle) -> Self {
+        BufferResourceDestroyHandle {
+            state_key: handle.state_key,
+            size: handle.size,
+            host_used_in: handle.host_used_in.and_then(|v| v.load())
+        }
+    }
+}
+
+pub struct BufferResourceDestroyHandle {
+    state_key: DefaultKey,
+    size: u64,
+    host_used_in: Option<usize>
+}
+
+
+pub(crate) struct BufferInner {
+    pub buffer: Buffer,
+    pub used_in: Vec<usize>,
+    pub memory: DeviceMemory,
+}
+
+pub(crate) struct ResourceStorage {
     buffers: SlotMap<DefaultKey, BufferInner>,
 }
 impl ResourceStorage {
@@ -123,6 +164,9 @@ impl ResourceStorage {
         }
     }
 
+    pub fn add_buffer(&mut self, buffer: BufferInner) -> DefaultKey {
+        self.buffers.insert(buffer)
+    }
     pub fn buffer(&mut self, key: DefaultKey) -> &mut BufferInner {
         self.buffers.get_mut(key).unwrap()
     }

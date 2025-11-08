@@ -1,9 +1,10 @@
+use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::ffi::{c_char, CString};
 use std::sync::{Arc, Weak};
 use anyhow::Context;
 use ash::vk;
-use ash::vk::{make_api_version, ApplicationInfo, Buffer, BufferCreateFlags, BufferCreateInfo, CommandPool, DeviceMemory, DeviceSize, Extent2D, MemoryRequirements, MemoryType, PhysicalDevice, Queue};
+use ash::vk::{make_api_version, ApplicationInfo, Buffer, BufferCreateFlags, BufferCreateInfo, CommandPool, DeviceMemory, DeviceSize, Extent2D, MemoryAllocateInfo, MemoryHeap, MemoryRequirements, MemoryType, PhysicalDevice, Queue};
 use log::{debug, info, warn};
 use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
 use slotmap::{DefaultKey, Key};
@@ -17,7 +18,7 @@ use crate::wrappers::surface::{VkSurface, VkSurfaceRef};
 pub use vk::BufferUsageFlags;
 use crate::runtime::{LocalState, SharedState};
 use crate::runtime::recording::RecordContext;
-use crate::runtime::resources::MappableBufferResource;
+use crate::runtime::resources::{BufferInner, MappableBufferResource};
 
 pub mod instance;
 mod wrappers;
@@ -33,18 +34,15 @@ pub struct VulkanRenderer {
     surface: VkSurfaceRef,
     physical_device: PhysicalDevice,
     device: VkDeviceRef,
-    queue: Queue,
-    command_pool: CommandPool,
 
     swapchain_wrapper: SwapchainWrapper,
     acq_semaphore: vk::Semaphore,
-    resource_storage: ResourceStorage,
 
     // memory resources
     memory_types: Vec<MemoryType>,
-    buffer_memory_requirements: BTreeMap<(BufferCreateFlags, BufferUsageFlags, usize), MemoryRequirements>,
-    host_memory_type: u32,
-    
+    memory_heaps: Vec<MemoryHeap>,
+    buffer_memory_requirements: BTreeMap<(BufferCreateFlags, BufferUsageFlags), (u64, u32)>,
+
     // runtime state
     runtime_state: LocalState,
 
@@ -186,14 +184,12 @@ impl VulkanRenderer {
 
         let command_pool = unsafe { device.create_command_pool(&vk::CommandPoolCreateInfo::default()
             .queue_family_index(queue_family_index)
-            .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER), None)
+            .flags(vk::CommandPoolCreateFlags::TRANSIENT), None)
         }.unwrap();
 
         let acq_semaphore = unsafe {
             device.create_semaphore(&vk::SemaphoreCreateInfo::default(), None).unwrap()
         };
-
-        let resource_storage = ResourceStorage::new();
 
         let memory_properties = unsafe {
             device
@@ -201,32 +197,25 @@ impl VulkanRenderer {
                 .get_physical_device_memory_properties(physical_device)
         };
 
-        let host_memory_type = memory_properties
-            .memory_types_as_slice()
-            .iter()
-            .position(|memory_type| {
-                memory_type.property_flags.contains(vk::MemoryPropertyFlags::HOST_COHERENT) // host visible and coherent
-            }).expect("Having at least one memory type with HOST_COHERENT is guaranteed by the spec!") as u32;
+        let memory_heaps = memory_properties.memory_heaps_as_slice().to_vec();
 
         let memory_types = memory_properties.memory_types_as_slice().to_vec();
-        
-        let runtime_state = LocalState::new(device.clone(), SharedState::new(device.clone()));
+
+        let resource_storage = ResourceStorage::new();
+        let runtime_state = LocalState::new(device.clone(), command_pool, queue, resource_storage);
 
         Ok(Self {
             device,
             debug_report,
             surface,
             physical_device,
-            queue,
-            command_pool,
             swapchain_wrapper,
             acq_semaphore,
-            resource_storage,
 
-            host_memory_type,
+            memory_heaps,
             memory_types,
             buffer_memory_requirements: BTreeMap::new(),
-            
+
             runtime_state,
         })
     }
@@ -299,70 +288,125 @@ impl VulkanRenderer {
     fn wait_idle(&self) {
         let start = std::time::Instant::now();
         unsafe {
-            self.device.queue_wait_idle(self.queue).unwrap();
+            self.device.queue_wait_idle(self.runtime_state.queue()).unwrap();
         }
         let end = std::time::Instant::now();
         debug!("Waited for idle for {:?}", end - start);
     }
 
-    // fn get_buffer_memory_requirements(&mut self, usage: BufferUsageFlags, flags: BufferCreateFlags, size: usize) -> MemoryRequirements {
-    //     let device_memory_type = self.buffer_memory_requirements
-    //         .entry((usage, flags, size))
-    //         .or_insert_with(|| {
-    //             // create a dummy buffer to get memory requirements
-    //             let buffer_create_info = vk::BufferCreateInfo::default()
-    //                 .size(1)
-    //                 .usage(usage)
-    //                 .sharing_mode(vk::SharingMode::EXCLUSIVE);
-    //
-    //             let buffer = unsafe { self.device.create_buffer(&buffer_create_info, None) }.unwrap();
-    //             let memory_requirements = unsafe { self.device.get_buffer_memory_requirements(buffer) };
-    //             unsafe { self.device.destroy_buffer(buffer, None) };
-    //
-    //             let memory_type = self.memory_types
-    //                 .iter()
-    //                 .enumerate()
-    //                 .max_by_key(|(i, memory_type)| {
-    //                     let mut r = 0;
-    //                     if memory_requirements.memory_type_bits & (1 << i) != 0 {
-    //                         r += 100;
-    //                     }
-    //                     if memory_type.property_flags.contains(vk::MemoryPropertyFlags::DEVICE_LOCAL) {
-    //                         r += 10;
-    //                     }
-    //                     if memory_type.property_flags.contains(vk::MemoryPropertyFlags::HOST_COHERENT) {
-    //                         r += 1;
-    //                     }
-    //                     if memory_type.property_flags.contains(vk::MemoryPropertyFlags::HOST_VISIBLE) {
-    //                         r += 1;
-    //                     }
-    //                     r
-    //                 })
-    //                 .unwrap();
-    //
-    //             let alignment = memory_requirements.alignment;
-    //
-    //             (memory_type.0 as u32, alignment, memory_requirements.size)
-    //         });
-    //
-    //     *device_memory_type
-    // }
+    fn get_buffer_memory_requirements(&mut self, usage: BufferUsageFlags, flags: BufferCreateFlags) -> (u64, u32) {
+        let device_memory_type = self.buffer_memory_requirements
+            .entry((flags, usage))
+            .or_insert_with(|| {
+                // create a dummy buffer to get memory requirements
+                let buffer_create_info = vk::BufferCreateInfo::default()
+                    .size(1)
+                    .usage(usage)
+                    .flags(flags)
+                    .sharing_mode(vk::SharingMode::EXCLUSIVE);
 
-    // pub fn allocate_host_buffer(&self, size: usize, usage: vk::BufferUsageFlags) -> BufferResource {
-    //
-    // }
-    
-    /// Create new buffer in mappable memory
-    pub fn new_host_buffer(&mut self, usage: vk::BufferUsageFlags, size: u64) -> MappableBufferResource {
-        let memory = DeviceMemory::null();
-        let buffer = BufferResource::new(self.runtime_state.shared(), DefaultKey::null(), memory, size);
-        MappableBufferResource::new(buffer)
+                let buffer = unsafe { self.device.create_buffer(&buffer_create_info, None) }.unwrap();
+                let memory_requirements = unsafe { self.device.get_buffer_memory_requirements(buffer) };
+                unsafe { self.device.destroy_buffer(buffer, None) };
+                let alignment = memory_requirements.alignment;
+
+                (alignment, memory_requirements.memory_type_bits)
+            });
+
+        *device_memory_type
     }
-    
+
+    fn best_host_type(&self, memory_type_bits: u32) -> u32 {
+        self.memory_types
+            .iter()
+            .enumerate()
+            .filter(|(i, memory_type)| {
+                memory_type.property_flags.contains(vk::MemoryPropertyFlags::HOST_COHERENT) && (1u32 << i) & memory_type_bits != 0
+            })
+            .next()
+            .expect("Guaranteed to support at least 1 host mappable memory type for buffer").0 as u32
+    }
+
+    fn best_device_type(&self, memory_type_bits: u32) -> u32 {
+        self.memory_types
+            .iter()
+            .enumerate()
+            .filter(|(i, memory_type)| {
+                memory_type.property_flags.contains(vk::MemoryPropertyFlags::DEVICE_LOCAL) && (1u32 << i) & memory_type_bits != 0
+            })
+            .max_by_key(|(_, mem)| {
+                let only_1_flag = mem.property_flags == vk::MemoryPropertyFlags::DEVICE_LOCAL;
+                let heap_size = self.memory_heaps[mem.heap_index as usize].size;
+
+                heap_size + only_1_flag as u64
+            })
+            .expect("Guaranteed to support at least 1 device_local memory type for buffer").0 as u32
+    }
+
+    /// Create new buffer in mappable memory for TRANSFER_SRC usage
+    pub fn new_host_buffer(&mut self, size: u64) -> MappableBufferResource {
+        let flags = BufferCreateFlags::empty();
+        let usage = BufferUsageFlags::TRANSFER_SRC;
+        let (alignment, memory_types) = self.get_buffer_memory_requirements(usage, flags);
+        let host_memory_type = self.best_host_type(memory_types);
+
+        // create buffer
+        let buffer = unsafe {
+            self.device.create_buffer(&BufferCreateInfo::default()
+                .usage(usage)
+                .flags(flags)
+                .size(size), None).unwrap()
+        };
+        let memory_requirements = unsafe { self.device.get_buffer_memory_requirements(buffer) };
+        let allocation_size = memory_requirements.size;
+
+        //allocate memory
+        let memory = unsafe {
+            self.device.allocate_memory(&MemoryAllocateInfo::default()
+                .allocation_size(allocation_size)
+                .memory_type_index(host_memory_type),
+        None).unwrap() };
+
+        let state_key = self.runtime_state.add_buffer(BufferInner {
+            buffer,
+            used_in: vec![],
+            memory,
+        });
+
+        let buffer = BufferResource::new(self.runtime_state.shared(), state_key, memory, size);
+        MappableBufferResource::new(buffer, memory)
+    }
+
     /// Create new buffer in device_local memory
-    pub fn new_device_buffer(&mut self, usage: vk::BufferUsageFlags, size: u64) -> BufferResource {
-        let memory = DeviceMemory::null();
-        let buffer = BufferResource::new(self.runtime_state.shared(), DefaultKey::null(), memory, size);
+    pub fn new_device_buffer(&mut self, usage: BufferUsageFlags, size: u64) -> BufferResource {
+        let flags = BufferCreateFlags::empty();
+        let (alignment, memory_types) = self.get_buffer_memory_requirements(usage, flags);
+        let host_memory_type = self.best_device_type(memory_types);
+
+        // create buffer
+        let buffer = unsafe {
+            self.device.create_buffer(&BufferCreateInfo::default()
+                .usage(usage)
+                .flags(flags)
+                .size(size), None).unwrap()
+        };
+        let memory_requirements = unsafe { self.device.get_buffer_memory_requirements(buffer) };
+        let allocation_size = memory_requirements.size;
+
+        //allocate memory
+        let memory = unsafe {
+            self.device.allocate_memory(&MemoryAllocateInfo::default()
+                .allocation_size(allocation_size)
+                .memory_type_index(host_memory_type),
+                                        None).unwrap() };
+
+        let state_key = self.runtime_state.add_buffer(BufferInner {
+            buffer,
+            used_in: vec![],
+            memory,
+        });
+
+        let buffer = BufferResource::new(self.runtime_state.shared(), state_key, memory, size);
         buffer
     }
     
@@ -388,7 +432,7 @@ impl VulkanRenderer {
 
         let is_suboptimal = unsafe {
             self.swapchain_wrapper.swapchain_loader
-                .queue_present(self.queue, &vk::PresentInfoKHR::default()
+                .queue_present(self.runtime_state.queue(), &vk::PresentInfoKHR::default()
                     .wait_semaphores(&[self.acq_semaphore])
                     .swapchains(&[self.swapchain_wrapper.get_swapchain()])
                     .image_indices(&[image]))
@@ -410,7 +454,6 @@ impl Drop for VulkanRenderer {
 
         unsafe {
             self.device.destroy_semaphore(self.acq_semaphore, None);
-            self.device.destroy_command_pool(self.command_pool, None);
         }
     }
 }

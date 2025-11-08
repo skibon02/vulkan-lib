@@ -1,11 +1,12 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use ash::vk;
-use ash::vk::FenceCreateInfo;
+use ash::vk::{CommandBuffer, CommandBufferAllocateInfo, CommandBufferBeginInfo, CommandBufferLevel, CommandPool, FenceCreateInfo, Queue};
 use log::warn;
 use parking_lot::Mutex;
-use crate::runtime::recording::RecordContext;
-use crate::runtime::resources::BufferResourceHandle;
+use slotmap::DefaultKey;
+use crate::runtime::recording::{DeviceCommand, RecordContext};
+use crate::runtime::resources::{BufferInner, BufferResourceDestroyHandle, BufferResourceHandle, ResourceStorage};
 use crate::wrappers::device::VkDeviceRef;
 
 pub mod resources;
@@ -16,6 +17,7 @@ struct SharedStateInner {
     host_waited_submission: usize,
     active_fences: Vec<(usize, vk::Fence)>,
     free_fences: Vec<vk::Fence>,
+    scheduled_for_destroy_buffers: Vec<BufferResourceDestroyHandle>,
 }
 impl SharedStateInner {
     fn new(device: VkDeviceRef) -> Self {
@@ -24,6 +26,7 @@ impl SharedStateInner {
             active_fences: Vec::new(),
             free_fences: Vec::new(),
             device,
+            scheduled_for_destroy_buffers: Vec::new(),
         }
     }
 }
@@ -88,6 +91,10 @@ impl SharedStateInner {
             }
         }
     }
+
+    pub fn schedule_destroy_buffer(&mut self, handle: BufferResourceDestroyHandle) {
+        self.scheduled_for_destroy_buffers.push(handle);
+    }
 }
 #[derive(Clone)]
 pub struct SharedState {
@@ -126,8 +133,12 @@ impl SharedState {
         }
     }
 
-    fn schedule_destroy_buffer(&self, handle: BufferResourceHandle) {
+    pub fn confirm_all_waited(&self, submission_num: usize) {
+        self.state.lock().confirm_wait_fence(submission_num);
+    }
 
+    fn schedule_destroy_buffer(&self, handle: BufferResourceDestroyHandle) {
+        self.state.lock().schedule_destroy_buffer(handle);
     }
 }
 
@@ -137,20 +148,48 @@ pub struct LocalState {
     shared_state: SharedState,
     free_semaphores: Vec<vk::Semaphore>,
     active_semaphores: Vec<(usize, vk::Semaphore)>,
+    next_submission_num: usize,
+    command_pool: CommandPool,
+    queue: Queue,
+    resource_storage: ResourceStorage,
 }
 
 impl LocalState {
-    pub fn new(device: VkDeviceRef, shared_state: SharedState) -> Self {
+    pub fn new(device: VkDeviceRef, command_pool: CommandPool, queue: Queue, resource_storage: ResourceStorage) -> Self {
+        let shared_state = SharedState::new(device.clone());
         Self {
             device,
             shared_state,
             free_semaphores: Vec::new(),
             active_semaphores: Vec::new(),
+            next_submission_num: 1,
+            command_pool,
+            queue,
+            resource_storage,
         }
     }
      
     pub fn shared(&self) -> SharedState {
         self.shared_state.clone()
+    }
+
+    pub fn wait_idle(&mut self) {
+        unsafe {
+            self.device.queue_wait_idle(self.queue).unwrap();
+        }
+
+        // after wait_idle, all submissions up to next_submission_num-1 are done
+        let last_submitted = self.next_submission_num - 1;
+        if last_submitted > 0 {
+            self.shared_state.confirm_all_waited(last_submitted);
+        }
+    }
+    pub fn add_buffer(&mut self, buffer: BufferInner) -> DefaultKey {
+        self.resource_storage.add_buffer(buffer)
+    }
+
+    pub fn queue(&self) -> Queue {
+        self.queue
     }
 
     fn cleanup_old_semaphores(&mut self) {
@@ -203,9 +242,76 @@ impl LocalState {
         }
     }
 
-    pub fn record_device_commands<F: FnOnce(&mut RecordContext)>(&mut self, mut f: F) {
+    pub fn record_device_commands<F: FnOnce(&mut RecordContext)>(&mut self, f: F) {
         let mut record_context = RecordContext::new();
         f(&mut record_context);
+
+        let submission_num = self.next_submission_num;
+        self.next_submission_num += 1;
+
+        // allocate command buffer
+        let cmd_buffer = unsafe {
+            self.device.allocate_command_buffers(&CommandBufferAllocateInfo::default()
+                .command_pool(self.command_pool)
+                .level(CommandBufferLevel::PRIMARY)
+                .command_buffer_count(1)
+            ).unwrap()[0]
+        };
+
+        // begin recording
+        unsafe {
+            self.device.begin_command_buffer(cmd_buffer, &CommandBufferBeginInfo::default()
+                .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)
+            ).unwrap();
+        }
+
+        // record commands
+        for cmd in record_context.take_commands() {
+            match cmd {
+                DeviceCommand::BufferCopy { src, dst, regions } => {
+                    let src_buffer = {
+                        let src_inner = self.resource_storage.buffer(src.state_key);
+                        src_inner.used_in.push(submission_num);
+                        src_inner.buffer
+                    };
+                    let dst_buffer = {
+                        let dst_inner = self.resource_storage.buffer(dst.state_key);
+                        dst_inner.used_in.push(submission_num);
+                        dst_inner.buffer
+                    };
+
+                    unsafe {
+                        self.device.cmd_copy_buffer(cmd_buffer, src_buffer, dst_buffer, &regions);
+                    }
+                }
+            }
+        }
+
+        // end recording
+        unsafe {
+            self.device.end_command_buffer(cmd_buffer).unwrap();
+        }
+
+        // get fence and semaphore for signaling
+        let fence = self.shared_state.take_free_fence();
+        let signal_semaphore = self.take_free_semaphore();
+
+        // submit
+        unsafe {
+            self.device.queue_submit(self.queue, &[vk::SubmitInfo::default()
+                .command_buffers(&[cmd_buffer])
+                .signal_semaphores(&[signal_semaphore])
+            ], fence).unwrap();
+        }
+
+        // register fence and semaphore
+        self.shared_state.submitted_fence(submission_num, fence);
+        self.submitted_semaphore(submission_num, signal_semaphore);
+
+        // free command buffer after submission (will be actually freed when fence signals)
+        unsafe {
+            self.device.free_command_buffers(self.command_pool, &[cmd_buffer]);
+        }
     }
 }
 
