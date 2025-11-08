@@ -1,11 +1,15 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use ash::vk;
 use ash::vk::FenceCreateInfo;
 use log::warn;
 use parking_lot::Mutex;
+use crate::runtime::recording::RecordContext;
+use crate::runtime::resources::BufferResourceHandle;
 use crate::wrappers::device::VkDeviceRef;
 
 pub mod resources;
+pub mod recording;
 
 struct SharedStateInner {
     device: VkDeviceRef,
@@ -38,7 +42,7 @@ impl SharedStateInner {
         self.free_fences.push(fence);
     }
 
-   pub fn take_fence_to_wait(&mut self, submission_num: usize) -> Option<(usize, vk::Fence)> {
+    pub fn take_fence_to_wait(&mut self, submission_num: usize) -> Option<(usize, vk::Fence)> {
         if self.host_waited_submission >= submission_num {
             return None;
         }
@@ -62,19 +66,18 @@ impl SharedStateInner {
             }
 
             if let Some(i) = best_fence_index {
-                // Нашли! Удаляем его из active_fences и возвращаем
                 let (num, fence) = self.active_fences.swap_remove(i);
                 Some((num, fence))
             } else {
                 warn!("Unexpected situation! Cannot find fence to wait on host for submission {} (host waited for {})",
-              submission_num, self.host_waited_submission);
+                    submission_num, self.host_waited_submission);
                 None
-            }        }
+            }
+        }
     }
     pub fn confirm_wait_fence(&mut self, submission_num: usize) {
         self.host_waited_submission = submission_num;
 
-        // Все фенсы с меньшими submission_num уже точно завершены - вернем их в пул
         let mut i = 0;
         while i < self.active_fences.len() {
             if self.active_fences[i].0 <= submission_num {
@@ -86,6 +89,7 @@ impl SharedStateInner {
         }
     }
 }
+#[derive(Clone)]
 pub struct SharedState {
     device: VkDeviceRef,
     state: Arc<Mutex<SharedStateInner>>,
@@ -121,6 +125,10 @@ impl SharedState {
             self.state.lock().return_free_fence(fence);
         }
     }
+
+    fn schedule_destroy_buffer(&self, handle: BufferResourceHandle) {
+
+    }
 }
 
 
@@ -139,6 +147,10 @@ impl LocalState {
             free_semaphores: Vec::new(),
             active_semaphores: Vec::new(),
         }
+    }
+     
+    pub fn shared(&self) -> SharedState {
+        self.shared_state.clone()
     }
 
     fn cleanup_old_semaphores(&mut self) {
@@ -190,4 +202,36 @@ impl LocalState {
             best_sem
         }
     }
+
+    pub fn record_device_commands<F: FnOnce(&mut RecordContext)>(&mut self, mut f: F) {
+        let mut record_context = RecordContext::new();
+        f(&mut record_context);
+    }
 }
+
+pub struct OptionSeqNumShared(AtomicUsize);
+impl OptionSeqNumShared {
+    pub fn new() -> Self {
+        OptionSeqNumShared(AtomicUsize::new(usize::MAX))
+    }
+
+    pub fn load(&self) -> Option<usize> {
+        let v = self.0.load(Ordering::Relaxed);
+        if v == usize::MAX {
+            None
+        }
+        else {
+            Some(v)
+        }
+    }
+
+    pub fn store(&self, val: Option<usize>) {
+        if let Some(v) = val {
+            self.0.store(v, Ordering::Relaxed);
+        }
+        else {
+            self.0.store(usize::MAX, Ordering::Relaxed);
+        }
+    }
+}
+

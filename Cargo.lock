@@ -2464,6 +2464,7 @@ dependencies = [
  "parking_lot",
  "raw-window-handle",
  "slotmap",
+ "smallvec",
  "sparkles",
  "thiserror 2.0.17",
 ]

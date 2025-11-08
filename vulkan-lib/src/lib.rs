@@ -3,9 +3,10 @@ use std::ffi::{c_char, CString};
 use std::sync::{Arc, Weak};
 use anyhow::Context;
 use ash::vk;
-use ash::vk::{make_api_version, ApplicationInfo, Buffer, BufferCreateFlags, BufferCreateInfo, CommandPool, DeviceSize, Extent2D, MemoryRequirements, MemoryType, PhysicalDevice, Queue};
+use ash::vk::{make_api_version, ApplicationInfo, Buffer, BufferCreateFlags, BufferCreateInfo, CommandPool, DeviceMemory, DeviceSize, Extent2D, MemoryRequirements, MemoryType, PhysicalDevice, Queue};
 use log::{debug, info, warn};
 use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
+use slotmap::{DefaultKey, Key};
 use sparkles::range_event_start;
 use runtime::resources::{BufferResource, ResourceStorage};
 use crate::swapchain_wrapper::SwapchainWrapper;
@@ -14,6 +15,9 @@ use crate::wrappers::debug_report::VkDebugReport;
 use crate::wrappers::device::{VkDevice, VkDeviceRef};
 use crate::wrappers::surface::{VkSurface, VkSurfaceRef};
 pub use vk::BufferUsageFlags;
+use crate::runtime::{LocalState, SharedState};
+use crate::runtime::recording::RecordContext;
+use crate::runtime::resources::MappableBufferResource;
 
 pub mod instance;
 mod wrappers;
@@ -40,6 +44,9 @@ pub struct VulkanRenderer {
     memory_types: Vec<MemoryType>,
     buffer_memory_requirements: BTreeMap<(BufferCreateFlags, BufferUsageFlags, usize), MemoryRequirements>,
     host_memory_type: u32,
+    
+    // runtime state
+    runtime_state: LocalState,
 
     // extensions
 }
@@ -186,7 +193,7 @@ impl VulkanRenderer {
             device.create_semaphore(&vk::SemaphoreCreateInfo::default(), None).unwrap()
         };
 
-        let resource_storage = ResourceStorage::new(device.clone());
+        let resource_storage = ResourceStorage::new();
 
         let memory_properties = unsafe {
             device
@@ -202,6 +209,8 @@ impl VulkanRenderer {
             }).expect("Having at least one memory type with HOST_COHERENT is guaranteed by the spec!") as u32;
 
         let memory_types = memory_properties.memory_types_as_slice().to_vec();
+        
+        let runtime_state = LocalState::new(device.clone(), SharedState::new(device.clone()));
 
         Ok(Self {
             device,
@@ -217,6 +226,8 @@ impl VulkanRenderer {
             host_memory_type,
             memory_types,
             buffer_memory_requirements: BTreeMap::new(),
+            
+            runtime_state,
         })
     }
 
@@ -340,6 +351,24 @@ impl VulkanRenderer {
     // pub fn allocate_host_buffer(&self, size: usize, usage: vk::BufferUsageFlags) -> BufferResource {
     //
     // }
+    
+    /// Create new buffer in mappable memory
+    pub fn new_host_buffer(&mut self, usage: vk::BufferUsageFlags, size: u64) -> MappableBufferResource {
+        let memory = DeviceMemory::null();
+        let buffer = BufferResource::new(self.runtime_state.shared(), DefaultKey::null(), memory, size);
+        MappableBufferResource::new(buffer)
+    }
+    
+    /// Create new buffer in device_local memory
+    pub fn new_device_buffer(&mut self, usage: vk::BufferUsageFlags, size: u64) -> BufferResource {
+        let memory = DeviceMemory::null();
+        let buffer = BufferResource::new(self.runtime_state.shared(), DefaultKey::null(), memory, size);
+        buffer
+    }
+    
+    pub fn device_commands<F: FnOnce(&mut RecordContext)>(&mut self, f: F) {
+        self.runtime_state.record_device_commands(f);
+    }
 
     pub fn render(&mut self) -> anyhow::Result<()> {
         let (image, is_suboptimal) = unsafe {
