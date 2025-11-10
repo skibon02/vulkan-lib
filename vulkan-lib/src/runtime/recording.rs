@@ -13,14 +13,14 @@ impl<'a> RecordContext<'a> {
         }
     }
 
-    pub fn buffer_copy(&'a mut self, src: BufferResourceHandle<'a>, dst: BufferResourceHandle<'a>, regions: SmallVec<[BufferCopy; 1]>) {
+    pub fn buffer_copy<'b>(&'b mut self, src: BufferResourceHandle<'a>, dst: BufferResourceHandle<'a>, regions: SmallVec<[BufferCopy; 1]>) {
         self.commands.push(DeviceCommand::BufferCopy {
             src,
             dst,
             regions
         })
     }
-    pub fn buffer_copy_single(&'a mut self, src: BufferResourceHandle<'a>, dst: BufferResourceHandle<'a>, region: BufferCopy) {
+    pub fn buffer_copy_single<'b>(&'b mut self, src: BufferResourceHandle<'a>, dst: BufferResourceHandle<'a>, region: BufferCopy) {
         let regions = smallvec![region];
         self.commands.push(DeviceCommand::BufferCopy {
             src,

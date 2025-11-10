@@ -1,9 +1,77 @@
-use std::mem::ManuallyDrop;
 use std::ops::{Deref, DerefMut, Range};
 use std::slice::from_raw_parts_mut;
-use ash::vk::{Buffer, DeviceMemory, MemoryMapFlags};
+use std::sync::atomic::{AtomicBool, Ordering};
+use ash::vk::{AccessFlags, Buffer, DeviceMemory, MemoryMapFlags, PipelineStageFlags};
 use slotmap::{DefaultKey, SlotMap};
 use crate::runtime::{OptionSeqNumShared, SharedState};
+
+#[derive(Copy, Clone, Debug)]
+pub struct ResourceUsage {
+    pub submission_num: usize,
+    pub stage_flags: PipelineStageFlags,
+    pub access_flags: AccessFlags,
+    pub is_readonly: bool,
+}
+
+impl ResourceUsage {
+    pub fn new(submission_num: usize, stage_flags: PipelineStageFlags, access_flags: AccessFlags, is_readonly: bool) -> Self {
+        Self {
+            submission_num,
+            stage_flags,
+            access_flags,
+            is_readonly
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub enum ResourceUsages {
+    DeviceUsage (ResourceUsage),
+    None
+}
+
+impl ResourceUsages {
+    pub fn new() -> Self {
+        Self::None
+    }
+
+    pub fn on_host_waited(&mut self, last_waited_num: usize) {
+        if let Self::DeviceUsage(resource_usage) = self && last_waited_num >= resource_usage.submission_num {
+            *self = Self::None;
+        }
+    }
+
+    /// Add new usage, returning previous usage if a sync barrier is needed.
+    /// Returns Some(previous_usage) if we need synchronization, None if no sync needed.
+    pub fn add_usage(&mut self, new_usage: ResourceUsage) -> Option<ResourceUsage> {
+        if let ResourceUsages::DeviceUsage (prev_usage)= self {
+            if prev_usage.is_readonly && new_usage.is_readonly {
+                prev_usage.submission_num = new_usage.submission_num;
+                prev_usage.stage_flags |= new_usage.stage_flags;
+                prev_usage.access_flags |= new_usage.access_flags;
+                return None;
+            }
+        }
+
+        let prev_usage = self.last_usage();
+
+        *self = ResourceUsages::DeviceUsage(new_usage);
+        
+        prev_usage
+    }
+
+    pub fn last_usage(&self) -> Option<ResourceUsage> {
+        if let ResourceUsages::DeviceUsage (last_usage) = self {
+            Some(*last_usage)
+        } else { 
+            None
+        }
+    }
+    
+    pub fn is_none(&self) -> bool {
+        matches!(self, Self::None)
+    }
+}
 
 pub struct BufferResource {
     shared: SharedState,
@@ -26,7 +94,7 @@ impl BufferResource {
         BufferResourceHandle {
             state_key: self.state_key,
             size: self.size,
-            host_used_in: None,
+            host_state: None,
         }
     }
 
@@ -47,21 +115,7 @@ impl Drop for BufferResource {
 pub struct MappableBufferResource{
     inner:  BufferResource,
     memory: DeviceMemory,
-    used_in: OptionSeqNumShared,
-}
-
-impl Deref for MappableBufferResource {
-    type Target = BufferResource;
-
-    fn deref(&self) -> &Self::Target {
-        &self.inner
-    }
-}
-
-impl DerefMut for MappableBufferResource {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.inner
-    }
+    host_state: BufferHostState,
 }
 
 impl MappableBufferResource {
@@ -69,12 +123,12 @@ impl MappableBufferResource {
         Self {
             inner: resource,
             memory,
-            used_in: OptionSeqNumShared::new(),
+            host_state: BufferHostState::default(),
         }
     }
 
     pub fn map_update<F: FnOnce(&mut [u8])>(&mut self, range: Range<u64>, f: F) {
-        if let Some(seq_num) = self.used_in.load() {
+        if let Some(seq_num) = self.host_state.last_used_in.load() {
             self.inner.shared.wait_submission(seq_num);
         }
 
@@ -96,7 +150,8 @@ impl MappableBufferResource {
         unsafe {
             device.unmap_memory(self.memory);
         }
-        self.used_in.store(None);
+        self.host_state.last_used_in.store(None);
+        self.host_state.has_host_writes.store(true, Ordering::Relaxed);
     }
 
     pub fn map_write(&mut self, offset: usize, data: &[u8]) {
@@ -109,16 +164,16 @@ impl MappableBufferResource {
 
     pub fn handle(&self) -> BufferResourceHandle {
         BufferResourceHandle {
-            state_key: self.state_key,
-            size: self.size,
-            host_used_in: Some(&self.used_in),
+            state_key: self.inner.state_key,
+            size: self.inner.size,
+            host_state: Some(&self.host_state),
         }
     }
 }
 
 impl Drop for MappableBufferResource {
     fn drop(&mut self) {
-        self.shared.schedule_destroy_buffer(self.handle().into());
+        self.inner.shared.schedule_destroy_buffer(self.handle().into());
         self.inner.set_dropped();
     }
 }
@@ -128,7 +183,15 @@ impl Drop for MappableBufferResource {
 pub struct BufferResourceHandle<'a> {
     pub(crate) state_key: DefaultKey,
     pub(crate) size: u64,
-    pub(crate) host_used_in: Option<&'a OptionSeqNumShared>
+    pub(crate) host_state: Option<&'a BufferHostState>,
+}
+
+#[derive(Default)]
+pub struct BufferHostState {
+    // Seq number of last submission which uses this buffer
+    // None - no such pending submissions
+    pub last_used_in: OptionSeqNumShared,
+    pub has_host_writes: AtomicBool,
 }
 
 impl From<BufferResourceHandle<'_>> for BufferResourceDestroyHandle {
@@ -136,7 +199,7 @@ impl From<BufferResourceHandle<'_>> for BufferResourceDestroyHandle {
         BufferResourceDestroyHandle {
             state_key: handle.state_key,
             size: handle.size,
-            host_used_in: handle.host_used_in.and_then(|v| v.load())
+            host_used_in: handle.host_state.and_then(|v| v.last_used_in.load())
         }
     }
 }
@@ -150,16 +213,19 @@ pub struct BufferResourceDestroyHandle {
 
 pub(crate) struct BufferInner {
     pub buffer: Buffer,
-    pub used_in: Vec<usize>,
     pub memory: DeviceMemory,
+    pub usages: ResourceUsages,
 }
 
 pub(crate) struct ResourceStorage {
+    device: crate::wrappers::device::VkDeviceRef,
     buffers: SlotMap<DefaultKey, BufferInner>,
 }
+
 impl ResourceStorage {
-    pub fn new() -> Self{
+    pub fn new(device: crate::wrappers::device::VkDeviceRef) -> Self{
         Self {
+            device,
             buffers: SlotMap::new(),
         }
     }
@@ -167,11 +233,32 @@ impl ResourceStorage {
     pub fn add_buffer(&mut self, buffer: BufferInner) -> DefaultKey {
         self.buffers.insert(buffer)
     }
+
     pub fn buffer(&mut self, key: DefaultKey) -> &mut BufferInner {
         self.buffers.get_mut(key).unwrap()
     }
 
-    pub fn remove_buffer(&mut self, key: DefaultKey) {
-        self.buffers.remove(key);
+    pub fn remove_buffer(&mut self, key: DefaultKey) -> Option<BufferInner> {
+        self.buffers.remove(key)
+    }
+
+    pub fn destroy_buffer(&mut self, key: DefaultKey) {
+        if let Some(buffer_inner) = self.buffers.remove(key) {
+            unsafe {
+                self.device.destroy_buffer(buffer_inner.buffer, None);
+                self.device.free_memory(buffer_inner.memory, None);
+            }
+        }
+    }
+}
+
+impl Drop for ResourceStorage {
+    fn drop(&mut self) {
+        unsafe {
+            for (_, buffer_inner) in self.buffers.drain() {
+                self.device.destroy_buffer(buffer_inner.buffer, None);
+                self.device.free_memory(buffer_inner.memory, None);
+            }
+        }
     }
 }

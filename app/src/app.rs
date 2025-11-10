@@ -40,7 +40,6 @@ impl App {
         let inner_size = window.inner_size();
 
         let mut vulkan_renderer = VulkanRenderer::new_for_window(raw_window_handle, raw_display_handle, (inner_size.width, inner_size.height)).unwrap();
-        vulkan_renderer.test_buffer_sizes(BufferUsageFlags::empty());
         vulkan_renderer.test_buffer_sizes(BufferUsageFlags::TRANSFER_DST);
         vulkan_renderer.test_buffer_sizes(BufferUsageFlags::TRANSFER_SRC);
         vulkan_renderer.test_buffer_sizes(BufferUsageFlags::VERTEX_BUFFER);

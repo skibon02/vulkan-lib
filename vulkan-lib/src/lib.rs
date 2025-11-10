@@ -15,10 +15,12 @@ use crate::wrappers::capabilities_checker::CapabilitiesChecker;
 use crate::wrappers::debug_report::VkDebugReport;
 use crate::wrappers::device::{VkDevice, VkDeviceRef};
 use crate::wrappers::surface::{VkSurface, VkSurfaceRef};
-pub use vk::BufferUsageFlags;
-use crate::runtime::{LocalState, SharedState};
+use crate::runtime::{LocalState, SharedState, WaitSemaphoreRef, WaitSemaphoreStagesRef};
 use crate::runtime::recording::RecordContext;
 use crate::runtime::resources::{BufferInner, MappableBufferResource};
+pub use vk::BufferUsageFlags;
+pub use vk::PipelineStageFlags;
+pub use vk::BufferCopy;
 
 pub mod instance;
 mod wrappers;
@@ -182,11 +184,6 @@ impl VulkanRenderer {
             None,
         )?;
 
-        let command_pool = unsafe { device.create_command_pool(&vk::CommandPoolCreateInfo::default()
-            .queue_family_index(queue_family_index)
-            .flags(vk::CommandPoolCreateFlags::TRANSIENT), None)
-        }.unwrap();
-
         let acq_semaphore = unsafe {
             device.create_semaphore(&vk::SemaphoreCreateInfo::default(), None).unwrap()
         };
@@ -201,8 +198,8 @@ impl VulkanRenderer {
 
         let memory_types = memory_properties.memory_types_as_slice().to_vec();
 
-        let resource_storage = ResourceStorage::new();
-        let runtime_state = LocalState::new(device.clone(), command_pool, queue, resource_storage);
+        let resource_storage = ResourceStorage::new(device.clone());
+        let runtime_state = LocalState::new(device.clone(), queue_family_index, queue, resource_storage);
 
         Ok(Self {
             device,
@@ -285,11 +282,9 @@ impl VulkanRenderer {
 
     }
 
-    fn wait_idle(&self) {
+    fn wait_idle(&mut self) {
         let start = std::time::Instant::now();
-        unsafe {
-            self.device.queue_wait_idle(self.runtime_state.queue()).unwrap();
-        }
+        self.runtime_state.wait_idle();
         let end = std::time::Instant::now();
         debug!("Waited for idle for {:?}", end - start);
     }
@@ -366,10 +361,15 @@ impl VulkanRenderer {
                 .allocation_size(allocation_size)
                 .memory_type_index(host_memory_type),
         None).unwrap() };
+        
+        unsafe {
+            self.device.bind_buffer_memory(buffer, memory, 0).unwrap();
+        }
+
 
         let state_key = self.runtime_state.add_buffer(BufferInner {
             buffer,
-            used_in: vec![],
+            usages: runtime::resources::ResourceUsages::new(),
             memory,
         });
 
@@ -399,10 +399,14 @@ impl VulkanRenderer {
                 .allocation_size(allocation_size)
                 .memory_type_index(host_memory_type),
                                         None).unwrap() };
+        
+        unsafe {
+            self.device.bind_buffer_memory(buffer, memory, 0).unwrap();
+        }
 
         let state_key = self.runtime_state.add_buffer(BufferInner {
             buffer,
-            used_in: vec![],
+            usages: runtime::resources::ResourceUsages::new(),
             memory,
         });
 
@@ -410,39 +414,16 @@ impl VulkanRenderer {
         buffer
     }
     
-    pub fn device_commands<F: FnOnce(&mut RecordContext)>(&mut self, f: F) {
-        self.runtime_state.record_device_commands(f);
+    pub fn runtime_state(&mut self) -> &mut LocalState {
+        &mut self.runtime_state
     }
 
-    pub fn render(&mut self) -> anyhow::Result<()> {
-        let (image, is_suboptimal) = unsafe {
-            self.swapchain_wrapper.swapchain_loader
-                .acquire_next_image(
-                    self.swapchain_wrapper.get_swapchain(),
-                    u64::MAX,
-                    self.acq_semaphore,
-                    vk::Fence::null(),
-                )
-        }.context("acquire next image")?;
+    pub fn acquire_next_image(&mut self) -> anyhow::Result<(u32, WaitSemaphoreRef, bool)> {
+        self.runtime_state.acquire_next_image(&mut self.swapchain_wrapper)
+    }
 
-        if is_suboptimal {
-            warn!("Swapchain is suboptimal!");
-        }
-
-
-        let is_suboptimal = unsafe {
-            self.swapchain_wrapper.swapchain_loader
-                .queue_present(self.runtime_state.queue(), &vk::PresentInfoKHR::default()
-                    .wait_semaphores(&[self.acq_semaphore])
-                    .swapchains(&[self.swapchain_wrapper.get_swapchain()])
-                    .image_indices(&[image]))
-        }.context("queue preset")?;
-
-        if is_suboptimal {
-            warn!("Swapchain is suboptimal on present!");
-        }
-
-        Ok(())
+    pub fn queue_present(&mut self, image_index: u32, semaphore: WaitSemaphoreRef) -> anyhow::Result<bool> {
+        self.runtime_state.queue_present(image_index, semaphore, &mut self.swapchain_wrapper)
     }
 }
 
