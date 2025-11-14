@@ -277,6 +277,49 @@ impl LocalState {
         new_wait_ref
     }
 
+    fn split_into_barrier_groups<'a>(commands: &'a [DeviceCommand<'a>]) -> Vec<&'a [DeviceCommand<'a>]> {
+        if commands.is_empty() {
+            return vec![];
+        }
+
+        let mut groups = Vec::new();
+        let barrier_positions: Vec<usize> = commands
+            .iter()
+            .enumerate()
+            .filter_map(|(i, cmd)| {
+                if matches!(cmd, DeviceCommand::Barrier) {
+                    Some(i)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        if barrier_positions.is_empty() {
+            // no explicit barriers: each command gets its own group
+            for i in 0..commands.len() {
+                groups.push(&commands[i..i+1]);
+            }
+        } else {
+            // group commands between barrier markers
+            let mut start = 0;
+            for &barrier_pos in &barrier_positions {
+                if start < barrier_pos {
+                    groups.push(&commands[start..barrier_pos]);
+                }
+                // include the Barrier command itself in a group (it does nothing but serves as marker)
+                groups.push(&commands[barrier_pos..barrier_pos+1]);
+                start = barrier_pos + 1;
+            }
+            // handle remaining commands after last barrier
+            if start < commands.len() {
+                groups.push(&commands[start..]);
+            }
+        }
+
+        groups
+    }
+
     fn record_device_commands_impl<'a, 'b, F>(&'a mut self, f: F, wait_ref: Option<WaitSemaphoreStagesRef>, signal_ref: Option<semaphores::SignalSemaphoreRef>)
     where
         F: FnOnce(&mut RecordContext<'b>),
@@ -301,105 +344,80 @@ impl LocalState {
             ).unwrap();
         }
 
-        // record commands
-        for cmd in record_context.take_commands() {
-            match cmd {
-                DeviceCommand::BufferCopy { src, dst, regions } => {
-                    let mut buffer_barriers = vec![];
-                    let mut src_stage_mask = PipelineStageFlags::empty();
-                    let mut dst_stage_mask = PipelineStageFlags::empty();
+        // record commands grouped by barriers
+        let commands = record_context.take_commands();
+        let groups = Self::split_into_barrier_groups(&commands);
 
-                    let src_inner = self.resource_storage.buffer(src.state_key);
+        for group in groups {
+            let mut buffer_barriers = vec![];
+            let mut src_stage_mask = PipelineStageFlags::empty();
+            let mut dst_stage_mask = PipelineStageFlags::empty();
+
+            // accumulate barriers for all commands in the group
+            for cmd in group.iter() {
+                for (usage, buffer_handle) in cmd.usages(submission_num) {
+                    let buffer_inner = self.resource_storage.buffer(buffer_handle.state_key);
+
                     // 1) update state if waited on host
-                    src_inner.usages.on_host_waited(last_waited_submission);
+                    buffer_inner.usages.on_host_waited(last_waited_submission);
 
                     // 2) update usage information and get prev usage information
-                    let usage = resources::ResourceUsage::new(
-                        submission_num,
-                        vk::PipelineStageFlags::TRANSFER,
-                        vk::AccessFlags::TRANSFER_READ,
-                        true,
-                    );
-                    let prev_usage = src_inner.usages.add_usage(usage);
+                    let prev_usage = buffer_inner.usages.add_usage(usage);
 
-                    let src_buffer = src_inner.buffer;
+                    let buffer = buffer_inner.buffer;
+
                     // 3) add memory barrier
                     if let Some(prev_usage) = prev_usage {
                         buffer_barriers.push(BufferMemoryBarrier::default()
                             .src_access_mask(prev_usage.access_flags)
                             .dst_access_mask(usage.access_flags)
-                            .buffer(src_buffer)
+                            .buffer(buffer)
                             .size(WHOLE_SIZE)
                         );
 
                         src_stage_mask |= prev_usage.stage_flags;
                         dst_stage_mask |= usage.stage_flags;
                     }
-                    else if let Some(host_state) = src.host_state && host_state.has_host_writes.swap(false, Ordering::Relaxed) {
+                    else if let Some(host_state) = buffer_handle.host_state && host_state.has_host_writes.swap(false, Ordering::Relaxed) {
                         buffer_barriers.push(BufferMemoryBarrier::default()
                             .src_access_mask(AccessFlags::HOST_WRITE)
                             .dst_access_mask(usage.access_flags)
-                            .buffer(src_buffer)
+                            .buffer(buffer)
                             .size(WHOLE_SIZE)
                         );
 
                         src_stage_mask |= PipelineStageFlags::HOST;
                         dst_stage_mask |= usage.stage_flags;
                     }
+                }
+            }
 
-                    let dst_inner = self.resource_storage.buffer(dst.state_key);
-                    // 1) update state if waited on host
-                    dst_inner.usages.on_host_waited(last_waited_submission);
+            // insert single barrier for entire group if needed
+            if !buffer_barriers.is_empty() {
+                unsafe {
+                    self.device.cmd_pipeline_barrier(
+                        cmd_buffer,
+                        src_stage_mask,
+                        dst_stage_mask,
+                        DependencyFlags::empty(),
+                        &[],
+                        &buffer_barriers,
+                        &[]
+                    )
+                }
+            }
 
-                    // 2) update usage information and get prev usage information
-                    let usage = resources::ResourceUsage::new(
-                        submission_num,
-                        vk::PipelineStageFlags::TRANSFER,
-                        vk::AccessFlags::TRANSFER_WRITE,
-                        false,
-                    );
-                    let prev_usage = dst_inner.usages.add_usage(usage);
-
-                    let dst_buffer = dst_inner.buffer;
-                    // 3) add memory barrier
-                    if let Some(prev_usage) = prev_usage {
-                        buffer_barriers.push(BufferMemoryBarrier::default()
-                            .src_access_mask(prev_usage.access_flags)
-                            .dst_access_mask(usage.access_flags)
-                            .buffer(dst_buffer)
-                            .size(WHOLE_SIZE)
-                        );
-
-                        src_stage_mask |= prev_usage.stage_flags;
-                        dst_stage_mask |= usage.stage_flags;
-                    }
-                    else if let Some(host_state) = dst.host_state && host_state.has_host_writes.swap(false, Ordering::Relaxed) {
-                        buffer_barriers.push(BufferMemoryBarrier::default()
-                            .src_access_mask(AccessFlags::HOST_WRITE)
-                            .dst_access_mask(usage.access_flags)
-                            .buffer(dst_buffer)
-                            .size(WHOLE_SIZE)
-                        );
-
-                        src_stage_mask |= PipelineStageFlags::HOST;
-                        dst_stage_mask |= usage.stage_flags;
-                    }
-
-                    unsafe {
-                        if !buffer_barriers.is_empty() {
-                            self.device.cmd_pipeline_barrier(
-                                cmd_buffer,
-                                src_stage_mask,
-                                dst_stage_mask,
-                                DependencyFlags::empty(),
-                                &[],
-                                &buffer_barriers,
-                                &[]
-                            )
+            // execute all commands in the group
+            for cmd in group.iter() {
+                match cmd {
+                    DeviceCommand::BufferCopy { src, dst, regions } => {
+                        let src_buffer = self.resource_storage.buffer(src.state_key).buffer;
+                        let dst_buffer = self.resource_storage.buffer(dst.state_key).buffer;
+                        unsafe {
+                            self.device.cmd_copy_buffer(cmd_buffer, src_buffer, dst_buffer, &regions);
                         }
-
-                        self.device.cmd_copy_buffer(cmd_buffer, src_buffer, dst_buffer, &regions);
                     }
+                    DeviceCommand::Barrier => {} // not a command in particular
                 }
             }
         }

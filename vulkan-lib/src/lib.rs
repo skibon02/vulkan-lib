@@ -223,25 +223,23 @@ impl VulkanRenderer {
         let mut alignment = 0;
         let mut memory_types = 0;
 
-        for i in 1..1024 {
-            let buffer = unsafe {
-                self.device.create_buffer(&BufferCreateInfo::default()
-                    .usage(usage)
-                    .size(i), None).unwrap()
-            };
+        let buffer = unsafe {
+            self.device.create_buffer(&BufferCreateInfo::default()
+                .usage(usage)
+                .size(256), None).unwrap()
+        };
 
-            let memory_requirements = unsafe { self.device.get_buffer_memory_requirements(buffer) };
+        let memory_requirements = unsafe { self.device.get_buffer_memory_requirements(buffer) };
 
-            alignment = memory_requirements.alignment;
-            memory_types = memory_requirements.memory_type_bits;
+        alignment = memory_requirements.alignment;
+        memory_types = memory_requirements.memory_type_bits;
 
-            if memory_requirements.size != i {
-                info!("{} -> {}", i, memory_requirements.size);
-            }
+        // if memory_requirements.size != i {
+        //     info!("{} -> {}", i, memory_requirements.size);
+        // }
 
-            unsafe {
-                self.device.destroy_buffer(buffer, None);
-            }
+        unsafe {
+            self.device.destroy_buffer(buffer, None);
         }
         info!("Alignment: {}. Memory types: {:b}", alignment, memory_types);
     }
