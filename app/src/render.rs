@@ -35,7 +35,7 @@ impl RenderTask {
             let mut staging_buffer = self.vulkan_renderer.new_host_buffer(2048);
             staging_buffer.map_write(0, &[1,2,3,4,5]);
 
-            let dev_buffer = self.vulkan_renderer.new_device_buffer(BufferUsageFlags::VERTEX_BUFFER | BufferUsageFlags::TRANSFER_DST, 2048);
+            let dev_buffer = self.vulkan_renderer.new_device_buffer(BufferUsageFlags::VERTEX_BUFFER | BufferUsageFlags::TRANSFER_DST | BufferUsageFlags::TRANSFER_SRC, 2048);
             loop {
                 let msg = self.rx.recv();
                 if msg.is_err() {
@@ -51,6 +51,11 @@ impl RenderTask {
                         let staging_handle = staging_buffer.handle();
                         let dev_handle = dev_buffer.handle_static();
                         self.vulkan_renderer.runtime_state().record_device_commands(None, |ctx| {
+                            ctx.buffer_copy_single(staging_handle, dev_handle, BufferCopy {
+                                size: 5,
+                                src_offset: 0,
+                                dst_offset: 0
+                            });
                             ctx.buffer_copy_single(staging_handle, dev_handle, BufferCopy {
                                 size: 5,
                                 src_offset: 0,

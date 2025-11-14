@@ -49,7 +49,7 @@ pub enum DeviceCommand<'a> {
 }
 
 impl<'a> DeviceCommand<'a> {
-    pub fn usages(&self, submission_num: usize) -> Box<dyn Iterator<Item=(ResourceUsage, BufferResourceHandle<'a>)> + 'a> {
+    pub fn usages(&self, submission_num: usize, group_num: usize) -> Box<dyn Iterator<Item=(ResourceUsage, BufferResourceHandle<'a>)> + 'a> {
         match self {
             DeviceCommand::BufferCopy {
                 src,
@@ -60,12 +60,14 @@ impl<'a> DeviceCommand<'a> {
                     [
                         (ResourceUsage::new(
                             submission_num, 
+                            group_num,
                             PipelineStageFlags::TRANSFER, 
                             AccessFlags::TRANSFER_READ, 
                             true
                         ), *src), 
                         (ResourceUsage::new(
                             submission_num,
+                            group_num,
                             PipelineStageFlags::TRANSFER,
                             AccessFlags::TRANSFER_WRITE,
                             false

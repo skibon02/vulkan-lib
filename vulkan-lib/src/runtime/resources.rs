@@ -8,15 +8,17 @@ use crate::runtime::{OptionSeqNumShared, SharedState};
 #[derive(Copy, Clone, Debug)]
 pub struct ResourceUsage {
     pub submission_num: usize,
+    pub submission_group_num: usize,
     pub stage_flags: PipelineStageFlags,
     pub access_flags: AccessFlags,
     pub is_readonly: bool,
 }
 
 impl ResourceUsage {
-    pub fn new(submission_num: usize, stage_flags: PipelineStageFlags, access_flags: AccessFlags, is_readonly: bool) -> Self {
+    pub fn new(submission_num: usize, submission_group_num: usize, stage_flags: PipelineStageFlags, access_flags: AccessFlags, is_readonly: bool) -> Self {
         Self {
             submission_num,
+            submission_group_num,
             stage_flags,
             access_flags,
             is_readonly

@@ -348,14 +348,14 @@ impl LocalState {
         let commands = record_context.take_commands();
         let groups = Self::split_into_barrier_groups(&commands);
 
-        for group in groups {
+        for (group_num, group) in groups.iter().enumerate() {
             let mut buffer_barriers = vec![];
             let mut src_stage_mask = PipelineStageFlags::empty();
             let mut dst_stage_mask = PipelineStageFlags::empty();
 
             // accumulate barriers for all commands in the group
             for cmd in group.iter() {
-                for (usage, buffer_handle) in cmd.usages(submission_num) {
+                for (usage, buffer_handle) in cmd.usages(submission_num, group_num) {
                     let buffer_inner = self.resource_storage.buffer(buffer_handle.state_key);
 
                     // 1) update state if waited on host
@@ -368,6 +368,9 @@ impl LocalState {
 
                     // 3) add memory barrier
                     if let Some(prev_usage) = prev_usage {
+                        if prev_usage.submission_group_num == group_num && prev_usage.submission_num == submission_num {
+                            panic!("Missing required pipeline barrier between resource usages! Usage1: {:?}, Usage2: {:?}", prev_usage, usage);
+                        }
                         buffer_barriers.push(BufferMemoryBarrier::default()
                             .src_access_mask(prev_usage.access_flags)
                             .dst_access_mask(usage.access_flags)
@@ -413,6 +416,9 @@ impl LocalState {
                     DeviceCommand::BufferCopy { src, dst, regions } => {
                         let src_buffer = self.resource_storage.buffer(src.state_key).buffer;
                         let dst_buffer = self.resource_storage.buffer(dst.state_key).buffer;
+                        if dst.host_state.is_some() {
+                            unimplemented!("Copy buffer to host-accessible buffer is not yet implemented");
+                        }
                         unsafe {
                             self.device.cmd_copy_buffer(cmd_buffer, src_buffer, dst_buffer, &regions);
                         }
