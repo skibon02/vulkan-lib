@@ -2,13 +2,14 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use anyhow::Context;
 use ash::vk;
-use ash::vk::{AccessFlags, BufferMemoryBarrier, CommandBufferBeginInfo, CommandBufferLevel, CommandPool, DependencyFlags, FenceCreateInfo, Handle, PipelineStageFlags, Queue, WHOLE_SIZE};
+use ash::vk::{AccessFlags, BufferMemoryBarrier, CommandBufferBeginInfo, CommandPool, DependencyFlags, FenceCreateInfo, Handle, PipelineStageFlags, Queue, WHOLE_SIZE};
 use log::warn;
 use parking_lot::Mutex;
 use slotmap::DefaultKey;
+use smallvec::{smallvec, SmallVec};
 use crate::runtime::recording::{DeviceCommand, RecordContext};
 use crate::runtime::resources::{BufferInner, BufferResourceDestroyHandle, ResourceStorage};
-use crate::runtime::semaphores::SemaphoreManager;
+use crate::runtime::semaphores::{SemaphoreManager, WaitedOperation};
 use crate::runtime::command_buffers::CommandBufferManager;
 use crate::wrappers::device::VkDeviceRef;
 
@@ -449,9 +450,11 @@ impl LocalState {
             .command_buffers(&cmd_buffers);
 
         // handle optional wait semaphore
+        let mut waited_operations = None;
         if let Some(wait) = wait_ref {
             let wait_stage_flags = wait.stage_flags;
-            let sem = self.semaphore_manager.get_wait_semaphore(wait, Some(submission_num));
+            let (sem, sem_waited_operations) = self.semaphore_manager.get_wait_semaphore(wait, Some(submission_num));
+            waited_operations = Some(sem_waited_operations);
             wait_semaphores = [sem];
             wait_dst_stage_masks = [wait_stage_flags];
             submit_info = submit_info
@@ -461,7 +464,16 @@ impl LocalState {
 
         // handle optional signal semaphore
         if let Some(signal) = signal_ref {
-            let signal_semaphore = self.semaphore_manager.allocate_signal_semaphore(&signal);
+            let mut waited_operations = waited_operations.unwrap_or(SmallVec::new());
+            // add current submission to waited submissions
+            if waited_operations.len() == 1 && let WaitedOperation::Submission(waited_sub_num, PipelineStageFlags::ALL_COMMANDS) = &mut waited_operations[0] {
+                // fast path, update submission number
+                *waited_sub_num = submission_num;
+            }
+            else {
+                waited_operations.push(WaitedOperation::Submission(submission_num, vk::PipelineStageFlags::ALL_COMMANDS));
+            }
+            let signal_semaphore = self.semaphore_manager.allocate_signal_semaphore(&signal, waited_operations);
             signal_semaphores = [signal_semaphore];
 
             submit_info = submit_info.signal_semaphores(&signal_semaphores);
@@ -479,7 +491,7 @@ impl LocalState {
     // Acquire next swapchain image with semaphore signaling
     pub fn acquire_next_image(&mut self, swapchain_wrapper: &mut SwapchainWrapper) -> anyhow::Result<(u32, WaitSemaphoreRef, bool)> {
         let (signal_ref, wait_ref) = self.semaphore_manager.create_semaphore_pair();
-        let signal_semaphore = self.semaphore_manager.allocate_signal_semaphore(&signal_ref);
+        let signal_semaphore = self.semaphore_manager.allocate_signal_semaphore(&signal_ref, smallvec![]);
 
         let (index, is_suboptimal) = unsafe {
             swapchain_wrapper
@@ -493,6 +505,8 @@ impl LocalState {
                 .context("acquire_next_image")?
         };
 
+        self.semaphore_manager.modify_waited_operations(&wait_ref, smallvec![WaitedOperation::SwapchainImageAcquired(index)]);
+
         Ok((index, wait_ref, is_suboptimal))
     }
 
@@ -502,7 +516,8 @@ impl LocalState {
         let wait_stages_ref = wait_ref.with_stages(vk::PipelineStageFlags::empty());
 
         // Present operations don't have fence tracking, use None for untracked semaphore
-        let wait_semaphore = self.semaphore_manager.get_wait_semaphore(wait_stages_ref, None);
+        let (wait_semaphore, waited_operations) = self.semaphore_manager.get_wait_semaphore(wait_stages_ref, None);
+
 
         unsafe {
             swapchain_wrapper

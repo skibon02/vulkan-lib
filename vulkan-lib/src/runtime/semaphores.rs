@@ -1,13 +1,28 @@
 use std::collections::VecDeque;
 use ash::vk;
+use ash::vk::PipelineStageFlags;
 use log::{error, warn};
 use slotmap::{SlotMap, DefaultKey};
+use smallvec::SmallVec;
 use crate::wrappers::device::VkDeviceRef;
 
+pub(crate) type WaitedOperations = SmallVec<[WaitedOperation; 3]>;
+#[derive(Clone, PartialEq)]
+pub(crate) enum WaitedOperation {
+    Submission(usize, PipelineStageFlags),
+    // swapchain image index
+    SwapchainImageAcquired(u32),
+}
 enum SemaphoreSlot {
     Unallocated,
-    Signaled(vk::Semaphore),
-    WaitScheduled { semaphore: vk::Semaphore, used_in_submission: Option<usize> },
+    Signaled{
+        semaphore: vk::Semaphore,
+        waited_operations: WaitedOperations,
+    },
+    WaitScheduled {
+        semaphore: vk::Semaphore,
+        used_in_submission: Option<usize>
+    },
 }
 
 impl SemaphoreSlot {
@@ -74,7 +89,7 @@ impl SemaphoreManager {
     }
 
     /// Allocate a semaphore for signaling - must be called before wait
-    pub fn allocate_signal_semaphore(&mut self, signal_ref: &SignalSemaphoreRef) -> vk::Semaphore {
+    pub fn allocate_signal_semaphore(&mut self, signal_ref: &SignalSemaphoreRef, waited_operations: WaitedOperations) -> vk::Semaphore {
         let semaphore = self.take_free_semaphore();
 
         let slot = self.slots.get_mut(signal_ref.key)
@@ -82,10 +97,13 @@ impl SemaphoreManager {
 
         match slot {
             SemaphoreSlot::Unallocated => {
-                *slot = SemaphoreSlot::Signaled(semaphore);
+                *slot = SemaphoreSlot::Signaled{
+                    semaphore,
+                    waited_operations,
+                };
                 semaphore
             }
-            SemaphoreSlot::Signaled(_) => {
+            SemaphoreSlot::Signaled { .. } => {
                 panic!("Attempted to signal a semaphore that was already signaled but not waited on");
             }
             SemaphoreSlot::WaitScheduled { .. } => {
@@ -93,15 +111,30 @@ impl SemaphoreManager {
             }
         }
     }
-
-    /// Get semaphore to wait on and mark it as used in the given submission
-    pub fn get_wait_semaphore(&mut self, wait_ref: WaitSemaphoreStagesRef, used_in_submission: Option<usize>) -> vk::Semaphore {
+    pub fn modify_waited_operations(&mut self, wait_ref: &WaitSemaphoreRef, new_waited_operations: WaitedOperations) {
         let slot = self.slots.get_mut(wait_ref.key)
             .expect("Invalid wait semaphore reference");
 
         match slot {
-            SemaphoreSlot::Signaled(semaphore) => {
+            SemaphoreSlot::Signaled{semaphore, ..} => {
+                *slot = SemaphoreSlot::Signaled{
+                    semaphore: *semaphore,
+                    waited_operations: new_waited_operations,
+                };
+            }
+            _ => panic!("Can only modify waited operations for signaled semaphores"),
+        }
+    }
+
+    /// Get semaphore to wait on and mark it as used in the given submission
+    pub fn get_wait_semaphore(&mut self, wait_ref: WaitSemaphoreStagesRef, used_in_submission: Option<usize>) -> (vk::Semaphore, WaitedOperations) {
+        let slot = self.slots.get_mut(wait_ref.key)
+            .expect("Invalid wait semaphore reference");
+
+        match slot {
+            SemaphoreSlot::Signaled{semaphore, waited_operations: waited_submissions } => {
                 let sem = *semaphore;
+                let waited_submissions = waited_submissions.clone();
                 *slot = SemaphoreSlot::WaitScheduled {
                     semaphore: sem,
                     used_in_submission,
@@ -113,7 +146,7 @@ impl SemaphoreManager {
                     self.recycle_old_untracked();
                 }
 
-                sem
+                (sem, waited_submissions)
             }
             _ => panic!("Semaphore must be signaled before waiting"),
         }
@@ -202,11 +235,11 @@ impl Drop for SemaphoreManager {
                 self.device.destroy_semaphore(semaphore, None);
             }
 
-            if self.slots.iter().any(|s| matches!(s.1, SemaphoreSlot::WaitScheduled {..} | SemaphoreSlot::Signaled(_))) {
+            if self.slots.iter().any(|s| matches!(s.1, SemaphoreSlot::WaitScheduled {..} | SemaphoreSlot::Signaled{..})) {
                 error!("Semaphore manager have some submitted semaphores! Wait for idle before dropping!");
             }
             for (_, semaphore) in &self.slots {
-                if let SemaphoreSlot::WaitScheduled{semaphore, ..} | SemaphoreSlot::Signaled(semaphore) = semaphore {
+                if let SemaphoreSlot::WaitScheduled{semaphore, ..} | SemaphoreSlot::Signaled{semaphore, .. } = semaphore {
                     self.device.destroy_semaphore(*semaphore, None);
                 }
             }
