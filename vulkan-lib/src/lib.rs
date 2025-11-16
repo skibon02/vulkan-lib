@@ -1,9 +1,10 @@
 use std::collections::HashMap;
 use std::ffi::{c_char, CString};
 use ash::vk;
-use ash::vk::{make_api_version, ApplicationInfo, BufferCreateFlags, BufferCreateInfo, Extent2D, Extent3D, Format, ImageCreateFlags, ImageCreateInfo, ImageLayout, ImageTiling, ImageType, ImageUsageFlags, MemoryAllocateInfo, MemoryHeap, MemoryRequirements, MemoryType, PhysicalDevice, Queue, SampleCountFlags};
+use ash::vk::{make_api_version, ApplicationInfo, BufferCreateFlags, BufferCreateInfo, Extent2D, Format, ImageCreateFlags, ImageCreateInfo, ImageTiling, ImageType, ImageUsageFlags, MemoryAllocateInfo, MemoryHeap, MemoryRequirements, MemoryType, PhysicalDevice, Queue, SampleCountFlags};
 use log::{debug, info, warn};
 use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
+use smallvec::SmallVec;
 use sparkles::range_event_start;
 use runtime::resources::{BufferResource, ResourceStorage};
 use crate::swapchain_wrapper::SwapchainWrapper;
@@ -13,10 +14,18 @@ use crate::wrappers::device::VkDeviceRef;
 use crate::wrappers::surface::{VkSurface, VkSurfaceRef};
 use crate::runtime::{LocalState, WaitSemaphoreRef};
 use crate::runtime::resources::{BufferInner, ImageInner, ImageResource, ImageResourceHandle, MappableBufferResource, ResourceUsages};
+use crate::util::image::is_color_format;
+
 pub use vk::BufferUsageFlags;
 pub use vk::PipelineStageFlags;
 pub use vk::BufferCopy;
-use crate::util::image::is_color_format;
+pub use vk::BufferImageCopy;
+pub use vk::Extent3D;
+pub use vk::Offset3D;
+pub use vk::ImageLayout;
+pub use vk::ImageAspectFlags;
+pub use vk::ImageSubresourceLayers;
+pub use vk::ClearColorValue;
 
 pub mod instance;
 mod wrappers;
@@ -250,12 +259,14 @@ impl VulkanRenderer {
                 self.runtime_state.remove_image(image);
             }
         }
+        let format = self.swapchain_wrapper.get_surface_format();
         let images = self.swapchain_wrapper.swapchain_images.iter().map(|i| {
             let image = ImageInner {
                 image: *i,
                 layout: ImageLayout::UNDEFINED,
                 memory: None,
                 usages: ResourceUsages::None,
+                format
             };
             let key = self.runtime_state.add_image(image);
             ImageResourceHandle {
@@ -303,6 +314,10 @@ impl VulkanRenderer {
         //     &mut self.resource_manager,
         // );
 
+    }
+    
+    pub fn swapchain_images(&self) -> SmallVec<[ImageResourceHandle; 3]> {
+        self.swapchain_wrapper.get_images()
     }
 
     fn wait_idle(&mut self) {
@@ -434,7 +449,7 @@ impl VulkanRenderer {
 
         let state_key = self.runtime_state.add_buffer(BufferInner {
             buffer,
-            usages: runtime::resources::ResourceUsages::new(),
+            usages: ResourceUsages::new(),
             memory,
         });
 
@@ -471,7 +486,7 @@ impl VulkanRenderer {
 
         let state_key = self.runtime_state.add_buffer(BufferInner {
             buffer,
-            usages: runtime::resources::ResourceUsages::new(),
+            usages: ResourceUsages::new(),
             memory,
         });
 
@@ -523,6 +538,7 @@ impl VulkanRenderer {
             usages: ResourceUsages::new(),
             memory: Some(memory),
             layout: ImageLayout::UNDEFINED,
+            format,
         });
 
         let image = ImageResource::new(self.runtime_state.shared(), state_key, memory, width, height);

@@ -56,7 +56,7 @@ impl SwapchainWrapper {
 
         // 1 additional image, so we can acquire 2 images at a time.
         let image_count = surface_capabilities.min_image_count + 1;
-        info!("\n\tCreating swapchain...\n\tPresent mode: {:?}\n\tSwapchain image count: {:?}, Color space: {:?}, Image formate: {:?}", present_mode, image_count, surface_format.color_space, surface_format.format);
+        info!("\n\tCreating swapchain...\n\tPresent mode: {:?}\n\tSwapchain image count: {:?}, Color space: {:?}, Image format: {:?}", present_mode, image_count, surface_format.color_space, surface_format.format);
 
         let swapchain_extent = if surface_capabilities.current_extent.width != u32::MAX {
             surface_capabilities.current_extent
@@ -69,7 +69,7 @@ impl SwapchainWrapper {
 
 
         let swapchain_loader = swapchain::Device::new(device.instance(), &device);
-        let swapchain_image_info = image_2d_info(surface_format.format, ImageUsageFlags::COLOR_ATTACHMENT,
+        let swapchain_image_info = image_2d_info(surface_format.format, ImageUsageFlags::COLOR_ATTACHMENT | ImageUsageFlags::TRANSFER_DST,
                                              swapchain_extent, SampleCountFlags::TYPE_1, ImageTiling::OPTIMAL);
         let swapchain_create_info = swapchain_info(swapchain_image_info, surface_format.color_space)
             .surface(*surface)

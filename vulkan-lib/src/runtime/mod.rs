@@ -2,13 +2,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use anyhow::Context;
 use ash::vk;
-use ash::vk::{AccessFlags, BufferMemoryBarrier, CommandBufferBeginInfo, CommandPool, DependencyFlags, FenceCreateInfo, Handle, ImageLayout, ImageMemoryBarrier, ImageSubresourceRange, PipelineStageFlags, Queue, WHOLE_SIZE};
-use log::warn;
+use ash::vk::{AccessFlags, BufferMemoryBarrier, CommandBufferBeginInfo, CommandPool, DependencyFlags, FenceCreateInfo, Handle, ImageAspectFlags, ImageLayout, ImageMemoryBarrier, ImageSubresourceRange, PipelineStageFlags, Queue, WHOLE_SIZE};
+use log::{info, warn};
 use parking_lot::Mutex;
 use slotmap::DefaultKey;
 use smallvec::{smallvec, SmallVec};
 use crate::runtime::recording::{DeviceCommand, RecordContext, SpecificResourceUsage};
-use crate::runtime::resources::{BufferInner, BufferResourceDestroyHandle, ImageInner, ImageResourceHandle, ResourceStorage, ResourceUsages};
+use crate::runtime::resources::{BufferInner, BufferResourceDestroyHandle, ImageInner, ImageResourceHandle, ResourceStorage, ResourceUsage, ResourceUsages};
 use crate::runtime::semaphores::{SemaphoreManager, WaitedOperation};
 use crate::runtime::command_buffers::CommandBufferManager;
 use crate::wrappers::device::VkDeviceRef;
@@ -201,13 +201,15 @@ impl SharedState {
         self.state.lock().submitted_fence(submission_num, fence);
     }
 
-    pub fn wait_submission(&self, submission_num: usize) {
-        if let Some((num, fence)) = self.state.lock().take_fence_to_wait(submission_num) {
+    pub(crate) fn wait_submission(&self, submission_num: usize) {
+        let fence_to_wait = self.state.lock().take_fence_to_wait(submission_num);
+        if let Some((num, fence)) = fence_to_wait {
             unsafe {
                 self.device.wait_for_fences(&[fence], true, u64::MAX).unwrap();
             }
-            self.state.lock().confirm_wait_fence(num);
-            self.state.lock().return_free_fence(fence);
+            let mut guard = self.state.lock();
+            guard.confirm_wait_fence(num);
+            guard.return_free_fence(fence);
         }
     }
 
@@ -268,6 +270,14 @@ impl LocalState {
 
         self.semaphore_manager.on_wait_idle();
         self.command_buffer_manager.on_wait_idle();
+    }
+    
+    pub fn wait_prev_submission(&mut self, prev_sub: usize) -> Option<()> {
+        let submission_to_wait = self.next_submission_num.checked_sub(1)?.checked_sub(prev_sub)?;
+        self.shared_state.wait_submission(submission_to_wait);
+        
+        
+        Some(())
     }
     pub(crate) fn add_buffer(&mut self, buffer: BufferInner) -> DefaultKey {
         self.resource_storage.add_buffer(buffer)
@@ -362,7 +372,7 @@ impl LocalState {
              for waited_op in &sem_waited_operations {
                  if let WaitedOperation::SwapchainImageAcquired(image_handle) = waited_op {
                      let image_inner = self.resource_storage.image(image_handle.state_key);
-                     image_inner.usages = ResourceUsages::None;
+                     image_inner.usages = ResourceUsages::DeviceUsage(ResourceUsage::new(None, stage_flags, AccessFlags::empty(), true));
                  }
              }
              wait_semaphore = Some((sem, stage_flags, sem_waited_operations));
@@ -382,6 +392,8 @@ impl LocalState {
         let groups = Self::split_into_barrier_groups(&commands);
 
         for (group_num, group) in groups.iter().enumerate() {
+            #[cfg(feature = "recording-logs")]
+            info!("{{");
             let mut buffer_barriers: Vec<BufferMemoryBarrier> = vec![];
             let mut image_barriers: Vec<ImageMemoryBarrier> = vec![];
             let mut src_stage_mask = PipelineStageFlags::empty();
@@ -389,7 +401,7 @@ impl LocalState {
 
             // accumulate barriers for all commands in the group
             for cmd in group.iter() {
-                for usage in cmd.usages(submission_num, group_num) {
+                for usage in cmd.usages(submission_num) {
                     match usage {
                         SpecificResourceUsage::BufferUsage {
                             usage,
@@ -464,8 +476,8 @@ impl LocalState {
                                 let mut barrier = ImageMemoryBarrier::default()
                                     .image(image)
                                     .subresource_range(ImageSubresourceRange::default()
-                                        .base_mip_level(1)
-                                        .base_array_layer(1)
+                                        .base_mip_level(0)
+                                        .base_array_layer(0)
                                         .layer_count(1)
                                         .level_count(1)
                                         .aspect_mask(image_aspect))
@@ -485,6 +497,8 @@ impl LocalState {
                                     barrier = barrier
                                         .old_layout(prev_layout)
                                         .new_layout(required_layout);
+
+                                    image_inner.layout = required_layout;
                                 }
 
                                 image_barriers.push(barrier);
@@ -495,7 +509,14 @@ impl LocalState {
             }
 
             // insert single barrier for entire group if needed
-            if !buffer_barriers.is_empty() {
+            if !buffer_barriers.is_empty() || !image_barriers.is_empty() {
+                #[cfg(feature = "recording-logs")]
+                info!("  <- Barrier inserted. SRC: {:?}, DST: {:?}, Buffers: {:?}, Images: {:?}",
+                    src_stage_mask,
+                    dst_stage_mask,
+                    buffer_barriers,
+                    image_barriers
+                );
                 unsafe {
                     self.device.cmd_pipeline_barrier(
                         cmd_buffer,
@@ -511,8 +532,10 @@ impl LocalState {
 
             // execute all commands in the group
             for cmd in group.iter() {
+                #[cfg(feature = "recording-logs")]
+                info!("  Recording command: {:?}", cmd.discriminant());
                 match cmd {
-                    DeviceCommand::BufferCopy { src, dst, regions } => {
+                    DeviceCommand::CopyBuffer { src, dst, regions } => {
                         let src_buffer = self.resource_storage.buffer(src.state_key).buffer;
                         let dst_buffer = self.resource_storage.buffer(dst.state_key).buffer;
                         if dst.host_state.is_some() {
@@ -522,16 +545,73 @@ impl LocalState {
                             self.device.cmd_copy_buffer(cmd_buffer, src_buffer, dst_buffer, &regions);
                         }
                     }
-                    DeviceCommand::BufferToImageCopy {src, dst, regions} => {
+                    DeviceCommand::CopyBufferToImage {src, dst, regions} => {
                         let src_buffer = self.resource_storage.buffer(src.state_key).buffer;
                         let dst_image = self.resource_storage.image(dst.state_key);
                         unsafe {
                             self.device.cmd_copy_buffer_to_image(cmd_buffer, src_buffer, dst_image.image, dst_image.layout, &regions);
                         }
                     }
+                    DeviceCommand::FillBuffer {buffer, offset, size, data} => {
+                        let buffer_inner = self.resource_storage.buffer(buffer.state_key);
+                        unsafe {
+                            self.device.cmd_fill_buffer(cmd_buffer, buffer_inner.buffer, *offset, *size, *data);
+                        }
+                    }
                     DeviceCommand::Barrier => {} // not a command in particular
+                    DeviceCommand::ImageLayoutTransition {..} => {} // not a command in particular
+                    DeviceCommand::ClearColorImage {image, clear_color, image_aspect} => {
+                        let image_inner = self.resource_storage.image(image.state_key);
+                        unsafe {
+                            self.device.cmd_clear_color_image(
+                                cmd_buffer,
+                                image_inner.image,
+                                image_inner.layout,
+                                clear_color,
+                                &[ImageSubresourceRange::default()
+                                    .aspect_mask(*image_aspect)
+                                    .base_mip_level(0)
+                                    .level_count(1)
+                                    .base_array_layer(0)
+                                    .layer_count(1)],
+                            );
+                        }
+                    },
+                    DeviceCommand::ClearDepthStencilImage {
+                        image,
+                        depth_value,
+                        stencil_value,
+                    } => {
+                        let image_inner = self.resource_storage.image(image.state_key);
+                        let mut aspect_mask = ImageAspectFlags::empty();
+                        if depth_value.is_some() {
+                            aspect_mask |= ImageAspectFlags::DEPTH;
+                        }
+                        if stencil_value.is_some() {
+                            aspect_mask |= ImageAspectFlags::STENCIL;
+                        }
+                        unsafe {
+                            self.device.cmd_clear_depth_stencil_image(
+                                cmd_buffer,
+                                image_inner.image,
+                                image_inner.layout,
+                                &vk::ClearDepthStencilValue {
+                                    depth: depth_value.unwrap_or(0.0),
+                                    stencil: stencil_value.unwrap_or(0),
+                                },
+                                &[ImageSubresourceRange::default()
+                                    .aspect_mask(aspect_mask)
+                                    .base_mip_level(0)
+                                    .level_count(1)
+                                    .base_array_layer(0)
+                                    .layer_count(1)],
+                            );
+                        }
+                    }
                 }
             }
+            #[cfg(feature = "recording-logs")]
+            info!("}}");
         }
 
         // end recording
@@ -607,6 +687,9 @@ impl LocalState {
         };
         let image_handle = swapchain_wrapper.get_images()[index as usize];
 
+        #[cfg(feature = "recording-logs")]
+        info!("Recording command AcquireNextImage (image_index = {})", index);
+
         self.semaphore_manager.modify_waited_operations(&wait_ref, smallvec![WaitedOperation::SwapchainImageAcquired(image_handle)]);
 
         Ok((index, wait_ref, is_suboptimal))
@@ -615,23 +698,24 @@ impl LocalState {
     // Present with semaphore wait
     pub(crate) fn queue_present(&mut self, image_index: u32, wait_ref: WaitSemaphoreRef, swapchain_wrapper: &mut SwapchainWrapper) -> anyhow::Result<bool> {
         // Convert to WaitSemaphoreStagesRef (present doesn't use stages)
-        let wait_stages_ref = wait_ref.with_stages(vk::PipelineStageFlags::empty());
+        let wait_stages_ref = wait_ref.with_stages(PipelineStageFlags::ALL_COMMANDS);
 
         // Present operations don't have fence tracking, use None for untracked semaphore
         let (wait_semaphore, waited_operations) = self.semaphore_manager.get_wait_semaphore(wait_stages_ref, None);
         // ensure swapchain image is prepared and is in PRESENT layout
         let image_handle = swapchain_wrapper.get_images()[image_index as usize];
         let image_inner = self.resource_storage.image(image_handle.state_key);
-        if image_inner.layout != ImageLayout::GENERAL || image_inner.layout != ImageLayout::PRESENT_SRC_KHR {
+        if image_inner.layout != ImageLayout::GENERAL && image_inner.layout != ImageLayout::PRESENT_SRC_KHR {
             warn!("Image layout for presentable image must be PRESENT or GENERAL!");
         }
-        if let ResourceUsages::DeviceUsage(usage) = image_inner.usages {
-            let usage_sub_num = usage.submission_num;
-            let mut usage_stages = usage.stage_flags;
-            for waited_op in waited_operations {
-                if let WaitedOperation::Submission(sub_num, stages) = waited_op {
-                    if sub_num >= usage_sub_num {
-                        usage_stages &= !stages;
+        if let ResourceUsages::DeviceUsage(usage) = &mut image_inner.usages {
+            let usage_stages = &mut usage.stage_flags;
+            if let Some(usage_sub_num) = usage.submission_num {
+                for waited_op in waited_operations {
+                    if let WaitedOperation::Submission(sub_num, stages) = waited_op {
+                        if sub_num >= usage_sub_num {
+                            *usage_stages &= !stages;
+                        }
                     }
                 }
             }
@@ -640,6 +724,9 @@ impl LocalState {
                 warn!("Called Queue present on swapchain image with non-synchronized device usage!")
             }
         }
+
+        #[cfg(feature = "recording-logs")]
+        info!("Recording command QueuePresent (image_index = {})", image_index);
 
         unsafe {
             swapchain_wrapper

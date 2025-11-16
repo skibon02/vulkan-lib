@@ -133,9 +133,15 @@ impl SemaphoreManager {
             .expect("Invalid wait semaphore reference");
 
         match slot {
-            SemaphoreSlot::Signaled{semaphore, waited_operations: waited_submissions } => {
+            SemaphoreSlot::Signaled{semaphore, waited_operations} => {
                 let sem = *semaphore;
-                let waited_submissions = waited_submissions.clone();
+                if let Some(submission_num) = used_in_submission {
+                    waited_operations.push(WaitedOperation::Submission(
+                        submission_num,
+                        wait_ref.stage_flags,
+                    ));
+                }
+                let waited_operations = waited_operations.clone();
                 *slot = SemaphoreSlot::WaitScheduled {
                     semaphore: sem,
                     used_in_submission,
@@ -147,7 +153,7 @@ impl SemaphoreManager {
                     self.recycle_old_untracked();
                 }
 
-                (sem, waited_submissions)
+                (sem, waited_operations)
             }
             _ => panic!("Semaphore must be signaled before waiting"),
         }

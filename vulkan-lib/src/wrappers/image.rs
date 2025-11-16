@@ -80,7 +80,7 @@ pub fn swapchain_info(
         })
         .image_array_layers(image_info.array_layers)
         .image_sharing_mode(image_info.sharing_mode)
-        .image_usage(ImageUsageFlags::COLOR_ATTACHMENT)
+        .image_usage(image_info.usage)
 }
 
 pub fn get_aspect_mask(format: Format) -> ImageAspectFlags {

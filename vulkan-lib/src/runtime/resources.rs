@@ -1,7 +1,7 @@
 use std::ops::{Deref, DerefMut, Range};
 use std::slice::from_raw_parts_mut;
 use std::sync::atomic::{AtomicBool, Ordering};
-use ash::vk::{AccessFlags, Buffer, DeviceMemory, Image, ImageLayout, MemoryMapFlags, PipelineStageFlags};
+use ash::vk::{AccessFlags, Buffer, DeviceMemory, Extent3D, Format, Image, ImageLayout, MemoryMapFlags, PipelineStageFlags};
 use log::warn;
 use slotmap::{DefaultKey, SlotMap};
 use crate::runtime::{OptionSeqNumShared, SharedState};
@@ -9,21 +9,28 @@ use crate::wrappers::device::VkDeviceRef;
 
 #[derive(Copy, Clone, Debug)]
 pub struct ResourceUsage {
-    pub submission_num: usize,
-    pub submission_group_num: usize,
+    pub submission_num: Option<usize>,
     pub stage_flags: PipelineStageFlags,
     pub access_flags: AccessFlags,
     pub is_readonly: bool,
 }
 
 impl ResourceUsage {
-    pub fn new(submission_num: usize, submission_group_num: usize, stage_flags: PipelineStageFlags, access_flags: AccessFlags, is_readonly: bool) -> Self {
+    pub fn new(submission_num: Option<usize>, stage_flags: PipelineStageFlags, access_flags: AccessFlags, is_readonly: bool) -> Self {
         Self {
             submission_num,
-            submission_group_num,
             stage_flags,
             access_flags,
             is_readonly
+        }
+    }
+    
+    pub fn empty(submission_num: Option<usize>) -> Self {
+        Self {
+            submission_num,
+            stage_flags: PipelineStageFlags::empty(),
+            access_flags: AccessFlags::empty(),
+            is_readonly: true
         }
     }
 }
@@ -40,7 +47,7 @@ impl ResourceUsages {
     }
 
     pub fn on_host_waited(&mut self, last_waited_num: usize) {
-        if let Self::DeviceUsage(resource_usage) = self && last_waited_num >= resource_usage.submission_num {
+        if let Self::DeviceUsage(resource_usage) = self && let Some(submission_num) = resource_usage.submission_num && last_waited_num >= submission_num {
             *self = Self::None;
         }
     }
@@ -248,6 +255,16 @@ pub struct ImageResourceHandle {
     pub(crate) height: u32,
 }
 
+impl ImageResourceHandle {
+    pub fn extent(&self) -> Extent3D {
+        Extent3D {
+            width: self.width,
+            height: self.height,
+            depth: 1,
+        }
+    }
+}
+
 pub struct BufferResourceDestroyHandle {
     state_key: DefaultKey,
     size: u64,
@@ -265,6 +282,7 @@ pub(crate) struct ImageInner {
     pub memory: Option<DeviceMemory>,
     pub usages: ResourceUsages,
     pub layout: ImageLayout,
+    pub format: Format,
 }
 
 pub(crate) struct ResourceStorage {
