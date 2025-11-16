@@ -1,9 +1,11 @@
 use std::ops::{Deref, DerefMut, Range};
 use std::slice::from_raw_parts_mut;
 use std::sync::atomic::{AtomicBool, Ordering};
-use ash::vk::{AccessFlags, Buffer, DeviceMemory, MemoryMapFlags, PipelineStageFlags};
+use ash::vk::{AccessFlags, Buffer, DeviceMemory, Image, ImageLayout, MemoryMapFlags, PipelineStageFlags};
+use log::warn;
 use slotmap::{DefaultKey, SlotMap};
 use crate::runtime::{OptionSeqNumShared, SharedState};
+use crate::wrappers::device::VkDeviceRef;
 
 #[derive(Copy, Clone, Debug)]
 pub struct ResourceUsage {
@@ -114,6 +116,39 @@ impl Drop for BufferResource {
     }
 }
 
+pub struct ImageResource {
+    shared: SharedState,
+
+    state_key: DefaultKey,
+    width: u32,
+    height: u32
+}
+
+impl ImageResource {
+    pub fn new(shared: SharedState, state_key: DefaultKey, memory: DeviceMemory, width: u32, height: u32) -> Self {
+        Self {
+            shared,
+
+            state_key,
+            width,
+            height
+        }
+    }
+    pub fn handle(&self) -> ImageResourceHandle {
+        ImageResourceHandle {
+            state_key: self.state_key,
+            width: self.width,
+            height: self.height
+        }
+    }
+}
+
+impl Drop for ImageResource {
+    fn drop(&mut self) {
+        self.shared.schedule_destroy_image(self.handle())
+    }
+}
+
 pub struct MappableBufferResource{
     inner:  BufferResource,
     memory: DeviceMemory,
@@ -206,12 +241,18 @@ impl From<BufferResourceHandle<'_>> for BufferResourceDestroyHandle {
     }
 }
 
+#[derive(Copy, Clone)]
+pub struct ImageResourceHandle {
+    pub(crate) state_key: DefaultKey,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+}
+
 pub struct BufferResourceDestroyHandle {
     state_key: DefaultKey,
     size: u64,
     host_used_in: Option<usize>
 }
-
 
 pub(crate) struct BufferInner {
     pub buffer: Buffer,
@@ -219,36 +260,59 @@ pub(crate) struct BufferInner {
     pub usages: ResourceUsages,
 }
 
+pub(crate) struct ImageInner {
+    pub image: Image,
+    pub memory: Option<DeviceMemory>,
+    pub usages: ResourceUsages,
+    pub layout: ImageLayout,
+}
+
 pub(crate) struct ResourceStorage {
-    device: crate::wrappers::device::VkDeviceRef,
+    device: VkDeviceRef,
     buffers: SlotMap<DefaultKey, BufferInner>,
+    images: SlotMap<DefaultKey, ImageInner>
 }
 
 impl ResourceStorage {
-    pub fn new(device: crate::wrappers::device::VkDeviceRef) -> Self{
+    pub fn new(device: VkDeviceRef) -> Self{
         Self {
             device,
             buffers: SlotMap::new(),
+            images:SlotMap::new(),
         }
     }
 
     pub fn add_buffer(&mut self, buffer: BufferInner) -> DefaultKey {
         self.buffers.insert(buffer)
     }
-
     pub fn buffer(&mut self, key: DefaultKey) -> &mut BufferInner {
         self.buffers.get_mut(key).unwrap()
     }
+    // pub fn destroy_buffer(&mut self, key: DefaultKey) {
+    //     if let Some(buffer_inner) = self.buffers.remove(key) {
+    //         unsafe {
+    //             self.device.destroy_buffer(buffer_inner.buffer, None);
+    //             self.device.free_memory(buffer_inner.memory, None);
+    //         }
+    //     }
+    // }
 
-    pub fn remove_buffer(&mut self, key: DefaultKey) -> Option<BufferInner> {
-        self.buffers.remove(key)
+    pub fn add_image(&mut self, image: ImageInner) -> DefaultKey {
+        self.images.insert(image)
     }
-
-    pub fn destroy_buffer(&mut self, key: DefaultKey) {
-        if let Some(buffer_inner) = self.buffers.remove(key) {
-            unsafe {
-                self.device.destroy_buffer(buffer_inner.buffer, None);
-                self.device.free_memory(buffer_inner.memory, None);
+    pub fn image(&mut self, key: DefaultKey) -> &mut ImageInner {
+        self.images.get_mut(key).unwrap()
+    }
+    pub fn destroy_image(&mut self, key: DefaultKey) {
+        if let Some(image_inner) = self.images.remove(key) {
+            if !image_inner.usages.is_none() {
+                warn!("Destroying a resource image with active device usage!");
+            }
+            if let Some(memory) = image_inner.memory {
+                unsafe {
+                    self.device.destroy_image(image_inner.image, None);
+                    self.device.free_memory(memory, None);
+                }
             }
         }
     }
@@ -260,6 +324,15 @@ impl Drop for ResourceStorage {
             for (_, buffer_inner) in self.buffers.drain() {
                 self.device.destroy_buffer(buffer_inner.buffer, None);
                 self.device.free_memory(buffer_inner.memory, None);
+            }
+
+            for (_, image_inner) in self.images.drain() {
+                if let Some(memory) = image_inner.memory {
+                    unsafe {
+                        self.device.destroy_image(image_inner.image, None);
+                        self.device.free_memory(memory, None);
+                    }
+                }
             }
         }
     }

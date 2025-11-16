@@ -1,4 +1,4 @@
-use ash::vk::Extent2D;
+use ash::vk::{Extent2D, Format};
 use image::{DynamicImage, ImageResult};
 use thiserror::Error;
 
@@ -31,4 +31,8 @@ pub fn read_image_from_bytes(image_bytes: Vec<u8>) -> ReadImageResult<(Vec<u8>, 
         width: image_width,
         height: image_height,
     }))
+}
+
+pub fn is_color_format(format: Format) -> bool {
+    !(format >= Format::D16_UNORM && format <= Format::D32_SFLOAT_S8_UINT)
 }

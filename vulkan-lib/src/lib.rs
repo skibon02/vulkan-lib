@@ -1,26 +1,22 @@
-use std::cmp::Ordering;
-use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::ffi::{c_char, CString};
-use std::sync::{Arc, Weak};
-use anyhow::Context;
 use ash::vk;
-use ash::vk::{make_api_version, ApplicationInfo, Buffer, BufferCreateFlags, BufferCreateInfo, CommandPool, DeviceMemory, DeviceSize, Extent2D, MemoryAllocateInfo, MemoryHeap, MemoryRequirements, MemoryType, PhysicalDevice, Queue};
+use ash::vk::{make_api_version, ApplicationInfo, BufferCreateFlags, BufferCreateInfo, Extent2D, Extent3D, Format, ImageCreateFlags, ImageCreateInfo, ImageLayout, ImageTiling, ImageType, ImageUsageFlags, MemoryAllocateInfo, MemoryHeap, MemoryRequirements, MemoryType, PhysicalDevice, Queue, SampleCountFlags};
 use log::{debug, info, warn};
 use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
-use slotmap::{DefaultKey, Key};
 use sparkles::range_event_start;
 use runtime::resources::{BufferResource, ResourceStorage};
 use crate::swapchain_wrapper::SwapchainWrapper;
 use crate::wrappers::capabilities_checker::CapabilitiesChecker;
 use crate::wrappers::debug_report::VkDebugReport;
-use crate::wrappers::device::{VkDevice, VkDeviceRef};
+use crate::wrappers::device::VkDeviceRef;
 use crate::wrappers::surface::{VkSurface, VkSurfaceRef};
-use crate::runtime::{LocalState, SharedState, WaitSemaphoreRef, WaitSemaphoreStagesRef};
-use crate::runtime::recording::RecordContext;
-use crate::runtime::resources::{BufferInner, MappableBufferResource};
+use crate::runtime::{LocalState, WaitSemaphoreRef};
+use crate::runtime::resources::{BufferInner, ImageInner, ImageResource, ImageResourceHandle, MappableBufferResource, ResourceUsages};
 pub use vk::BufferUsageFlags;
 pub use vk::PipelineStageFlags;
 pub use vk::BufferCopy;
+use crate::util::image::is_color_format;
 
 pub mod instance;
 mod wrappers;
@@ -43,7 +39,8 @@ pub struct VulkanRenderer {
     // memory resources
     memory_types: Vec<MemoryType>,
     memory_heaps: Vec<MemoryHeap>,
-    buffer_memory_requirements: BTreeMap<(BufferCreateFlags, BufferUsageFlags), (u64, u32)>,
+    buffer_memory_requirements: HashMap<(BufferCreateFlags, BufferUsageFlags), (u64, u32)>,
+    image_memory_requirements: HashMap<(Format, ImageTiling, ImageCreateFlags, ImageUsageFlags), u32>,
 
     // runtime state
     runtime_state: LocalState,
@@ -201,7 +198,7 @@ impl VulkanRenderer {
         let resource_storage = ResourceStorage::new(device.clone());
         let runtime_state = LocalState::new(device.clone(), queue_family_index, queue, resource_storage);
 
-        Ok(Self {
+        let mut res = Self {
             device,
             debug_report,
             surface,
@@ -211,17 +208,19 @@ impl VulkanRenderer {
 
             memory_heaps,
             memory_types,
-            buffer_memory_requirements: BTreeMap::new(),
+            buffer_memory_requirements: HashMap::new(),
+            image_memory_requirements: HashMap::new(),
 
             runtime_state,
-        })
+        };
+
+        res.update_swapchain_image_handles();
+
+        Ok(res)
     }
 
     pub fn test_buffer_sizes(&mut self, usage: vk::BufferUsageFlags) {
         info!("Test buffer sizes for usage {:?}", usage);
-
-        let mut alignment = 0;
-        let mut memory_types = 0;
 
         let buffer = unsafe {
             self.device.create_buffer(&BufferCreateInfo::default()
@@ -231,8 +230,8 @@ impl VulkanRenderer {
 
         let memory_requirements = unsafe { self.device.get_buffer_memory_requirements(buffer) };
 
-        alignment = memory_requirements.alignment;
-        memory_types = memory_requirements.memory_type_bits;
+        let alignment = memory_requirements.alignment;
+        let memory_types = memory_requirements.memory_type_bits;
 
         // if memory_requirements.size != i {
         //     info!("{} -> {}", i, memory_requirements.size);
@@ -244,6 +243,29 @@ impl VulkanRenderer {
         info!("Alignment: {}. Memory types: {:b}", alignment, memory_types);
     }
 
+    fn update_swapchain_image_handles(&mut self) {
+        let extent = self.swapchain_wrapper.get_extent();
+        if let Some(old_handles) = self.swapchain_wrapper.try_get_images() {
+            for image in old_handles {
+                self.runtime_state.remove_image(image);
+            }
+        }
+        let images = self.swapchain_wrapper.swapchain_images.iter().map(|i| {
+            let image = ImageInner {
+                image: *i,
+                layout: ImageLayout::UNDEFINED,
+                memory: None,
+                usages: ResourceUsages::None,
+            };
+            let key = self.runtime_state.add_image(image);
+            ImageResourceHandle {
+                state_key: key,
+                width: extent.width,
+                height: extent.height,
+            }
+        }).collect::<Vec<_>>();
+        self.swapchain_wrapper.register_image_handles(&images);
+    }
     pub fn recreate_resize(&mut self, new_extent: (u32, u32)) {
         let g = range_event_start!("[Vulkan] Recreate swapchain");
         let new_extent = Extent2D {
@@ -268,8 +290,11 @@ impl VulkanRenderer {
         };
         let new_format = self.swapchain_wrapper.get_surface_format();
         if new_format != old_format {
-            unimplemented!("Swapchain returned the wrong format");
+            unimplemented!("Swapchain format has changed");
         }
+
+        // 2.1 update image handles
+        self.update_swapchain_image_handles();
 
         // // 3. Recreate swapchain_dependent resources
         // self.render_pass_resources = self.render_pass.create_render_pass_resources(
@@ -304,6 +329,48 @@ impl VulkanRenderer {
                 let alignment = memory_requirements.alignment;
 
                 (alignment, memory_requirements.memory_type_bits)
+            });
+
+        *device_memory_type
+    }
+
+    fn get_image_memory_requirements(&mut self, format: Format, tiling: ImageTiling, usage: ImageUsageFlags, flags: ImageCreateFlags) -> u32 {
+        let format = if is_color_format(format) {
+            Format::UNDEFINED
+        }
+        else {
+            format
+        };
+
+        let usage = usage & ImageUsageFlags::TRANSIENT_ATTACHMENT;
+        let flags = flags & ImageCreateFlags::SPARSE_BINDING;
+
+        let device_memory_type = self.image_memory_requirements
+            .entry((format, tiling, flags, usage))
+            .or_insert_with(|| {
+                // create a dummy image to get memory requirements
+                let image_create_info = vk::ImageCreateInfo::default()
+                    .image_type(vk::ImageType::TYPE_2D)
+                    .format(format)
+                    .extent(Extent3D {
+                        width: 1,
+                        height: 1,
+                        depth: 1,
+                    })
+                    .mip_levels(1)
+                    .array_layers(1)
+                    .samples(vk::SampleCountFlags::TYPE_1)
+                    .tiling(tiling)
+                    .usage(usage)
+                    .flags(flags)
+                    .sharing_mode(vk::SharingMode::EXCLUSIVE)
+                    .initial_layout(vk::ImageLayout::UNDEFINED);
+
+                let image = unsafe { self.device.create_image(&image_create_info, None) }.unwrap();
+                let memory_requirements = unsafe { self.device.get_image_memory_requirements(image) };
+                unsafe { self.device.destroy_image(image, None) };
+
+                memory_requirements.memory_type_bits
             });
 
         *device_memory_type
@@ -379,7 +446,7 @@ impl VulkanRenderer {
     pub fn new_device_buffer(&mut self, usage: BufferUsageFlags, size: u64) -> BufferResource {
         let flags = BufferCreateFlags::empty();
         let (alignment, memory_types) = self.get_buffer_memory_requirements(usage, flags);
-        let host_memory_type = self.best_device_type(memory_types);
+        let device_memory_type = self.best_device_type(memory_types);
 
         // create buffer
         let buffer = unsafe {
@@ -395,7 +462,7 @@ impl VulkanRenderer {
         let memory = unsafe {
             self.device.allocate_memory(&MemoryAllocateInfo::default()
                 .allocation_size(allocation_size)
-                .memory_type_index(host_memory_type),
+                .memory_type_index(device_memory_type),
                                         None).unwrap() };
         
         unsafe {
@@ -411,7 +478,57 @@ impl VulkanRenderer {
         let buffer = BufferResource::new(self.runtime_state.shared(), state_key, memory, size);
         buffer
     }
-    
+
+    /// Create 2D image with optimal tiling, not mappable to host
+    pub fn new_image(&mut self, format: Format, usage: ImageUsageFlags, samples: SampleCountFlags, width: u32, height: u32) -> ImageResource{
+        let flags = ImageCreateFlags::empty();
+        let memory_types = self.get_image_memory_requirements(format, ImageTiling::OPTIMAL, usage, flags);
+        let device_memory_type = self.best_device_type(memory_types);
+
+        // create image
+        let image = unsafe {
+            self.device.create_image(&ImageCreateInfo::default()
+                .usage(usage)
+                .flags(flags)
+                .extent(Extent3D {
+                    width,
+                    height,
+                    depth: 1
+                })
+                .tiling(ImageTiling::OPTIMAL)
+                .array_layers(1)
+                .mip_levels(1)
+                .image_type(ImageType::TYPE_2D)
+                .initial_layout(ImageLayout::UNDEFINED)
+                .format(format)
+                .samples(samples)
+             , None).unwrap()
+        };
+        let memory_requirements = unsafe { self.device.get_image_memory_requirements(image) };
+        let allocation_size = memory_requirements.size;
+
+        //allocate memory
+        let memory = unsafe {
+            self.device.allocate_memory(&MemoryAllocateInfo::default()
+                .allocation_size(allocation_size)
+                .memory_type_index(device_memory_type),
+                                        None).unwrap() };
+
+        unsafe {
+            self.device.bind_image_memory(image, memory, 0).unwrap();
+        }
+
+        let state_key = self.runtime_state.add_image(ImageInner {
+            image,
+            usages: ResourceUsages::new(),
+            memory: Some(memory),
+            layout: ImageLayout::UNDEFINED,
+        });
+
+        let image = ImageResource::new(self.runtime_state.shared(), state_key, memory, width, height);
+        image
+    }
+
     pub fn runtime_state(&mut self) -> &mut LocalState {
         &mut self.runtime_state
     }

@@ -2,13 +2,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use anyhow::Context;
 use ash::vk;
-use ash::vk::{AccessFlags, BufferMemoryBarrier, CommandBufferBeginInfo, CommandPool, DependencyFlags, FenceCreateInfo, Handle, PipelineStageFlags, Queue, WHOLE_SIZE};
+use ash::vk::{AccessFlags, BufferMemoryBarrier, CommandBufferBeginInfo, CommandPool, DependencyFlags, FenceCreateInfo, Handle, ImageLayout, ImageMemoryBarrier, ImageSubresourceRange, PipelineStageFlags, Queue, WHOLE_SIZE};
 use log::warn;
 use parking_lot::Mutex;
 use slotmap::DefaultKey;
 use smallvec::{smallvec, SmallVec};
-use crate::runtime::recording::{DeviceCommand, RecordContext};
-use crate::runtime::resources::{BufferInner, BufferResourceDestroyHandle, ResourceStorage};
+use crate::runtime::recording::{DeviceCommand, RecordContext, SpecificResourceUsage};
+use crate::runtime::resources::{BufferInner, BufferResourceDestroyHandle, ImageInner, ImageResourceHandle, ResourceStorage, ResourceUsages};
 use crate::runtime::semaphores::{SemaphoreManager, WaitedOperation};
 use crate::runtime::command_buffers::CommandBufferManager;
 use crate::wrappers::device::VkDeviceRef;
@@ -26,7 +26,9 @@ struct SharedStateInner {
     host_waited_submission: usize,
     active_fences: Vec<(usize, vk::Fence)>,
     free_fences: Vec<vk::Fence>,
+
     scheduled_for_destroy_buffers: Vec<BufferResourceDestroyHandle>,
+    scheduled_for_destroy_images: Vec<ImageResourceHandle>,
 }
 impl SharedStateInner {
     fn new(device: VkDeviceRef) -> Self {
@@ -35,7 +37,9 @@ impl SharedStateInner {
             active_fences: Vec::new(),
             free_fences: Vec::new(),
             device,
+
             scheduled_for_destroy_buffers: Vec::new(),
+            scheduled_for_destroy_images: Vec::new(),
         }
     }
 }
@@ -103,6 +107,10 @@ impl SharedStateInner {
 
     pub fn schedule_destroy_buffer(&mut self, handle: BufferResourceDestroyHandle) {
         self.scheduled_for_destroy_buffers.push(handle);
+    }
+
+    pub fn schedule_destroy_image(&mut self, handle: ImageResourceHandle) {
+        self.scheduled_for_destroy_images.push(handle);
     }
 
     /// Check fences from oldest to newest, updating host_waited_submission
@@ -210,6 +218,9 @@ impl SharedState {
     fn schedule_destroy_buffer(&self, handle: BufferResourceDestroyHandle) {
         self.state.lock().schedule_destroy_buffer(handle);
     }
+    fn schedule_destroy_image(&self, handle: ImageResourceHandle) {
+        self.state.lock().schedule_destroy_image(handle);
+    }
     pub fn poll_completed_fences(&self) {
         self.state.lock().poll_completed_fences();
     }
@@ -240,7 +251,7 @@ impl LocalState {
         }
     }
      
-    pub fn shared(&self) -> SharedState {
+    pub(crate) fn shared(&self) -> SharedState {
         self.shared_state.clone()
     }
 
@@ -258,8 +269,15 @@ impl LocalState {
         self.semaphore_manager.on_wait_idle();
         self.command_buffer_manager.on_wait_idle();
     }
-    pub fn add_buffer(&mut self, buffer: BufferInner) -> DefaultKey {
+    pub(crate) fn add_buffer(&mut self, buffer: BufferInner) -> DefaultKey {
         self.resource_storage.add_buffer(buffer)
+    }
+
+    pub(crate) fn add_image(&mut self, image: ImageInner) -> DefaultKey {
+        self.resource_storage.add_image(image)
+    }
+    pub(crate) fn remove_image(&mut self, image: ImageResourceHandle) {
+        self.resource_storage.destroy_image(image.state_key)
     }
 
     pub fn record_device_commands<'a, 'b, F>(&'a mut self, wait_ref: Option<WaitSemaphoreStagesRef>, f: F)
@@ -336,6 +354,20 @@ impl LocalState {
         self.semaphore_manager.on_last_waited_submission(last_waited_submission);
         self.command_buffer_manager.on_last_waited_submission(last_waited_submission);
 
+         let mut wait_semaphore = None;
+         if let Some(wait_sem) = wait_ref {
+             let stage_flags = wait_sem.stage_flags;
+             let (sem, sem_waited_operations) = self.semaphore_manager.get_wait_semaphore(wait_sem, Some(submission_num));
+
+             for waited_op in &sem_waited_operations {
+                 if let WaitedOperation::SwapchainImageAcquired(image_handle) = waited_op {
+                     let image_inner = self.resource_storage.image(image_handle.state_key);
+                     image_inner.usages = ResourceUsages::None;
+                 }
+             }
+             wait_semaphore = Some((sem, stage_flags, sem_waited_operations));
+         }
+
         let cmd_buffer = self.command_buffer_manager.take_command_buffer(submission_num);
 
         // begin recording
@@ -350,48 +382,114 @@ impl LocalState {
         let groups = Self::split_into_barrier_groups(&commands);
 
         for (group_num, group) in groups.iter().enumerate() {
-            let mut buffer_barriers = vec![];
+            let mut buffer_barriers: Vec<BufferMemoryBarrier> = vec![];
+            let mut image_barriers: Vec<ImageMemoryBarrier> = vec![];
             let mut src_stage_mask = PipelineStageFlags::empty();
             let mut dst_stage_mask = PipelineStageFlags::empty();
 
             // accumulate barriers for all commands in the group
             for cmd in group.iter() {
-                for (usage, buffer_handle) in cmd.usages(submission_num, group_num) {
-                    let buffer_inner = self.resource_storage.buffer(buffer_handle.state_key);
+                for usage in cmd.usages(submission_num, group_num) {
+                    match usage {
+                        SpecificResourceUsage::BufferUsage {
+                            usage,
+                            handle
+                        } => {
+                            let buffer_inner = self.resource_storage.buffer(handle.state_key);
 
-                    // 1) update state if waited on host
-                    buffer_inner.usages.on_host_waited(last_waited_submission);
+                            // 1) update state if waited on host
+                            buffer_inner.usages.on_host_waited(last_waited_submission);
 
-                    // 2) update usage information and get prev usage information
-                    let prev_usage = buffer_inner.usages.add_usage(usage);
+                            // 2) update usage information and get prev usage information
+                            let prev_usage = buffer_inner.usages.add_usage(usage);
 
-                    let buffer = buffer_inner.buffer;
+                            let buffer = buffer_inner.buffer;
 
-                    // 3) add memory barrier
-                    if let Some(prev_usage) = prev_usage {
-                        if prev_usage.submission_group_num == group_num && prev_usage.submission_num == submission_num {
-                            panic!("Missing required pipeline barrier between resource usages! Usage1: {:?}, Usage2: {:?}", prev_usage, usage);
+                            // 3) add memory barrier if usage changed or host write occurred
+                            let need_barrier = prev_usage.is_some() ||  handle.host_state.is_some_and(|s| s.has_host_writes.load(Ordering::Relaxed));
+                            if need_barrier {
+                                if buffer_barriers.iter().any(|b| b.buffer == buffer) {
+                                    panic!("Missing required pipeline barrier between same buffer usages! Usage1: {:?}, Usage2: {:?}", prev_usage, usage);
+                                }
+
+                                let mut barrier = BufferMemoryBarrier::default()
+                                    .buffer(buffer)
+                                    .size(WHOLE_SIZE)
+                                    .dst_access_mask(usage.access_flags);
+
+                                dst_stage_mask |= usage.stage_flags;
+
+                                // 3.1 add memory barrier if usage changed
+                                if let Some(prev_usage) = prev_usage {
+                                    barrier = barrier
+                                        .src_access_mask(prev_usage.access_flags);
+
+                                    src_stage_mask |= prev_usage.stage_flags;
+                                }
+
+                                // 3.2 add host_write dependency if host writes occurred
+                                if let Some(host_state) = handle.host_state && host_state.has_host_writes.swap(false, Ordering::Relaxed) {
+                                    barrier.src_access_mask |= AccessFlags::HOST_WRITE;
+
+                                    src_stage_mask |= PipelineStageFlags::HOST;
+                                }
+
+                                buffer_barriers.push(barrier);
+                            }
                         }
-                        buffer_barriers.push(BufferMemoryBarrier::default()
-                            .src_access_mask(prev_usage.access_flags)
-                            .dst_access_mask(usage.access_flags)
-                            .buffer(buffer)
-                            .size(WHOLE_SIZE)
-                        );
+                        SpecificResourceUsage::ImageUsage {
+                            usage,
+                            handle,
+                            required_layout,
+                            image_aspect,
+                        } => {
+                            let image_inner = self.resource_storage.image(handle.state_key);
+                            let prev_layout = image_inner.layout;
 
-                        src_stage_mask |= prev_usage.stage_flags;
-                        dst_stage_mask |= usage.stage_flags;
-                    }
-                    else if let Some(host_state) = buffer_handle.host_state && host_state.has_host_writes.swap(false, Ordering::Relaxed) {
-                        buffer_barriers.push(BufferMemoryBarrier::default()
-                            .src_access_mask(AccessFlags::HOST_WRITE)
-                            .dst_access_mask(usage.access_flags)
-                            .buffer(buffer)
-                            .size(WHOLE_SIZE)
-                        );
+                            // 1) update state if waited on host
+                            image_inner.usages.on_host_waited(last_waited_submission);
 
-                        src_stage_mask |= PipelineStageFlags::HOST;
-                        dst_stage_mask |= usage.stage_flags;
+                            // 2) update usage information and get prev usage information
+                            let prev_usage = image_inner.usages.add_usage(usage);
+
+                            let image = image_inner.image;
+
+                            // 3) add memory barrier if usage changed or layout transition required
+                            let need_barrier = prev_usage.is_some() || required_layout.is_some_and(|required_layout| prev_layout == ImageLayout::GENERAL || required_layout != prev_layout);
+                            if need_barrier {
+                                if image_barriers.iter().any(|b| b.image == image) {
+                                    panic!("Missing required pipeline barrier between same image usages! Usage1: {:?}, Usage2: {:?}", prev_usage, usage);
+                                }
+
+                                let mut barrier = ImageMemoryBarrier::default()
+                                    .image(image)
+                                    .subresource_range(ImageSubresourceRange::default()
+                                        .base_mip_level(1)
+                                        .base_array_layer(1)
+                                        .layer_count(1)
+                                        .level_count(1)
+                                        .aspect_mask(image_aspect))
+                                    .dst_access_mask(usage.access_flags);
+                                dst_stage_mask |= usage.stage_flags;
+
+                                // 3.1 add execution and memory deps if needed
+                                if let Some(prev_usage) = prev_usage {
+                                    barrier = barrier
+                                        .src_access_mask(prev_usage.access_flags);
+
+                                    src_stage_mask |= prev_usage.stage_flags;
+                                }
+
+                                // 3.2 add layout transition if needed
+                                if let Some(required_layout) = required_layout && (prev_layout == ImageLayout::GENERAL || required_layout != prev_layout) {
+                                    barrier = barrier
+                                        .old_layout(prev_layout)
+                                        .new_layout(required_layout);
+                                }
+
+                                image_barriers.push(barrier);
+                            }
+                        }
                     }
                 }
             }
@@ -406,7 +504,7 @@ impl LocalState {
                         DependencyFlags::empty(),
                         &[],
                         &buffer_barriers,
-                        &[]
+                        &image_barriers
                     )
                 }
             }
@@ -422,6 +520,13 @@ impl LocalState {
                         }
                         unsafe {
                             self.device.cmd_copy_buffer(cmd_buffer, src_buffer, dst_buffer, &regions);
+                        }
+                    }
+                    DeviceCommand::BufferToImageCopy {src, dst, regions} => {
+                        let src_buffer = self.resource_storage.buffer(src.state_key).buffer;
+                        let dst_image = self.resource_storage.image(dst.state_key);
+                        unsafe {
+                            self.device.cmd_copy_buffer_to_image(cmd_buffer, src_buffer, dst_image.image, dst_image.layout, &regions);
                         }
                     }
                     DeviceCommand::Barrier => {} // not a command in particular
@@ -450,11 +555,7 @@ impl LocalState {
             .command_buffers(&cmd_buffers);
 
         // handle optional wait semaphore
-        let mut waited_operations = None;
-        if let Some(wait) = wait_ref {
-            let wait_stage_flags = wait.stage_flags;
-            let (sem, sem_waited_operations) = self.semaphore_manager.get_wait_semaphore(wait, Some(submission_num));
-            waited_operations = Some(sem_waited_operations);
+        if let Some((sem, wait_stage_flags, _)) = wait_semaphore {
             wait_semaphores = [sem];
             wait_dst_stage_masks = [wait_stage_flags];
             submit_info = submit_info
@@ -464,7 +565,7 @@ impl LocalState {
 
         // handle optional signal semaphore
         if let Some(signal) = signal_ref {
-            let mut waited_operations = waited_operations.unwrap_or(SmallVec::new());
+            let mut waited_operations = wait_semaphore.map(|(_, _, s)| s).unwrap_or(SmallVec::new());
             // add current submission to waited submissions
             if waited_operations.len() == 1 && let WaitedOperation::Submission(waited_sub_num, PipelineStageFlags::ALL_COMMANDS) = &mut waited_operations[0] {
                 // fast path, update submission number
@@ -489,7 +590,7 @@ impl LocalState {
     }
 
     // Acquire next swapchain image with semaphore signaling
-    pub fn acquire_next_image(&mut self, swapchain_wrapper: &mut SwapchainWrapper) -> anyhow::Result<(u32, WaitSemaphoreRef, bool)> {
+    pub(crate) fn acquire_next_image(&mut self, swapchain_wrapper: &mut SwapchainWrapper) -> anyhow::Result<(u32, WaitSemaphoreRef, bool)> {
         let (signal_ref, wait_ref) = self.semaphore_manager.create_semaphore_pair();
         let signal_semaphore = self.semaphore_manager.allocate_signal_semaphore(&signal_ref, smallvec![]);
 
@@ -504,20 +605,41 @@ impl LocalState {
                 )
                 .context("acquire_next_image")?
         };
+        let image_handle = swapchain_wrapper.get_images()[index as usize];
 
-        self.semaphore_manager.modify_waited_operations(&wait_ref, smallvec![WaitedOperation::SwapchainImageAcquired(index)]);
+        self.semaphore_manager.modify_waited_operations(&wait_ref, smallvec![WaitedOperation::SwapchainImageAcquired(image_handle)]);
 
         Ok((index, wait_ref, is_suboptimal))
     }
 
     // Present with semaphore wait
-    pub fn queue_present(&mut self, image_index: u32, wait_ref: WaitSemaphoreRef, swapchain_wrapper: &mut SwapchainWrapper) -> anyhow::Result<bool> {
+    pub(crate) fn queue_present(&mut self, image_index: u32, wait_ref: WaitSemaphoreRef, swapchain_wrapper: &mut SwapchainWrapper) -> anyhow::Result<bool> {
         // Convert to WaitSemaphoreStagesRef (present doesn't use stages)
         let wait_stages_ref = wait_ref.with_stages(vk::PipelineStageFlags::empty());
 
         // Present operations don't have fence tracking, use None for untracked semaphore
         let (wait_semaphore, waited_operations) = self.semaphore_manager.get_wait_semaphore(wait_stages_ref, None);
+        // ensure swapchain image is prepared and is in PRESENT layout
+        let image_handle = swapchain_wrapper.get_images()[image_index as usize];
+        let image_inner = self.resource_storage.image(image_handle.state_key);
+        if image_inner.layout != ImageLayout::GENERAL || image_inner.layout != ImageLayout::PRESENT_SRC_KHR {
+            warn!("Image layout for presentable image must be PRESENT or GENERAL!");
+        }
+        if let ResourceUsages::DeviceUsage(usage) = image_inner.usages {
+            let usage_sub_num = usage.submission_num;
+            let mut usage_stages = usage.stage_flags;
+            for waited_op in waited_operations {
+                if let WaitedOperation::Submission(sub_num, stages) = waited_op {
+                    if sub_num >= usage_sub_num {
+                        usage_stages &= !stages;
+                    }
+                }
+            }
 
+            if !usage_stages.is_empty() {
+                warn!("Called Queue present on swapchain image with non-synchronized device usage!")
+            }
+        }
 
         unsafe {
             swapchain_wrapper

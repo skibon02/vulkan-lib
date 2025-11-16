@@ -2,7 +2,9 @@ use ash::vk;
 use ash::khr::swapchain;
 use ash::vk::{Extent2D, Format, Image, ImageAspectFlags, ImageTiling, ImageUsageFlags, ImageView, PhysicalDevice, PresentModeKHR, SampleCountFlags, SwapchainKHR};
 use log::info;
+use smallvec::SmallVec;
 use sparkles::range_event_start;
+use crate::runtime::resources::ImageResourceHandle;
 use crate::wrappers::device::VkDeviceRef;
 use crate::wrappers::image::{image_2d_info, imageview_info_for_image, swapchain_info};
 use crate::wrappers::surface::VkSurfaceRef;
@@ -14,6 +16,8 @@ pub struct SwapchainWrapper {
     swapchain_image_views: Vec<ImageView>,
     swapchain_format: Format,
     pub swapchain_extent: Extent2D,
+
+    swapchain_image_handles: Option<SmallVec<[ImageResourceHandle; 3]>>,
 
     device: VkDeviceRef,
     surface: VkSurfaceRef
@@ -95,6 +99,7 @@ impl SwapchainWrapper {
             swapchain,
             swapchain_loader,
             swapchain_images,
+            swapchain_image_handles: None,
             swapchain_image_views,
             swapchain_format: surface_format.format,
             swapchain_extent,
@@ -118,6 +123,12 @@ impl SwapchainWrapper {
     pub fn get_extent(&self) -> Extent2D {
         self.swapchain_extent
     }
+    pub fn try_get_images(&self) -> Option<SmallVec<[ImageResourceHandle; 3]>> {
+        self.swapchain_image_handles.clone()
+    }
+    pub fn get_images(&self) -> SmallVec<[ImageResourceHandle; 3]> {
+        self.swapchain_image_handles.clone().unwrap()
+    }
 
 
     /// # Safety
@@ -128,6 +139,9 @@ impl SwapchainWrapper {
         let swapchain = self.swapchain;
         *self = Self::new(self.device.clone(), physical_device, extent, surface, Some(swapchain))?;
         Ok(())
+    }
+    pub fn register_image_handles(&mut self, images: &[ImageResourceHandle]) {
+        self.swapchain_image_handles = Some(images.into());
     }
 }
 

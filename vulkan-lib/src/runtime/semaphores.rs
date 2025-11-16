@@ -4,14 +4,15 @@ use ash::vk::PipelineStageFlags;
 use log::{error, warn};
 use slotmap::{SlotMap, DefaultKey};
 use smallvec::SmallVec;
+use crate::runtime::resources::ImageResourceHandle;
 use crate::wrappers::device::VkDeviceRef;
 
 pub(crate) type WaitedOperations = SmallVec<[WaitedOperation; 3]>;
-#[derive(Clone, PartialEq)]
+#[derive(Clone)]
 pub(crate) enum WaitedOperation {
     Submission(usize, PipelineStageFlags),
     // swapchain image index
-    SwapchainImageAcquired(u32),
+    SwapchainImageAcquired(ImageResourceHandle),
 }
 enum SemaphoreSlot {
     Unallocated,
