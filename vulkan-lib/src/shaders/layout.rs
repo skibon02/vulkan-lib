@@ -1,5 +1,5 @@
 use std::ops::Range;
-use crate::pipeline::VertexInputDesc;
+use crate::runtime::pipeline::VertexInputDesc;
 use types::GlslTypeVariant;
 
 pub mod types {

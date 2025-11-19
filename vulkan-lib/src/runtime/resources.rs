@@ -5,6 +5,7 @@ use ash::vk::{AccessFlags, Buffer, DeviceMemory, Extent3D, Format, Image, ImageL
 use log::warn;
 use slotmap::{DefaultKey, SlotMap};
 use crate::runtime::{OptionSeqNumShared, SharedState};
+use crate::runtime::pipeline::GraphicsPipelineInner;
 use crate::wrappers::device::VkDeviceRef;
 
 #[derive(Copy, Clone, Debug)]
@@ -266,7 +267,7 @@ impl ImageResourceHandle {
 }
 
 pub struct BufferResourceDestroyHandle {
-    state_key: DefaultKey,
+    pub(crate) state_key: DefaultKey,
     size: u64,
     host_used_in: Option<usize>
 }
@@ -288,7 +289,8 @@ pub(crate) struct ImageInner {
 pub(crate) struct ResourceStorage {
     device: VkDeviceRef,
     buffers: SlotMap<DefaultKey, BufferInner>,
-    images: SlotMap<DefaultKey, ImageInner>
+    images: SlotMap<DefaultKey, ImageInner>,
+    pipelines: SlotMap<DefaultKey, GraphicsPipelineInner>,
 }
 
 impl ResourceStorage {
@@ -296,7 +298,8 @@ impl ResourceStorage {
         Self {
             device,
             buffers: SlotMap::new(),
-            images:SlotMap::new(),
+            images: SlotMap::new(),
+            pipelines: SlotMap::new(),
         }
     }
 
@@ -306,14 +309,14 @@ impl ResourceStorage {
     pub fn buffer(&mut self, key: DefaultKey) -> &mut BufferInner {
         self.buffers.get_mut(key).unwrap()
     }
-    // pub fn destroy_buffer(&mut self, key: DefaultKey) {
-    //     if let Some(buffer_inner) = self.buffers.remove(key) {
-    //         unsafe {
-    //             self.device.destroy_buffer(buffer_inner.buffer, None);
-    //             self.device.free_memory(buffer_inner.memory, None);
-    //         }
-    //     }
-    // }
+    pub fn destroy_buffer(&mut self, key: DefaultKey) {
+        if let Some(buffer_inner) = self.buffers.remove(key) {
+            unsafe {
+                self.device.destroy_buffer(buffer_inner.buffer, None);
+                self.device.free_memory(buffer_inner.memory, None);
+            }
+        }
+    }
 
     pub fn add_image(&mut self, image: ImageInner) -> DefaultKey {
         self.images.insert(image)
@@ -323,9 +326,6 @@ impl ResourceStorage {
     }
     pub fn destroy_image(&mut self, key: DefaultKey) {
         if let Some(image_inner) = self.images.remove(key) {
-            if !image_inner.usages.is_none() {
-                warn!("Destroying a resource image with active device usage!");
-            }
             if let Some(memory) = image_inner.memory {
                 unsafe {
                     self.device.destroy_image(image_inner.image, None);
@@ -333,6 +333,16 @@ impl ResourceStorage {
                 }
             }
         }
+    }
+    
+    pub fn add_pipeline(&mut self, pipeline: GraphicsPipelineInner) -> DefaultKey {
+        self.pipelines.insert(pipeline)
+    }
+    pub fn pipeline(&mut self, key: DefaultKey) -> &mut GraphicsPipelineInner {
+        self.pipelines.get_mut(key).unwrap()
+    }
+    pub fn destroy_pipeline(&mut self, key: DefaultKey) {
+        self.pipelines.remove(key);
     }
 }
 

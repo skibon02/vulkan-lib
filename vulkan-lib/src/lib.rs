@@ -26,11 +26,11 @@ pub use vk::ImageLayout;
 pub use vk::ImageAspectFlags;
 pub use vk::ImageSubresourceLayers;
 pub use vk::ClearColorValue;
+use crate::runtime::pipeline::{GraphicsPipeline, GraphicsPipelineDesc, GraphicsPipelineInner};
 
 pub mod instance;
 mod wrappers;
 mod swapchain_wrapper;
-mod pipeline;
 mod descriptor_sets;
 pub mod util;
 pub mod shaders;
@@ -543,6 +543,13 @@ impl VulkanRenderer {
 
         let image = ImageResource::new(self.runtime_state.shared(), state_key, memory, width, height);
         image
+    }
+
+    pub fn new_pipeline(&mut self, pipeline_desc: GraphicsPipelineDesc) -> GraphicsPipeline {
+        let mut pipeline_inner = GraphicsPipelineInner::new(self.device.clone(), self.render_pass, pipeline_desc);
+        let pipeline = GraphicsPipeline::new(self.runtime_state.shared(), self.render_pass, &mut pipeline_inner);
+        let key = self.runtime_state.add_pipeline(pipeline_inner);
+        pipeline
     }
 
     pub fn runtime_state(&mut self) -> &mut LocalState {

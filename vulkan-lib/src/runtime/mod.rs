@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use anyhow::Context;
 use ash::vk;
-use ash::vk::{AccessFlags, BufferMemoryBarrier, CommandBufferBeginInfo, CommandPool, DependencyFlags, FenceCreateInfo, Handle, ImageAspectFlags, ImageLayout, ImageMemoryBarrier, ImageSubresourceRange, PipelineStageFlags, Queue, WHOLE_SIZE};
+use ash::vk::{AccessFlags, BufferMemoryBarrier, CommandBufferBeginInfo, DependencyFlags, FenceCreateInfo, Handle, ImageAspectFlags, ImageLayout, ImageMemoryBarrier, ImageSubresourceRange, Pipeline, PipelineLayout, PipelineStageFlags, Queue, WHOLE_SIZE};
 use log::{info, warn};
 use parking_lot::Mutex;
 use slotmap::DefaultKey;
@@ -17,8 +17,10 @@ pub mod resources;
 pub mod recording;
 pub mod semaphores;
 pub mod command_buffers;
+pub mod pipeline;
 
 pub use semaphores::{SignalSemaphoreRef, WaitSemaphoreRef, WaitSemaphoreStagesRef};
+use crate::runtime::pipeline::{GraphicsPipelineHandle, GraphicsPipelineInner};
 use crate::swapchain_wrapper::SwapchainWrapper;
 
 struct SharedStateInner {
@@ -29,6 +31,7 @@ struct SharedStateInner {
 
     scheduled_for_destroy_buffers: Vec<BufferResourceDestroyHandle>,
     scheduled_for_destroy_images: Vec<ImageResourceHandle>,
+    scheduled_for_destroy_pipelines: Vec<GraphicsPipelineHandle>
 }
 impl SharedStateInner {
     fn new(device: VkDeviceRef) -> Self {
@@ -40,6 +43,7 @@ impl SharedStateInner {
 
             scheduled_for_destroy_buffers: Vec::new(),
             scheduled_for_destroy_images: Vec::new(),
+            scheduled_for_destroy_pipelines: Vec::new(),
         }
     }
 }
@@ -111,6 +115,10 @@ impl SharedStateInner {
 
     pub fn schedule_destroy_image(&mut self, handle: ImageResourceHandle) {
         self.scheduled_for_destroy_images.push(handle);
+    }
+    
+    pub fn schedule_destroy_pipeline(&mut self, handle: GraphicsPipelineHandle) {
+        self.scheduled_for_destroy_pipelines.push(handle);
     }
 
     /// Check fences from oldest to newest, updating host_waited_submission
@@ -223,6 +231,10 @@ impl SharedState {
     fn schedule_destroy_image(&self, handle: ImageResourceHandle) {
         self.state.lock().schedule_destroy_image(handle);
     }
+    fn schedule_destroy_pipeline(&self, handle: GraphicsPipelineHandle) {
+        self.state.lock().schedule_destroy_pipeline(handle);
+    }
+
     pub fn poll_completed_fences(&self) {
         self.state.lock().poll_completed_fences();
     }
@@ -232,6 +244,7 @@ impl SharedState {
 pub struct LocalState {
     device: VkDeviceRef,
     shared_state: SharedState,
+    
     semaphore_manager: SemaphoreManager,
     command_buffer_manager: CommandBufferManager,
     next_submission_num: usize,
@@ -282,12 +295,12 @@ impl LocalState {
     pub(crate) fn add_buffer(&mut self, buffer: BufferInner) -> DefaultKey {
         self.resource_storage.add_buffer(buffer)
     }
-
     pub(crate) fn add_image(&mut self, image: ImageInner) -> DefaultKey {
         self.resource_storage.add_image(image)
     }
-    pub(crate) fn remove_image(&mut self, image: ImageResourceHandle) {
-        self.resource_storage.destroy_image(image.state_key)
+
+    pub(crate) fn add_pipeline(&mut self, pipeline: GraphicsPipelineInner) -> DefaultKey {
+        self.resource_storage.add_pipeline(pipeline)
     }
 
     pub fn record_device_commands<'a, 'b, F>(&'a mut self, wait_ref: Option<WaitSemaphoreStagesRef>, f: F)

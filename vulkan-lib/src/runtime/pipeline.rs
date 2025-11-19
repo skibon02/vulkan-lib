@@ -1,16 +1,53 @@
 use std::ffi::CStr;
 use ash::vk;
 use ash::vk::{ColorComponentFlags, CompareOp, CullModeFlags, DescriptorSetLayout, DescriptorSetLayoutBinding, DescriptorType, DynamicState, Format, GraphicsPipelineCreateInfo, Pipeline, PipelineCache, PipelineCacheCreateInfo, PipelineColorBlendAttachmentState, PipelineColorBlendStateCreateInfo, PipelineDepthStencilStateCreateInfo, PipelineDynamicStateCreateInfo, PipelineInputAssemblyStateCreateInfo, PipelineLayout, PipelineLayoutCreateInfo, PipelineMultisampleStateCreateInfo, PipelineRasterizationStateCreateInfo, PipelineShaderStageCreateInfo, PipelineVertexInputStateCreateInfo, PipelineViewportStateCreateInfo, PrimitiveTopology, RenderPass, SampleCountFlags, ShaderModuleCreateInfo, ShaderStageFlags, VertexInputAttributeDescription, VertexInputBindingDescription, FALSE};
+use slotmap::DefaultKey;
 use sparkles::range_event_start;
+use crate::runtime::{SharedState};
 use crate::shaders::layout::MemberMeta;
 use crate::wrappers::device::VkDeviceRef;
 
-pub struct VulkanPipeline {
+pub(crate) struct GraphicsPipelineInner {
     device: VkDeviceRef,
-    pipeline: Pipeline,
-    pipeline_layout: PipelineLayout,
-    pipeline_cache: PipelineCache,
-    descriptor_set_layout: DescriptorSetLayout,
+
+    pipeline: Pipeline, // must not be used in command buffer during destruction (lazy destroy)
+    pipeline_layout: PipelineLayout, // vkCmdBindDescriptorSets must not be recorded to any command buffer during destruction (lazy destroy)
+    pipeline_cache: PipelineCache, // can be destroyed
+    descriptor_set_layout: DescriptorSetLayout, // can be destroyed
+}
+
+
+pub struct GraphicsPipeline {
+    key: DefaultKey,
+    shared: SharedState,
+
+    pipeline_layout: PipelineLayout, // vkCmdBindDescriptorSets must not be recorded to any command buffer during destruction (lazy destroy)
+}
+
+impl GraphicsPipeline {
+    pub(crate) fn new(shared: SharedState, key: DefaultKey, pipeline: &mut GraphicsPipelineInner) -> Self {
+        Self {
+            shared,
+            key,
+            pipeline_layout: pipeline.pipeline_layout,
+        }
+    }
+
+    pub fn handle(&self) -> GraphicsPipelineHandle {
+        GraphicsPipelineHandle {
+            key: self.key,
+        }
+    }
+}
+
+impl Drop for GraphicsPipeline {
+    fn drop(&mut self) {
+        self.shared.schedule_destroy_pipeline(self.handle());
+    }
+}
+#[derive(Copy, Clone)]
+pub struct GraphicsPipelineHandle {
+    key: DefaultKey
 }
 #[derive(Debug, Clone)]
 pub struct VertexInputDesc {
@@ -51,15 +88,15 @@ pub enum VertexAssembly {
     TriangleList,
 }
 
-pub struct VulkanPipelineDesc {
+pub struct GraphicsPipelineDesc {
     pub vertex_assembly: VertexAssembly,
     pub attributes: VertexInputDesc,
     pub vert_shader: Vec<u8>,
     pub frag_shader: Vec<u8>,
 }
 
-impl VulkanPipeline {
-    pub fn new(device: VkDeviceRef, render_pass: RenderPass, pipeline_desc: VulkanPipelineDesc) -> VulkanPipeline {
+impl GraphicsPipelineInner {
+    pub fn new(device: VkDeviceRef, render_pass: RenderPass, pipeline_desc: GraphicsPipelineDesc) -> GraphicsPipelineInner {
         let g = range_event_start!("Create pipeline");
 
         // 1. Create layout
@@ -72,9 +109,9 @@ impl VulkanPipeline {
                 .unwrap()
         };
 
-        let set_layoutst = [descriptor_set_layout];
+        let set_layouts = [descriptor_set_layout];
         let pipeline_layout_info = PipelineLayoutCreateInfo::default()
-            .set_layouts(&set_layoutst);
+            .set_layouts(&set_layouts);
         let pipeline_layout = unsafe { device.create_pipeline_layout(&pipeline_layout_info, None).unwrap() };
 
         // shaders
@@ -164,9 +201,9 @@ impl VulkanPipeline {
         unsafe { device.destroy_shader_module(vertex_module, None); }
         unsafe { device.destroy_shader_module(frag_module, None); }
 
-        VulkanPipeline {
+        GraphicsPipelineInner {
             device,
-            
+
             pipeline,
             pipeline_layout,
             pipeline_cache,
@@ -201,14 +238,14 @@ fn get_assembly_create_info(assembly: &VertexAssembly) -> PipelineInputAssemblyS
     }
 }
 
-impl Drop for VulkanPipeline {
+impl Drop for GraphicsPipelineInner {
     fn drop(&mut self) {
         let g = range_event_start!("[Vulkan] Destroy pipeline");
         unsafe {
-            self.device.destroy_descriptor_set_layout(self.descriptor_set_layout, None);
-            self.device.destroy_pipeline_layout(self.pipeline_layout, None);
-            self.device.destroy_pipeline_cache(self.pipeline_cache, None);
             self.device.destroy_pipeline(self.pipeline, None);
+            self.device.destroy_descriptor_set_layout(self.descriptor_set_layout, None);
+            self.device.destroy_pipeline_cache(self.pipeline_cache, None);
+            self.device.destroy_pipeline_layout(self.pipeline_layout, None);
         }
     }
 }
