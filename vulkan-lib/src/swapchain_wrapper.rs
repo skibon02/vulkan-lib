@@ -4,12 +4,14 @@ use ash::vk::{Extent2D, Format, Image, ImageAspectFlags, ImageTiling, ImageUsage
 use log::info;
 use smallvec::SmallVec;
 use sparkles::range_event_start;
-use crate::runtime::resources::ImageResourceHandle;
+use crate::runtime::images::ImageResourceHandle;
 use crate::wrappers::device::VkDeviceRef;
 use crate::wrappers::image::{image_2d_info, imageview_info_for_image, swapchain_info};
 use crate::wrappers::surface::VkSurfaceRef;
 
 pub struct SwapchainWrapper {
+    device: VkDeviceRef,
+    
     swapchain: SwapchainKHR,
     pub swapchain_loader: swapchain::Device,
     pub swapchain_images: Vec<Image>,
@@ -19,7 +21,6 @@ pub struct SwapchainWrapper {
 
     swapchain_image_handles: Option<SmallVec<[ImageResourceHandle; 3]>>,
 
-    device: VkDeviceRef,
     surface: VkSurfaceRef
 }
 

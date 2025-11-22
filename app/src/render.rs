@@ -1,4 +1,3 @@
-use std::mem::swap;
 use smallvec::SmallVec;
 use std::sync::{mpsc, Arc};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -6,8 +5,8 @@ use std::thread;
 use std::thread::JoinHandle;
 use log::{error, info, warn};
 use sparkles::range_event_start;
-use vulkan_lib::{BufferCopy, BufferImageCopy, BufferUsageFlags, ClearColorValue, Extent3D, ImageAspectFlags, ImageLayout, ImageSubresourceLayers, Offset3D, PipelineStageFlags, VulkanRenderer};
-use vulkan_lib::runtime::resources::ImageResourceHandle;
+use vulkan_lib::{BufferImageCopy, BufferUsageFlags, ClearColorValue, Extent3D, ImageAspectFlags, ImageLayout, ImageSubresourceLayers, Offset3D, PipelineStageFlags, VulkanRenderer};
+use vulkan_lib::runtime::images::ImageResourceHandle;
 
 pub enum RenderMessage {
     Redraw { bg_color: [f32; 3] },
@@ -70,7 +69,7 @@ impl RenderTask {
                             // dev_buffer = self.vulkan_renderer.new_device_buffer(BufferUsageFlags::TRANSFER_DST | BufferUsageFlags::TRANSFER_SRC, 4*swapchain_extent.width as u64 * swapchain_extent.height as u64);
                         }
 
-                        self.vulkan_renderer.runtime_state().wait_prev_submission(2);
+                        self.vulkan_renderer.wait_prev_submission(2);
 
                         // Acquire next swapchain image
                         let (image_index, acquire_wait_ref, is_suboptimal) = match self.vulkan_renderer.acquire_next_image() {
@@ -85,7 +84,7 @@ impl RenderTask {
                             warn!("Swapchain is suboptimal after acquire");
                         }
 
-                        let present_wait_ref = self.vulkan_renderer.runtime_state().record_device_commands_signal(Some(acquire_wait_ref.with_stages(PipelineStageFlags::TRANSFER)), |ctx| {
+                        let present_wait_ref = self.vulkan_renderer.record_device_commands_signal(Some(acquire_wait_ref.with_stages(PipelineStageFlags::TRANSFER)), |ctx| {
                             // ctx.fill_buffer(
                             //     dev_buffer.handle_static(),
                             //     0,

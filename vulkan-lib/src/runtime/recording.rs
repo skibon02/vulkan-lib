@@ -2,7 +2,9 @@ use strum::EnumDiscriminants;
 use std::iter;
 use smallvec::{smallvec, SmallVec};
 use ash::vk::{AccessFlags, BufferCopy, BufferImageCopy, ImageAspectFlags, ImageLayout, PipelineStageFlags};
-use crate::runtime::resources::{BufferResourceHandle, ImageResourceHandle, ResourceUsage};
+use crate::runtime::buffers::BufferResourceHandle;
+use crate::runtime::images::ImageResourceHandle;
+use crate::runtime::resources::ResourceUsage;
 
 pub struct RecordContext<'a> {
     commands: Vec<DeviceCommand<'a>>,

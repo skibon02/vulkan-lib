@@ -1,10 +1,10 @@
+use crate::runtime::images::ImageResourceHandle;
 use std::collections::VecDeque;
 use ash::vk;
 use ash::vk::PipelineStageFlags;
 use log::{error, warn};
 use slotmap::{SlotMap, DefaultKey};
 use smallvec::SmallVec;
-use crate::runtime::resources::ImageResourceHandle;
 use crate::wrappers::device::VkDeviceRef;
 
 pub(crate) type WaitedOperations = SmallVec<[WaitedOperation; 3]>;
@@ -46,7 +46,7 @@ pub struct WaitSemaphoreRef {
 
 impl WaitSemaphoreRef {
     /// Add stage flags to create a WaitSemaphoreStagesRef
-    pub fn with_stages(self, stage_flags: vk::PipelineStageFlags) -> WaitSemaphoreStagesRef {
+    pub fn with_stages(self, stage_flags: PipelineStageFlags) -> WaitSemaphoreStagesRef {
         WaitSemaphoreStagesRef {
             key: self.key,
             stage_flags,

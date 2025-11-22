@@ -1,273 +1,330 @@
-use std::sync::Arc;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use anyhow::Context;
 use ash::vk;
-use ash::vk::{AccessFlags, BufferMemoryBarrier, CommandBufferBeginInfo, DependencyFlags, FenceCreateInfo, Handle, ImageAspectFlags, ImageLayout, ImageMemoryBarrier, ImageSubresourceRange, Pipeline, PipelineLayout, PipelineStageFlags, Queue, WHOLE_SIZE};
-use log::{info, warn};
-use parking_lot::Mutex;
+use ash::vk::{AccessFlags, BufferCreateFlags, BufferCreateInfo, BufferMemoryBarrier, BufferUsageFlags, CommandBufferBeginInfo, DependencyFlags, Extent2D, Extent3D, Format, ImageAspectFlags, ImageCreateFlags, ImageCreateInfo, ImageLayout, ImageMemoryBarrier, ImageSubresourceRange, ImageTiling, ImageType, ImageUsageFlags, MemoryAllocateInfo, MemoryHeap, MemoryType, PhysicalDevice, PipelineStageFlags, Queue, SampleCountFlags, WHOLE_SIZE};
+use log::warn;
 use slotmap::DefaultKey;
 use smallvec::{smallvec, SmallVec};
+use sparkles::range_event_start;
 use crate::runtime::recording::{DeviceCommand, RecordContext, SpecificResourceUsage};
-use crate::runtime::resources::{BufferInner, BufferResourceDestroyHandle, ImageInner, ImageResourceHandle, ResourceStorage, ResourceUsage, ResourceUsages};
+use crate::runtime::resources::{BufferInner, ImageInner, ResourceStorage, ResourceUsage, ResourceUsages};
 use crate::runtime::semaphores::{SemaphoreManager, WaitedOperation};
 use crate::runtime::command_buffers::CommandBufferManager;
+use crate::runtime::shared::SharedState;
 use crate::wrappers::device::VkDeviceRef;
+use crate::wrappers::surface::VkSurfaceRef;
+use crate::util::image::is_color_format;
 
 pub mod resources;
 pub mod recording;
 pub mod semaphores;
 pub mod command_buffers;
 pub mod pipeline;
+pub mod shared;
+pub mod buffers;
+pub mod images;
 
 pub use semaphores::{SignalSemaphoreRef, WaitSemaphoreRef, WaitSemaphoreStagesRef};
-use crate::runtime::pipeline::{GraphicsPipelineHandle, GraphicsPipelineInner};
+use crate::runtime::buffers::{BufferResource, MappableBufferResource};
+use crate::runtime::images::{ImageResource, ImageResourceHandle};
+use crate::runtime::pipeline::GraphicsPipelineInner;
 use crate::swapchain_wrapper::SwapchainWrapper;
 
-struct SharedStateInner {
+
+pub struct RuntimeState {
     device: VkDeviceRef,
-    host_waited_submission: usize,
-    active_fences: Vec<(usize, vk::Fence)>,
-    free_fences: Vec<vk::Fence>,
+    shared_state: shared::SharedState,
 
-    scheduled_for_destroy_buffers: Vec<BufferResourceDestroyHandle>,
-    scheduled_for_destroy_images: Vec<ImageResourceHandle>,
-    scheduled_for_destroy_pipelines: Vec<GraphicsPipelineHandle>
-}
-impl SharedStateInner {
-    fn new(device: VkDeviceRef) -> Self {
-        Self {
-            host_waited_submission: 0,
-            active_fences: Vec::new(),
-            free_fences: Vec::new(),
-            device,
-
-            scheduled_for_destroy_buffers: Vec::new(),
-            scheduled_for_destroy_images: Vec::new(),
-            scheduled_for_destroy_pipelines: Vec::new(),
-        }
-    }
-}
-
-impl SharedStateInner {
-    pub fn take_free_fence(&mut self) -> vk::Fence {
-        self.free_fences.pop().unwrap_or_else(|| {
-            unsafe { self.device.create_fence(&FenceCreateInfo::default(), None).unwrap() }
-        })
-    }
-    pub fn submitted_fence(&mut self, submission_num: usize, fence: vk::Fence) {
-        self.active_fences.push((submission_num, fence));
-    }
-
-    pub fn return_free_fence(&mut self, fence: vk::Fence) {
-        self.free_fences.push(fence);
-    }
-
-    pub fn take_fence_to_wait(&mut self, submission_num: usize) -> Option<(usize, vk::Fence)> {
-        if self.host_waited_submission >= submission_num {
-            return None;
-        }
-
-        if let Some(i) = self.active_fences.iter().position(|(n, _) | *n == submission_num) {
-            let (num, f) = self.active_fences.swap_remove(i);
-            Some((num, f))
-        }
-        else {
-            // try find anything bigger
-            let mut best_fence_index = None;
-            let mut min_available_submission = usize::MAX;
-
-            for (i, (num, _)) in self.active_fences.iter().enumerate() {
-                if *num > submission_num {
-                    if *num < min_available_submission {
-                        min_available_submission = *num;
-                        best_fence_index = Some(i);
-                    }
-                }
-            }
-
-            if let Some(i) = best_fence_index {
-                let (num, fence) = self.active_fences.swap_remove(i);
-                Some((num, fence))
-            } else {
-                warn!("Unexpected situation! Cannot find fence to wait on host for submission {} (host waited for {})",
-                    submission_num, self.host_waited_submission);
-                None
-            }
-        }
-    }
-    pub fn confirm_wait_fence(&mut self, submission_num: usize) {
-        self.host_waited_submission = submission_num;
-
-        let mut i = 0;
-        while i < self.active_fences.len() {
-            if self.active_fences[i].0 <= submission_num {
-                let (_, fence) = self.active_fences.swap_remove(i);
-                self.free_fences.push(fence);
-            } else {
-                i += 1;
-            }
-        }
-    }
-
-    pub fn schedule_destroy_buffer(&mut self, handle: BufferResourceDestroyHandle) {
-        self.scheduled_for_destroy_buffers.push(handle);
-    }
-
-    pub fn schedule_destroy_image(&mut self, handle: ImageResourceHandle) {
-        self.scheduled_for_destroy_images.push(handle);
-    }
-    
-    pub fn schedule_destroy_pipeline(&mut self, handle: GraphicsPipelineHandle) {
-        self.scheduled_for_destroy_pipelines.push(handle);
-    }
-
-    /// Check fences from oldest to newest, updating host_waited_submission
-    /// without blocking. Stops at first unsignaled fence.
-    pub fn poll_completed_fences(&mut self) {
-        if self.active_fences.is_empty() {
-            return;
-        }
-
-        // sort by submission number to check oldest first
-        self.active_fences.sort_by_key(|(num, _)| *num);
-
-        let mut last_signaled_submission = self.host_waited_submission;
-        let mut completed_count = 0;
-
-        for i in 0..self.active_fences.len() {
-            let (num, fence) = self.active_fences[i];
-
-            // check fence status without blocking (timeout = 0)
-            let status = unsafe {
-                self.device.wait_for_fences(&[fence], true, 0)
-            };
-
-            match status {
-                Ok(_) => {
-                    // fence is signaled
-                    last_signaled_submission = num;
-                    completed_count += 1;
-                }
-                Err(_) => {
-                    // fence not signaled yet, stop checking
-                    break;
-                }
-            }
-        }
-
-        if completed_count > 0 {
-            // update host_waited_submission
-            self.host_waited_submission = last_signaled_submission;
-
-            // remove and recycle completed fences
-            let completed_fences: Vec<_> = self.active_fences.drain(0..completed_count).collect();
-            for (_, fence) in completed_fences {
-                self.free_fences.push(fence);
-            }
-        }
-    }
-}
-
-impl Drop for SharedStateInner {
-    fn drop(&mut self) {
-        unsafe {
-            for fence in self.free_fences.drain(..) {
-                self.device.destroy_fence(fence, None);
-            }
-
-            for (_, fence) in self.active_fences.drain(..) {
-                self.device.destroy_fence(fence, None);
-            }
-        }
-    }
-}
-
-#[derive(Clone)]
-pub struct SharedState {
-    device: VkDeviceRef,
-    state: Arc<Mutex<SharedStateInner>>,
-}
-
-impl SharedState {
-    pub fn new(device: VkDeviceRef) -> Self {
-        Self {
-            device: device.clone(),
-            state: Arc::new(Mutex::new(SharedStateInner::new(device))),
-        }
-    }
-
-    pub fn last_host_waited_submission(&self) -> usize {
-        self.state.lock().host_waited_submission
-    }
-
-
-    pub fn take_free_fence(&self) -> vk::Fence {
-        self.state.lock().take_free_fence()
-    }
-
-    pub fn submitted_fence(&self, submission_num: usize, fence: vk::Fence) {
-        self.state.lock().submitted_fence(submission_num, fence);
-    }
-
-    pub(crate) fn wait_submission(&self, submission_num: usize) {
-        let fence_to_wait = self.state.lock().take_fence_to_wait(submission_num);
-        if let Some((num, fence)) = fence_to_wait {
-            unsafe {
-                self.device.wait_for_fences(&[fence], true, u64::MAX).unwrap();
-            }
-            let mut guard = self.state.lock();
-            guard.confirm_wait_fence(num);
-            guard.return_free_fence(fence);
-        }
-    }
-
-    pub fn confirm_all_waited(&self, submission_num: usize) {
-        self.state.lock().confirm_wait_fence(submission_num);
-    }
-
-    fn schedule_destroy_buffer(&self, handle: BufferResourceDestroyHandle) {
-        self.state.lock().schedule_destroy_buffer(handle);
-    }
-    fn schedule_destroy_image(&self, handle: ImageResourceHandle) {
-        self.state.lock().schedule_destroy_image(handle);
-    }
-    fn schedule_destroy_pipeline(&self, handle: GraphicsPipelineHandle) {
-        self.state.lock().schedule_destroy_pipeline(handle);
-    }
-
-    pub fn poll_completed_fences(&self) {
-        self.state.lock().poll_completed_fences();
-    }
-}
-
-
-pub struct LocalState {
-    device: VkDeviceRef,
-    shared_state: SharedState,
-    
     semaphore_manager: SemaphoreManager,
     command_buffer_manager: CommandBufferManager,
     next_submission_num: usize,
     queue: Queue,
     resource_storage: ResourceStorage,
+
+    // memory management
+    physical_device: PhysicalDevice,
+    memory_types: Vec<MemoryType>,
+    memory_heaps: Vec<MemoryHeap>,
+    buffer_memory_requirements: HashMap<(BufferCreateFlags, BufferUsageFlags), (u64, u32)>,
+    image_memory_requirements: HashMap<(Format, ImageTiling, ImageCreateFlags, ImageUsageFlags), u32>,
+
+    // swapchain
+    swapchain_wrapper: SwapchainWrapper,
+    surface: VkSurfaceRef,
 }
 
-impl LocalState {
-    pub fn new(device: VkDeviceRef, queue_family_index: u32, queue: Queue, resource_storage: ResourceStorage) -> Self {
+impl RuntimeState {
+    pub fn new(
+        device: VkDeviceRef,
+        queue_family_index: u32,
+        queue: Queue,
+        physical_device: PhysicalDevice,
+        memory_types: Vec<MemoryType>,
+        memory_heaps: Vec<MemoryHeap>,
+        swapchain_wrapper: SwapchainWrapper,
+        surface: VkSurfaceRef,
+    ) -> Self {
         let shared_state = SharedState::new(device.clone());
+        let resource_storage = ResourceStorage::new(device.clone());
         Self {
             device: device.clone(),
+
             shared_state,
             semaphore_manager: SemaphoreManager::new(device.clone()),
             command_buffer_manager: CommandBufferManager::new(device, queue_family_index),
             next_submission_num: 1,
             queue,
             resource_storage,
+            physical_device,
+            memory_types,
+            memory_heaps,
+            buffer_memory_requirements: HashMap::new(),
+            image_memory_requirements: HashMap::new(),
+            swapchain_wrapper,
+            surface,
         }
     }
      
-    pub(crate) fn shared(&self) -> SharedState {
-        self.shared_state.clone()
+    // Memory types and requirements methods
+    fn get_buffer_memory_requirements(&mut self, usage: BufferUsageFlags, flags: BufferCreateFlags) -> (u64, u32) {
+        let device_memory_type = self.buffer_memory_requirements
+            .entry((flags, usage))
+            .or_insert_with(|| {
+                // create a dummy buffer to get memory requirements
+                let buffer_create_info = vk::BufferCreateInfo::default()
+                    .size(1)
+                    .usage(usage)
+                    .flags(flags)
+                    .sharing_mode(vk::SharingMode::EXCLUSIVE);
+
+                let buffer = unsafe { self.device.create_buffer(&buffer_create_info, None) }.unwrap();
+                let memory_requirements = unsafe { self.device.get_buffer_memory_requirements(buffer) };
+                unsafe { self.device.destroy_buffer(buffer, None) };
+                let alignment = memory_requirements.alignment;
+
+                (alignment, memory_requirements.memory_type_bits)
+            });
+
+        *device_memory_type
+    }
+
+    fn get_image_memory_requirements(&mut self, format: Format, tiling: ImageTiling, usage: ImageUsageFlags, flags: ImageCreateFlags) -> u32 {
+        let format = if is_color_format(format) {
+            Format::UNDEFINED
+        }
+        else {
+            format
+        };
+
+        let usage = usage & ImageUsageFlags::TRANSIENT_ATTACHMENT;
+        let flags = flags & ImageCreateFlags::SPARSE_BINDING;
+
+        let device_memory_type = self.image_memory_requirements
+            .entry((format, tiling, flags, usage))
+            .or_insert_with(|| {
+                // create a dummy image to get memory requirements
+                let image_create_info = vk::ImageCreateInfo::default()
+                    .image_type(vk::ImageType::TYPE_2D)
+                    .format(format)
+                    .extent(vk::Extent3D {
+                        width: 1,
+                        height: 1,
+                        depth: 1,
+                    })
+                    .mip_levels(1)
+                    .array_layers(1)
+                    .samples(vk::SampleCountFlags::TYPE_1)
+                    .tiling(tiling)
+                    .usage(usage)
+                    .flags(flags)
+                    .sharing_mode(vk::SharingMode::EXCLUSIVE)
+                    .initial_layout(vk::ImageLayout::UNDEFINED);
+
+                let image = unsafe { self.device.create_image(&image_create_info, None) }.unwrap();
+                let memory_requirements = unsafe { self.device.get_image_memory_requirements(image) };
+                unsafe { self.device.destroy_image(image, None) };
+
+                memory_requirements.memory_type_bits
+            });
+
+        *device_memory_type
+    }
+
+    fn best_host_type(&self, memory_type_bits: u32) -> u32 {
+        self.memory_types
+            .iter()
+            .enumerate()
+            .filter(|(i, memory_type)| {
+                memory_type.property_flags.contains(vk::MemoryPropertyFlags::HOST_COHERENT) && (1u32 << i) & memory_type_bits != 0
+            })
+            .next()
+            .expect("Guaranteed to support at least 1 host mappable memory type for buffer").0 as u32
+    }
+
+    fn best_device_type(&self, memory_type_bits: u32) -> u32 {
+        self.memory_types
+            .iter()
+            .enumerate()
+            .filter(|(i, memory_type)| {
+                memory_type.property_flags.contains(vk::MemoryPropertyFlags::DEVICE_LOCAL) && (1u32 << i) & memory_type_bits != 0
+            })
+            .max_by_key(|(_, mem)| {
+                let only_1_flag = mem.property_flags == vk::MemoryPropertyFlags::DEVICE_LOCAL;
+                let heap_size = self.memory_heaps[mem.heap_index as usize].size;
+
+                heap_size + only_1_flag as u64
+            })
+            .expect("Guaranteed to support at least 1 device_local memory type for buffer").0 as u32
+    }
+
+    // Resource creation methods
+
+    /// Create new buffer in mappable memory for TRANSFER_SRC usage
+    pub fn new_host_buffer(&mut self, size: u64) -> MappableBufferResource {
+        let flags = BufferCreateFlags::empty();
+        let usage = BufferUsageFlags::TRANSFER_SRC;
+        let (alignment, memory_types) = self.get_buffer_memory_requirements(usage, flags);
+        let host_memory_type = self.best_host_type(memory_types);
+
+        let (buffer, memory) = self.resource_storage.create_buffer(usage, flags, size, host_memory_type, self.shared_state.clone());
+        MappableBufferResource::new(buffer, memory)
+    }
+
+    /// Create new buffer in device_local memory
+    pub fn new_device_buffer(&mut self, usage: BufferUsageFlags, size: u64) -> BufferResource {
+        let flags = BufferCreateFlags::empty();
+        let (alignment, memory_types) = self.get_buffer_memory_requirements(usage, flags);
+        let device_memory_type = self.best_device_type(memory_types);
+
+        let (buffer, _) = self.resource_storage.create_buffer(usage, flags, size, device_memory_type, self.shared_state.clone());
+        buffer
+    }
+
+    /// Create 2D image with optimal tiling, not mappable to host
+    pub fn new_image(&mut self, format: Format, usage: ImageUsageFlags, samples: SampleCountFlags, width: u32, height: u32) -> ImageResource{
+        let flags = ImageCreateFlags::empty();
+        let memory_types = self.get_image_memory_requirements(format, ImageTiling::OPTIMAL, usage, flags);
+        let device_memory_type = self.best_device_type(memory_types);
+
+        // create image
+        let image = unsafe {
+            self.device.create_image(&ImageCreateInfo::default()
+                .usage(usage)
+                .flags(flags)
+                .extent(Extent3D {
+                    width,
+                    height,
+                    depth: 1
+                })
+                .tiling(ImageTiling::OPTIMAL)
+                .array_layers(1)
+                .mip_levels(1)
+                .image_type(ImageType::TYPE_2D)
+                .initial_layout(ImageLayout::UNDEFINED)
+                .format(format)
+                .samples(samples)
+             , None).unwrap()
+        };
+        let memory_requirements = unsafe { self.device.get_image_memory_requirements(image) };
+        let allocation_size = memory_requirements.size;
+
+        //allocate memory
+        let memory = unsafe {
+            self.device.allocate_memory(&MemoryAllocateInfo::default()
+                .allocation_size(allocation_size)
+                .memory_type_index(device_memory_type),
+                                        None).unwrap() };
+
+        unsafe {
+            self.device.bind_image_memory(image, memory, 0).unwrap();
+        }
+
+        let state_key = self.add_image(ImageInner {
+            image,
+            usages: ResourceUsages::new(),
+            memory: Some(memory),
+            layout: ImageLayout::UNDEFINED,
+            format,
+        });
+
+        let image = ImageResource::new(self.shared_state.clone(), state_key, memory, width, height);
+        image
+    }
+
+    // Swapchain methods
+
+    pub(crate) fn update_swapchain_image_handles(&mut self) {
+        let extent = self.swapchain_wrapper.get_extent();
+        if let Some(old_handles) = self.swapchain_wrapper.try_get_images() {
+            for image in old_handles {
+                self.remove_image(image);
+            }
+        }
+        let format = self.swapchain_wrapper.get_surface_format();
+        let swapchain_images = self.swapchain_wrapper.swapchain_images.clone();
+        let images = swapchain_images.iter().map(|i| {
+            let image = ImageInner {
+                image: *i,
+                layout: ImageLayout::UNDEFINED,
+                memory: None,
+                usages: ResourceUsages::None,
+                format
+            };
+            let key = self.add_image(image);
+            ImageResourceHandle {
+                state_key: key,
+                width: extent.width,
+                height: extent.height,
+            }
+        }).collect::<Vec<_>>();
+        self.swapchain_wrapper.register_image_handles(&images);
+    }
+
+    pub fn recreate_resize(&mut self, new_extent: (u32, u32)) {
+        let g = range_event_start!("[Vulkan] Recreate swapchain");
+        let new_extent = Extent2D {
+            width: new_extent.0,
+            height: new_extent.1,
+        };
+        // Submit all commands and wait for idle
+        self.wait_idle();
+
+        // 1. Destroy swapchain dependent resources
+        // unsafe {
+        //     self.render_pass_resources
+        //         .destroy(&mut self.resource_manager);
+        // }
+
+        // 2. Recreate swapchain
+        let old_format = self.swapchain_wrapper.get_surface_format();
+        let old_image_handles = self.swapchain_wrapper.get_images();
+        unsafe {
+            self.swapchain_wrapper
+                .recreate(self.physical_device, new_extent, self.surface.clone())
+                .unwrap()
+        };
+        for image_handle in old_image_handles {
+            self.destroy_image(image_handle);
+        }
+        let new_format = self.swapchain_wrapper.get_surface_format();
+        if new_format != old_format {
+            unimplemented!("Swapchain format has changed");
+        }
+
+        // 2.1 update image handles
+        self.update_swapchain_image_handles();
+
+        // // 3. Recreate swapchain_dependent resources
+        // self.render_pass_resources = self.render_pass.create_render_pass_resources(
+        //     self.swapchain_wrapper.get_image_views(),
+        //     self.swapchain_wrapper.get_extent(),
+        //     &mut self.resource_manager,
+        // );
+    }
+
+    pub fn swapchain_images(&self) -> SmallVec<[ImageResourceHandle; 3]> {
+        self.swapchain_wrapper.get_images()
     }
 
     pub fn wait_idle(&mut self) {
@@ -292,15 +349,20 @@ impl LocalState {
         
         Some(())
     }
-    pub(crate) fn add_buffer(&mut self, buffer: BufferInner) -> DefaultKey {
-        self.resource_storage.add_buffer(buffer)
-    }
-    pub(crate) fn add_image(&mut self, image: ImageInner) -> DefaultKey {
+    fn add_image(&mut self, image: ImageInner) -> DefaultKey {
         self.resource_storage.add_image(image)
     }
 
-    pub(crate) fn add_pipeline(&mut self, pipeline: GraphicsPipelineInner) -> DefaultKey {
+    fn add_pipeline(&mut self, pipeline: GraphicsPipelineInner) -> DefaultKey {
         self.resource_storage.add_pipeline(pipeline)
+    }
+
+    fn remove_image(&mut self, image: ImageResourceHandle) {
+        self.resource_storage.destroy_image(image.state_key);
+    }
+
+    pub(crate) fn destroy_image(&mut self, image: ImageResourceHandle) {
+        self.shared_state.schedule_destroy_image(image);
     }
 
     pub fn record_device_commands<'a, 'b, F>(&'a mut self, wait_ref: Option<WaitSemaphoreStagesRef>, f: F)
@@ -683,22 +745,22 @@ impl LocalState {
     }
 
     // Acquire next swapchain image with semaphore signaling
-    pub(crate) fn acquire_next_image(&mut self, swapchain_wrapper: &mut SwapchainWrapper) -> anyhow::Result<(u32, WaitSemaphoreRef, bool)> {
+    pub fn acquire_next_image(&mut self) -> anyhow::Result<(u32, WaitSemaphoreRef, bool)> {
         let (signal_ref, wait_ref) = self.semaphore_manager.create_semaphore_pair();
         let signal_semaphore = self.semaphore_manager.allocate_signal_semaphore(&signal_ref, smallvec![]);
 
         let (index, is_suboptimal) = unsafe {
-            swapchain_wrapper
+            self.swapchain_wrapper
                 .swapchain_loader
                 .acquire_next_image(
-                    swapchain_wrapper.get_swapchain(),
+                    self.swapchain_wrapper.get_swapchain(),
                     u64::MAX,
                     signal_semaphore,
                     vk::Fence::null(),
                 )
                 .context("acquire_next_image")?
         };
-        let image_handle = swapchain_wrapper.get_images()[index as usize];
+        let image_handle = self.swapchain_wrapper.get_images()[index as usize];
 
         #[cfg(feature = "recording-logs")]
         info!("Recording command AcquireNextImage (image_index = {})", index);
@@ -709,14 +771,14 @@ impl LocalState {
     }
 
     // Present with semaphore wait
-    pub(crate) fn queue_present(&mut self, image_index: u32, wait_ref: WaitSemaphoreRef, swapchain_wrapper: &mut SwapchainWrapper) -> anyhow::Result<bool> {
+    pub fn queue_present(&mut self, image_index: u32, wait_ref: WaitSemaphoreRef) -> anyhow::Result<bool> {
         // Convert to WaitSemaphoreStagesRef (present doesn't use stages)
         let wait_stages_ref = wait_ref.with_stages(PipelineStageFlags::ALL_COMMANDS);
 
         // Present operations don't have fence tracking, use None for untracked semaphore
         let (wait_semaphore, waited_operations) = self.semaphore_manager.get_wait_semaphore(wait_stages_ref, None);
         // ensure swapchain image is prepared and is in PRESENT layout
-        let image_handle = swapchain_wrapper.get_images()[image_index as usize];
+        let image_handle = self.swapchain_wrapper.get_images()[image_index as usize];
         let image_inner = self.resource_storage.image(image_handle.state_key);
         if image_inner.layout != ImageLayout::GENERAL && image_inner.layout != ImageLayout::PRESENT_SRC_KHR {
             warn!("Image layout for presentable image must be PRESENT or GENERAL!");
@@ -742,13 +804,13 @@ impl LocalState {
         info!("Recording command QueuePresent (image_index = {})", image_index);
 
         unsafe {
-            swapchain_wrapper
+            self.swapchain_wrapper
                 .swapchain_loader
                 .queue_present(
                     self.queue,
                     &vk::PresentInfoKHR::default()
                         .wait_semaphores(&[wait_semaphore])
-                        .swapchains(&[swapchain_wrapper.get_swapchain()])
+                        .swapchains(&[self.swapchain_wrapper.get_swapchain()])
                         .image_indices(&[image_index]),
                 )
                 .context("queue_present")
