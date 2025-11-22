@@ -2,8 +2,8 @@ use strum::EnumDiscriminants;
 use std::iter;
 use smallvec::{smallvec, SmallVec};
 use ash::vk::{AccessFlags, BufferCopy, BufferImageCopy, ImageAspectFlags, ImageLayout, PipelineStageFlags};
-use crate::runtime::buffers::BufferResourceHandle;
-use crate::runtime::images::ImageResourceHandle;
+use crate::runtime::resources::buffers::BufferResourceHandle;
+use crate::runtime::resources::images::ImageResourceHandle;
 use crate::runtime::resources::ResourceUsage;
 
 pub struct RecordContext<'a> {

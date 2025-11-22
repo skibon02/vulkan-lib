@@ -3,9 +3,10 @@ use std::sync::Arc;
 use ash::vk::{self, FenceCreateInfo};
 use log::warn;
 use parking_lot::Mutex;
-use crate::runtime::{pipeline::GraphicsPipelineHandle};
-use crate::runtime::buffers::BufferResourceDestroyHandle;
-use crate::runtime::images::ImageResourceHandle;
+use crate::runtime::resources::buffers::BufferResourceDestroyHandle;
+use crate::runtime::resources::images::ImageResourceHandle;
+use crate::runtime::resources::pipeline::GraphicsPipelineHandle;
+use crate::runtime::resources::render_pass::RenderPassHandle;
 use crate::wrappers::device::VkDeviceRef;
 
 struct SharedStateInner {
@@ -16,7 +17,8 @@ struct SharedStateInner {
 
     scheduled_for_destroy_buffers: Vec<BufferResourceDestroyHandle>,
     scheduled_for_destroy_images: Vec<ImageResourceHandle>,
-    scheduled_for_destroy_pipelines: Vec<GraphicsPipelineHandle>
+    scheduled_for_destroy_pipelines: Vec<GraphicsPipelineHandle>,
+    scheduled_for_destroy_render_passes: Vec<RenderPassHandle>,
 }
 impl SharedStateInner {
     fn new(device: VkDeviceRef) -> Self {
@@ -29,6 +31,7 @@ impl SharedStateInner {
             scheduled_for_destroy_buffers: Vec::new(),
             scheduled_for_destroy_images: Vec::new(),
             scheduled_for_destroy_pipelines: Vec::new(),
+            scheduled_for_destroy_render_passes: Vec::new(),
         }
     }
 }
@@ -104,6 +107,9 @@ impl SharedStateInner {
     
     pub fn schedule_destroy_pipeline(&mut self, handle: GraphicsPipelineHandle) {
         self.scheduled_for_destroy_pipelines.push(handle);
+    }
+    pub fn schedule_destroy_render_pass(&mut self, handle: RenderPassHandle) {
+        self.scheduled_for_destroy_render_passes.push(handle);
     }
 
     /// Check fences from oldest to newest, updating host_waited_submission
@@ -218,6 +224,9 @@ impl SharedState {
     }
     pub fn schedule_destroy_pipeline(&self, handle: GraphicsPipelineHandle) {
         self.state.lock().schedule_destroy_pipeline(handle);
+    }
+    pub fn schedule_destroy_render_pass(&self, handle: RenderPassHandle) {
+        self.state.lock().schedule_destroy_render_pass(handle);
     }
 
     pub fn poll_completed_fences(&self) {

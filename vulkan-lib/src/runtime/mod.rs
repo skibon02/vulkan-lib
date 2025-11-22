@@ -2,13 +2,13 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use anyhow::Context;
 use ash::vk;
-use ash::vk::{AccessFlags, BufferCreateFlags, BufferCreateInfo, BufferMemoryBarrier, BufferUsageFlags, CommandBufferBeginInfo, DependencyFlags, Extent2D, Extent3D, Format, ImageAspectFlags, ImageCreateFlags, ImageCreateInfo, ImageLayout, ImageMemoryBarrier, ImageSubresourceRange, ImageTiling, ImageType, ImageUsageFlags, MemoryAllocateInfo, MemoryHeap, MemoryType, PhysicalDevice, PipelineStageFlags, Queue, SampleCountFlags, WHOLE_SIZE};
+use ash::vk::{AccessFlags, BufferCreateFlags, BufferMemoryBarrier, BufferUsageFlags, CommandBufferBeginInfo, DependencyFlags, Extent2D, Extent3D, Format, ImageAspectFlags, ImageCreateFlags, ImageCreateInfo, ImageLayout, ImageMemoryBarrier, ImageSubresourceRange, ImageTiling, ImageType, ImageUsageFlags, MemoryAllocateInfo, MemoryHeap, MemoryType, PhysicalDevice, PipelineStageFlags, Queue, SampleCountFlags, WHOLE_SIZE};
 use log::warn;
 use slotmap::DefaultKey;
 use smallvec::{smallvec, SmallVec};
 use sparkles::range_event_start;
 use crate::runtime::recording::{DeviceCommand, RecordContext, SpecificResourceUsage};
-use crate::runtime::resources::{BufferInner, ImageInner, ResourceStorage, ResourceUsage, ResourceUsages};
+use crate::runtime::resources::{ImageInner, ResourceStorage, ResourceUsage, ResourceUsages};
 use crate::runtime::semaphores::{SemaphoreManager, WaitedOperation};
 use crate::runtime::command_buffers::CommandBufferManager;
 use crate::runtime::shared::SharedState;
@@ -20,15 +20,12 @@ pub mod resources;
 pub mod recording;
 pub mod semaphores;
 pub mod command_buffers;
-pub mod pipeline;
 pub mod shared;
-pub mod buffers;
-pub mod images;
 
 pub use semaphores::{SignalSemaphoreRef, WaitSemaphoreRef, WaitSemaphoreStagesRef};
-use crate::runtime::buffers::{BufferResource, MappableBufferResource};
-use crate::runtime::images::{ImageResource, ImageResourceHandle};
-use crate::runtime::pipeline::GraphicsPipelineInner;
+use resources::buffers::{BufferResource, MappableBufferResource};
+use resources::images::{ImageResource, ImageResourceHandle};
+use resources::pipeline::GraphicsPipelineInner;
 use crate::swapchain_wrapper::SwapchainWrapper;
 
 
@@ -206,49 +203,7 @@ impl RuntimeState {
         let flags = ImageCreateFlags::empty();
         let memory_types = self.get_image_memory_requirements(format, ImageTiling::OPTIMAL, usage, flags);
         let device_memory_type = self.best_device_type(memory_types);
-
-        // create image
-        let image = unsafe {
-            self.device.create_image(&ImageCreateInfo::default()
-                .usage(usage)
-                .flags(flags)
-                .extent(Extent3D {
-                    width,
-                    height,
-                    depth: 1
-                })
-                .tiling(ImageTiling::OPTIMAL)
-                .array_layers(1)
-                .mip_levels(1)
-                .image_type(ImageType::TYPE_2D)
-                .initial_layout(ImageLayout::UNDEFINED)
-                .format(format)
-                .samples(samples)
-             , None).unwrap()
-        };
-        let memory_requirements = unsafe { self.device.get_image_memory_requirements(image) };
-        let allocation_size = memory_requirements.size;
-
-        //allocate memory
-        let memory = unsafe {
-            self.device.allocate_memory(&MemoryAllocateInfo::default()
-                .allocation_size(allocation_size)
-                .memory_type_index(device_memory_type),
-                                        None).unwrap() };
-
-        unsafe {
-            self.device.bind_image_memory(image, memory, 0).unwrap();
-        }
-
-        let state_key = self.add_image(ImageInner {
-            image,
-            usages: ResourceUsages::new(),
-            memory: Some(memory),
-            layout: ImageLayout::UNDEFINED,
-            format,
-        });
-
-        let image = ImageResource::new(self.shared_state.clone(), state_key, memory, width, height);
+        let image = self.resource_storage.create_image(usage, flags, device_memory_type, width, height, format, samples, self.shared_state.clone());
         image
     }
 
@@ -258,7 +213,7 @@ impl RuntimeState {
         let extent = self.swapchain_wrapper.get_extent();
         if let Some(old_handles) = self.swapchain_wrapper.try_get_images() {
             for image in old_handles {
-                self.remove_image(image);
+                self.resource_storage.destroy_image(image);
             }
         }
         let format = self.swapchain_wrapper.get_surface_format();
@@ -271,7 +226,7 @@ impl RuntimeState {
                 usages: ResourceUsages::None,
                 format
             };
-            let key = self.add_image(image);
+            let key = self.resource_storage.add_image(image);
             ImageResourceHandle {
                 state_key: key,
                 width: extent.width,
@@ -290,7 +245,7 @@ impl RuntimeState {
         // Submit all commands and wait for idle
         self.wait_idle();
 
-        // 1. Destroy swapchain dependent resources
+        // 1. Destroy swapchain dependent resources (framebuffers)
         // unsafe {
         //     self.render_pass_resources
         //         .destroy(&mut self.resource_manager);
@@ -315,7 +270,7 @@ impl RuntimeState {
         // 2.1 update image handles
         self.update_swapchain_image_handles();
 
-        // // 3. Recreate swapchain_dependent resources
+        // // 3. Recreate swapchain_dependent resources (framebuffers)
         // self.render_pass_resources = self.render_pass.create_render_pass_resources(
         //     self.swapchain_wrapper.get_image_views(),
         //     self.swapchain_wrapper.get_extent(),
@@ -349,18 +304,6 @@ impl RuntimeState {
         
         Some(())
     }
-    fn add_image(&mut self, image: ImageInner) -> DefaultKey {
-        self.resource_storage.add_image(image)
-    }
-
-    fn add_pipeline(&mut self, pipeline: GraphicsPipelineInner) -> DefaultKey {
-        self.resource_storage.add_pipeline(pipeline)
-    }
-
-    fn remove_image(&mut self, image: ImageResourceHandle) {
-        self.resource_storage.destroy_image(image.state_key);
-    }
-
     pub(crate) fn destroy_image(&mut self, image: ImageResourceHandle) {
         self.shared_state.schedule_destroy_image(image);
     }

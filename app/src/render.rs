@@ -6,7 +6,7 @@ use std::thread::JoinHandle;
 use log::{error, info, warn};
 use sparkles::range_event_start;
 use vulkan_lib::{BufferImageCopy, BufferUsageFlags, ClearColorValue, Extent3D, ImageAspectFlags, ImageLayout, ImageSubresourceLayers, Offset3D, PipelineStageFlags, VulkanRenderer};
-use vulkan_lib::runtime::images::ImageResourceHandle;
+use vulkan_lib::runtime::resources::images::ImageResourceHandle;
 
 pub enum RenderMessage {
     Redraw { bg_color: [f32; 3] },

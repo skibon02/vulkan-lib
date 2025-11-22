@@ -75,7 +75,7 @@ impl VertexInputDesc {
         }
     }
 
-    pub fn get_input_state_create_info(&self) -> PipelineVertexInputStateCreateInfo {
+    pub fn get_input_state_create_info<'a>(&'a self) -> PipelineVertexInputStateCreateInfo<'a> {
         PipelineVertexInputStateCreateInfo::default()
             .vertex_attribute_descriptions(&self.attrib_desc)
             .vertex_binding_descriptions(&self.binding_desc)

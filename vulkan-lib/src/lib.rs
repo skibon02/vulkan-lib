@@ -10,7 +10,7 @@ use crate::wrappers::capabilities_checker::CapabilitiesChecker;
 use crate::wrappers::debug_report::VkDebugReport;
 use crate::wrappers::device::VkDeviceRef;
 use crate::wrappers::surface::{VkSurface, VkSurfaceRef};
-use crate::runtime::{RuntimeState};
+use crate::runtime::RuntimeState;
 
 pub use vk::BufferUsageFlags;
 pub use vk::PipelineStageFlags;
@@ -30,7 +30,6 @@ mod descriptor_sets;
 pub mod util;
 pub mod shaders;
 pub mod runtime;
-mod render_pass;
 
 pub struct VulkanRenderer {
     debug_report: VkDebugReport,

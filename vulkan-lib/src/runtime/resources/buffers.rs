@@ -98,7 +98,7 @@ impl MappableBufferResource {
         });
     }
 
-    pub fn handle(&self) -> BufferResourceHandle {
+    pub fn handle<'a>(&'a self) -> BufferResourceHandle<'a> {
         BufferResourceHandle {
             state_key: self.inner.state_key,
             size: self.inner.size,

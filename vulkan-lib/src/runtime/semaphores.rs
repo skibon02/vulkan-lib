@@ -1,4 +1,4 @@
-use crate::runtime::images::ImageResourceHandle;
+use crate::runtime::resources::images::ImageResourceHandle;
 use std::collections::VecDeque;
 use ash::vk;
 use ash::vk::PipelineStageFlags;
