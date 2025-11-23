@@ -96,6 +96,7 @@ dependencies = [
  "image",
  "log",
  "raw-window-handle",
+ "render-macro",
  "simple_logger",
  "smallvec",
  "sparkles",
@@ -1894,6 +1895,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed2bf2547551a7053d6fdfafda3f938979645c44812fbfcda098faae3f1a362d"
 dependencies = [
  "bitflags 2.10.0",
+]
+
+[[package]]
+name = "render-macro"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]

@@ -44,7 +44,7 @@ pub fn define_layout(input: TokenStream) -> TokenStream {
         let modify_method_name = format_ident!("modify_{}", field_name);
 
         let inner_type = quote! {
-            <#field_type as render_core::GlslType> :: Inner
+            <#field_type as GlslType> :: Inner
         };
 
 
@@ -106,9 +106,9 @@ pub fn define_layout(input: TokenStream) -> TokenStream {
             #(#trait_methods_defs)*
         }
 
-        impl #trait_name for StateUpdatesBytes<#struct_name> {
-            #(#trait_methods)*
-        }
+        // impl #trait_name for StateUpdatesBytes<#struct_name> {
+        //     #(#trait_methods)*
+        // }
     };
 
     TokenStream::from(expanded)

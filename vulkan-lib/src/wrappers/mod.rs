@@ -4,3 +4,4 @@ pub mod debug_report;
 pub mod device;
 pub mod surface;
 pub mod image;
+pub mod timestamp_pool;

@@ -1,18 +1,18 @@
 use std::mem;
 use std::sync::atomic::AtomicBool;
 use ash::vk;
-use ash::vk::{AccessFlags, AttachmentDescription, AttachmentLoadOp, AttachmentStoreOp, Buffer, BufferCreateFlags, BufferCreateInfo, BufferUsageFlags, DeviceMemory, DeviceSize, Extent3D, Format, Framebuffer, Image, ImageCreateFlags, ImageCreateInfo, ImageLayout, ImageTiling, ImageType, ImageUsageFlags, ImageView, MemoryAllocateInfo, MemoryHeap, MemoryType, PipelineBindPoint, PipelineStageFlags, RenderPass, SampleCountFlags};
+use ash::vk::{AccessFlags, AttachmentDescription, AttachmentLoadOp, AttachmentStoreOp, Buffer, BufferCreateFlags, BufferCreateInfo, BufferUsageFlags, DeviceMemory, DeviceSize, Extent3D, Format, Framebuffer, Image, ImageCreateFlags, ImageCreateInfo, ImageLayout, ImageTiling, ImageType, ImageUsageFlags, ImageView, MemoryAllocateInfo, MemoryHeap, MemoryType, Pipeline, PipelineBindPoint, PipelineLayout, PipelineStageFlags, RenderPass, SampleCountFlags};
 use slotmap::{DefaultKey, SlotMap};
 use smallvec::{smallvec, SmallVec};
 use sparkles::range_event_start;
 use crate::runtime::{OptionSeqNumShared, SharedState};
 use crate::runtime::shared::ScheduledForDestroy;
 use buffers::BufferResource;
-use pipeline::GraphicsPipelineInner;
 use render_pass::RenderPassHandle;
 use crate::runtime::resources::images::{ImageResource, ImageResourceHandle};
 use crate::runtime::resources::render_pass::RenderPassResource;
 use crate::runtime::memory_manager::{MemoryManager, MemoryTypeAlgorithm};
+use crate::runtime::resources::pipeline::{create_graphics_pipeline, GraphicsPipeline, GraphicsPipelineDesc};
 use crate::wrappers::device::VkDeviceRef;
 
 pub mod pipeline;
@@ -137,6 +137,12 @@ pub(crate) struct RenderPassInner {
     framebuffers: SmallVec<[(Framebuffer, SmallVec<[ImageResource; 5]>); 5]>,
     pub last_used_in: usize,
 }
+
+pub(crate) struct GraphicsPipelineInner {
+    pipeline: Pipeline, // must not be used in command buffer during destruction (lazy destroy)
+    pipeline_layout: PipelineLayout, // vkCmdBindDescriptorSets must not be recorded to any command buffer during destruction (lazy destroy)
+}
+
 
 pub(crate) struct ResourceStorage {
     device: VkDeviceRef,
@@ -565,14 +571,26 @@ impl ResourceStorage {
         }
     }
 
-    pub fn add_pipeline(&mut self, pipeline: GraphicsPipelineInner) -> DefaultKey {
-        self.pipelines.insert(pipeline)
+    pub fn create_graphics_pipeline(&mut self, render_pass_handle: RenderPassHandle, desc: GraphicsPipelineDesc, shared: SharedState) -> GraphicsPipeline {
+        let render_pass = self.render_passes.get(render_pass_handle.0).unwrap().render_pass;
+        let (inner, mut handle) = create_graphics_pipeline(self.device.clone(), render_pass, desc);
+        let key = self.pipelines.insert(inner);
+        handle.key = key;
+        GraphicsPipeline {
+            shared,
+            handle
+        }
     }
     pub fn pipeline(&mut self, key: DefaultKey) -> &mut GraphicsPipelineInner {
         self.pipelines.get_mut(key).unwrap()
     }
     pub fn destroy_pipeline(&mut self, key: DefaultKey) {
-        self.pipelines.remove(key);
+        if let Some(pipeline) = self.pipelines.remove(key) {
+            unsafe {
+                self.device.destroy_pipeline(pipeline.pipeline, None);
+                self.device.destroy_pipeline_layout(pipeline.pipeline_layout, None);
+            }
+        }
     }
 
     pub fn destroy_scheduled_resources(&mut self, scheduled: ScheduledForDestroy) {
@@ -621,6 +639,11 @@ impl Drop for ResourceStorage {
                     self.device.destroy_framebuffer(framebuffer, None);
                 }
                 self.device.destroy_render_pass(render_pass_inner.render_pass, None);
+            }
+            
+            for (_, pipeline_inner) in self.pipelines.drain() {
+                self.device.destroy_pipeline(pipeline_inner.pipeline, None);
+                self.device.destroy_pipeline_layout(pipeline_inner.pipeline_layout, None);
             }
 
             for (_, buffer_inner) in self.buffers.drain() {

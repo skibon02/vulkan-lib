@@ -165,6 +165,10 @@ impl CapabilitiesChecker {
 
         Ok(VkDevice::new(device, instance).into())
     }
+
+    pub fn is_device_extension_enabled(&self, extension_name: &CStr) -> bool {
+        self.activated_device_extensions.contains(extension_name.to_str().unwrap())
+    }
 }
 
 impl Default for CapabilitiesChecker {

@@ -4,9 +4,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use ash::vk::{self, FenceCreateInfo, Framebuffer};
 use log::{info, warn};
 use parking_lot::Mutex;
+use sparkles::range_event_start;
 use crate::runtime::resources::buffers::BufferResourceDestroyHandle;
 use crate::runtime::resources::images::ImageResourceHandle;
-use crate::runtime::resources::pipeline::GraphicsPipelineHandle;
+use crate::runtime::resources::pipeline::{GraphicsPipelineDestroyHandle, GraphicsPipelineHandle};
 use crate::runtime::resources::render_pass::RenderPassHandle;
 use crate::wrappers::device::VkDeviceRef;
 
@@ -14,7 +15,7 @@ use crate::wrappers::device::VkDeviceRef;
 pub struct ScheduledForDestroy {
     pub buffers: Vec<(BufferResourceDestroyHandle, usize)>,
     pub images: Vec<(ImageResourceHandle, usize)>,
-    pub pipelines: Vec<(GraphicsPipelineHandle, usize)>,
+    pub pipelines: Vec<(GraphicsPipelineDestroyHandle, usize)>,
     pub render_passes: Vec<(RenderPassHandle, usize)>,
     pub framebuffers: Vec<(Framebuffer, usize)>,
 }
@@ -68,7 +69,7 @@ impl ScheduledForDestroy {
                 i += 1;
             }
         }
-        
+
         if !result.framebuffers.is_empty() {
             info!("Destroying {} framebuffers", result.framebuffers.len());
         }
@@ -87,7 +88,7 @@ impl ScheduledForDestroy {
 
         result
     }
-    
+
     pub fn is_empty(&self) -> bool {
         self.buffers.is_empty() &&
         self.images.is_empty() &&
@@ -169,6 +170,9 @@ impl SharedStateInner {
     }
     pub fn confirm_wait_fence(&mut self, submission_num: usize) {
         self.host_waited_submission = submission_num;
+        if cfg!(feature="recording-logs") {
+            info!("Host waited for submission {}", submission_num);
+        }
 
         let mut i = 0;
         while i < self.active_fences.len() {
@@ -190,7 +194,12 @@ impl SharedStateInner {
     }
 
     pub fn schedule_destroy_pipeline(&mut self, handle: GraphicsPipelineHandle, submission_num: usize) {
-        self.scheduled_for_destroy.pipelines.push((handle, submission_num));
+        unsafe {
+            // we can destroy these immediately
+            self.device.destroy_descriptor_set_layout(handle.descriptor_set_layout, None);
+            self.device.destroy_pipeline_cache(handle.pipeline_cache, None);
+        }
+    self.scheduled_for_destroy.pipelines.push((handle.into(), submission_num));
     }
 
     pub fn schedule_destroy_render_pass(&mut self, handle: RenderPassHandle, submission_num: usize) {
@@ -305,11 +314,14 @@ impl SharedState {
     }
 
     pub(crate) fn wait_submission(&self, submission_num: usize) {
+        let g = range_event_start!("[Vulkan] Wait for fence");
         let fence_to_wait = self.state.lock().take_fence_to_wait(submission_num);
         if let Some((num, fence)) = fence_to_wait {
+            let g = range_event_start!("Actual wait");
             unsafe {
                 self.device.wait_for_fences(&[fence], true, u64::MAX).unwrap();
             }
+            drop(g);
             let mut guard = self.state.lock();
             guard.confirm_wait_fence(num);
             guard.return_free_fence(fence);

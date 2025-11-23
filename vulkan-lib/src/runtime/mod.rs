@@ -1,11 +1,14 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Instant;
 use anyhow::Context;
 use ash::vk;
 use ash::vk::{AccessFlags, BufferCreateFlags, BufferMemoryBarrier, BufferUsageFlags, CommandBufferBeginInfo, DependencyFlags, Extent2D, Format, ImageAspectFlags, ImageLayout, ImageMemoryBarrier, ImageSubresourceRange, ImageUsageFlags, PhysicalDevice, PipelineStageFlags, Queue, SampleCountFlags, WHOLE_SIZE};
-use log::warn;
+use log::{info, warn};
 use slotmap::DefaultKey;
 use smallvec::{smallvec, SmallVec};
-use sparkles::range_event_start;
+use sparkles::external_events::ExternalEventsSource;
+use sparkles::{range_event_start, static_name};
+use strum::IntoDiscriminant;
 use crate::runtime::recording::{DeviceCommand, RecordContext, SpecificResourceUsage};
 use crate::runtime::resources::{AttachmentsDescription, ImageInner, ResourceStorage, ResourceUsage, ResourceUsages};
 use crate::runtime::semaphores::{SemaphoreManager, WaitedOperation};
@@ -25,10 +28,11 @@ pub mod memory_manager;
 pub use semaphores::{SignalSemaphoreRef, WaitSemaphoreRef, WaitSemaphoreStagesRef};
 use resources::buffers::{BufferResource, MappableBufferResource};
 use resources::images::{ImageResource, ImageResourceHandle};
-use resources::pipeline::GraphicsPipelineInner;
-use crate::runtime::resources::render_pass::RenderPassResource;
+use crate::extensions::calibrated_timestamps::CalibratedTimestamps;
+use crate::runtime::resources::pipeline::{GraphicsPipeline, GraphicsPipelineDesc};
+use crate::runtime::resources::render_pass::{RenderPassHandle, RenderPassResource};
 use crate::swapchain_wrapper::SwapchainWrapper;
-
+use crate::wrappers::timestamp_pool::TimestampPool;
 
 pub struct RuntimeState {
     device: VkDeviceRef,
@@ -41,9 +45,18 @@ pub struct RuntimeState {
 
     physical_device: PhysicalDevice,
 
+    last_time_sync_tm: Option<Instant>,
+    sparkles_gpu_channel: ExternalEventsSource,
+
     // swapchain
     swapchain_wrapper: SwapchainWrapper,
     surface: VkSurfaceRef,
+
+    // queries
+    timestamp_pool: Option<TimestampPool>,
+
+    // extensions
+    calibrated_timestamps: Option<CalibratedTimestamps>,
 }
 
 impl RuntimeState {
@@ -52,13 +65,23 @@ impl RuntimeState {
         queue_family_index: u32,
         queue: Queue,
         physical_device: PhysicalDevice,
-        memory_types: Vec<ash::vk::MemoryType>,
-        memory_heaps: Vec<ash::vk::MemoryHeap>,
+        memory_types: Vec<vk::MemoryType>,
+        memory_heaps: Vec<vk::MemoryHeap>,
         swapchain_wrapper: SwapchainWrapper,
         surface: VkSurfaceRef,
+        calibrated_timestamps: Option<CalibratedTimestamps>,
+        timestamp_pool: Option<TimestampPool>,
     ) -> Self {
         let shared_state = SharedState::new(device.clone());
         let resource_storage = ResourceStorage::new(device.clone(), memory_types, memory_heaps);
+
+        let mut sparkles_gpu_channel = ExternalEventsSource::new("Vulkan GPU".to_string());
+        if let Some(calibrated_timestamps) = &calibrated_timestamps {
+            if let Some((gpu_tm, host_tm)) = calibrated_timestamps.get_timestamps_pair() {
+                sparkles_gpu_channel.push_sync_point(host_tm, gpu_tm);
+            }
+        }
+
         Self {
             device: device.clone(),
 
@@ -70,6 +93,11 @@ impl RuntimeState {
             physical_device,
             swapchain_wrapper,
             surface,
+            timestamp_pool,
+            calibrated_timestamps,
+
+            sparkles_gpu_channel,
+            last_time_sync_tm: None,
         }
     }
 
@@ -100,6 +128,10 @@ impl RuntimeState {
     pub fn new_render_pass(&mut self, attachments_desc: AttachmentsDescription) -> RenderPassResource {
         let swapchain_images = self.swapchain_wrapper.get_images();
         self.resource_storage.create_render_pass(self.device.clone(), self.shared_state.clone(), swapchain_images, attachments_desc)
+    }
+
+    pub fn new_pipeline(&mut self, render_pass: RenderPassHandle, pipeline_desc: GraphicsPipelineDesc) -> GraphicsPipeline {
+        self.resource_storage.create_graphics_pipeline(render_pass, pipeline_desc, self.shared_state.clone())
     }
 
     pub fn destroy_old_resources(&mut self) {
@@ -136,7 +168,10 @@ impl RuntimeState {
             height: new_extent.1,
         };
         // Submit all commands and wait for idle
+        // TODO: we can schedule destruction for old swapchain :)
+        let g = range_event_start!("Wait idle");
         self.wait_idle();
+        drop(g);
 
         let active_render_passes = self.resource_storage.render_passes();
         // 1. Destroy swapchain dependent resources (framebuffers)
@@ -165,6 +200,7 @@ impl RuntimeState {
         let new_images = self.swapchain_wrapper.get_images();
 
         // 3. Recreate swapchain_dependent resources (framebuffers)
+        let g = range_event_start!("Create framebuffers");
         for render_pass in &active_render_passes {
             self.resource_storage.recreate_render_pass_resources(*render_pass, self.device.clone(), self.shared_state.clone(), &new_images);
         }
@@ -175,6 +211,7 @@ impl RuntimeState {
     }
 
     pub fn wait_idle(&mut self) {
+        let g = range_event_start!("[Vulkan] Wait queue idle");
         unsafe {
             self.device.queue_wait_idle(self.queue).unwrap();
         }
@@ -198,6 +235,19 @@ impl RuntimeState {
     }
     pub(crate) fn destroy_image(&mut self, image: ImageResourceHandle) {
         self.shared_state.schedule_destroy_image(image);
+    }
+
+    fn handle_add_sync_point(&mut self) {
+        if let Some(calibrated_timestamps) = &self.calibrated_timestamps {
+            let g = range_event_start!("Add gpu time sync point");
+            if self.last_time_sync_tm.is_none_or(| t| t.elapsed().as_millis() > 50) && self.timestamp_pool.is_some() {
+                self.last_time_sync_tm = Some(Instant::now());
+
+                if let Some((gpu_tm, host_tm)) = calibrated_timestamps.get_timestamps_pair() {
+                    self.sparkles_gpu_channel.push_sync_point(host_tm, gpu_tm);
+                }
+            }
+        }
     }
 
     pub fn record_device_commands<'a, 'b, F>(&'a mut self, wait_ref: Option<WaitSemaphoreStagesRef>, f: F)
@@ -262,7 +312,10 @@ impl RuntimeState {
     fn record_device_commands_impl<'a, 'b, F>(&'a mut self, f: F, wait_ref: Option<WaitSemaphoreStagesRef>, signal_ref: Option<semaphores::SignalSemaphoreRef>)
     where
         F: FnOnce(&mut RecordContext<'b>),
-         {
+    {
+        let g = range_event_start!("Record and submit");
+        self.handle_add_sync_point();
+
         let mut record_context = RecordContext::new(); // lives for 'c
         f(&mut record_context);
 
@@ -298,6 +351,12 @@ impl RuntimeState {
             ).unwrap();
         }
 
+        // write timestamp
+        let mut slot = None;
+        if let Some(timestamp_pool) = &mut self.timestamp_pool {
+            slot = Some(timestamp_pool.write_start_timestamp(cmd_buffer, submission_num));
+        }
+
         // record commands grouped by barriers
         let commands = record_context.take_commands();
         let groups = Self::split_into_barrier_groups(&commands);
@@ -305,6 +364,8 @@ impl RuntimeState {
         for (group_num, group) in groups.iter().enumerate() {
             #[cfg(feature = "recording-logs")]
             info!("{{");
+            #[cfg(feature = "recording-logs")]
+            info!("  Submission number: {:?}", submission_num);
             let mut buffer_barriers: Vec<BufferMemoryBarrier> = vec![];
             let mut image_barriers: Vec<ImageMemoryBarrier> = vec![];
             let mut src_stage_mask = PipelineStageFlags::empty();
@@ -530,6 +591,11 @@ impl RuntimeState {
             info!("}}");
         }
 
+        // write end timestamp
+        if let Some(slot) = slot {
+            self.timestamp_pool.as_mut().unwrap().write_end_timestamp(cmd_buffer, slot);
+        }
+
         // end recording
         unsafe {
             self.device.end_command_buffer(cmd_buffer).unwrap();
@@ -577,8 +643,18 @@ impl RuntimeState {
         }
 
         // submit
+        let g = range_event_start!("Submit command buffer");
         unsafe {
             self.device.queue_submit(self.queue, &[submit_info], fence).unwrap();
+        }
+        drop(g);
+
+        // handle timestamp queries
+        if let Some(timestamp_pool) = &mut self.timestamp_pool {
+            for (submission_num, begin, end) in timestamp_pool.read_timestamps() {
+                let ev_name = self.sparkles_gpu_channel.map_event_name(static_name!("Command buffer execution"));
+                self.sparkles_gpu_channel.push_events(&[begin, end], &[(ev_name, 1), (ev_name, 0x81)])
+            }
         }
 
         // register fence

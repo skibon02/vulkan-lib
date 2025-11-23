@@ -3,7 +3,7 @@ use std::slice::from_raw_parts_mut;
 use std::sync::atomic::Ordering;
 use ash::vk::{DeviceMemory, MemoryMapFlags};
 use slotmap::DefaultKey;
-
+use sparkles::range_event_start;
 use crate::runtime::{resources::BufferHostState, shared::SharedState};
 
 
@@ -64,6 +64,7 @@ impl MappableBufferResource {
     }
 
     pub fn map_update<F: FnOnce(&mut [u8])>(&mut self, range: Range<u64>, f: F) {
+        let g = range_event_start!("[Vulkan] Map buffer memory");
         if let Some(seq_num) = self.host_state.last_used_in.load() {
             self.inner.shared.wait_submission(seq_num);
         }
@@ -81,7 +82,9 @@ impl MappableBufferResource {
         let ptr = unsafe { device.map_memory(self.memory, range.start, size, MemoryMapFlags::empty()).unwrap() } as *mut u8;
         let slice = unsafe { from_raw_parts_mut(ptr, size as usize) };
 
+        let g = range_event_start!("Application writes");
         f(slice);
+        drop(g);
 
         unsafe {
             device.unmap_memory(self.memory);

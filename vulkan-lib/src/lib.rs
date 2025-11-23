@@ -25,6 +25,8 @@ pub use vk::ClearColorValue;
 pub use vk::SampleCountFlags;
 pub use vk::AttachmentLoadOp;
 pub use vk::{AttachmentStoreOp, AttachmentDescription, Format};
+use crate::extensions::calibrated_timestamps::CalibratedTimestamps;
+use crate::wrappers::timestamp_pool::TimestampPool;
 
 pub mod instance;
 mod wrappers;
@@ -33,6 +35,7 @@ mod descriptor_sets;
 pub mod util;
 pub mod shaders;
 pub mod runtime;
+mod extensions;
 
 pub struct VulkanRenderer {
     debug_report: VkDebugReport,
@@ -41,11 +44,10 @@ pub struct VulkanRenderer {
 
     // runtime state
     runtime_state: RuntimeState,
-
-    // extensions
 }
 
 impl VulkanRenderer {
+    #[track_caller]
     pub fn new_for_window(window_handle: RawWindowHandle, display_handle: RawDisplayHandle, window_size: (u32, u32)) -> anyhow::Result<Self> {
         let g = range_event_start!("[Vulkan] INIT");
         info!(
@@ -163,6 +165,27 @@ impl VulkanRenderer {
         let device_properties = unsafe { instance.get_physical_device_properties(physical_device) };
         let device_limits = device_properties.limits;
 
+
+        // extensions
+        let timestamp_query_support = device_limits.timestamp_period != 0.0 && device_limits.timestamp_compute_and_graphics != 0
+            && queue_family_properties[queue_family_index as usize].timestamp_valid_bits != 0;
+        let timestamp_pool = if !timestamp_query_support {
+            warn!("Timestamp query is not supported!");
+            None
+        }
+        else {
+            let res = TimestampPool::new(device.clone(), 10, device_limits.timestamp_period);
+            res
+        };
+        let calibrated_timestamps = if caps_checker.is_device_extension_enabled(ash::ext::calibrated_timestamps::NAME) {
+            Some(CalibratedTimestamps::new(instance.as_ref(), physical_device, device.as_ref()))
+        }
+        else {
+            warn!("Calibrated timestamps extension is supported");
+            None
+        };
+
+
         let queue = unsafe { device.get_device_queue(queue_family_index, 0) };
 
 
@@ -196,6 +219,8 @@ impl VulkanRenderer {
             memory_heaps,
             swapchain_wrapper,
             surface.clone(),
+            calibrated_timestamps,
+            timestamp_pool,
         );
 
         let mut res = Self {

@@ -1,4 +1,9 @@
-use smallvec::SmallVec;
+use vulkan_lib::shaders::layout::types::{float, GlslType};
+use vulkan_lib::shaders::layout::LayoutInfo;
+use vulkan_lib::shaders::layout::MemberMeta;
+use std::mem::offset_of;
+use vulkan_lib::shaders::layout::types::GlslTypeVariant;
+use smallvec::{smallvec, SmallVec};
 use std::sync::{mpsc, Arc};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
@@ -6,9 +11,13 @@ use std::thread::JoinHandle;
 use std::time::Instant;
 use log::{error, info, warn};
 use sparkles::range_event_start;
-use vulkan_lib::{AttachmentDescription, AttachmentLoadOp, AttachmentStoreOp, BufferImageCopy, BufferUsageFlags, ClearColorValue, Extent3D, Format, ImageAspectFlags, ImageLayout, ImageSubresourceLayers, Offset3D, PipelineStageFlags, SampleCountFlags, VulkanRenderer};
+use render_macro::define_layout;
+use vulkan_lib::{use_shader, AttachmentDescription, AttachmentLoadOp, AttachmentStoreOp, BufferUsageFlags, ClearColorValue, Extent3D, Format, ImageAspectFlags, ImageLayout, ImageSubresourceLayers, Offset3D, PipelineStageFlags, SampleCountFlags, VulkanRenderer};
 use vulkan_lib::runtime::resources::AttachmentsDescription;
 use vulkan_lib::runtime::resources::images::ImageResourceHandle;
+use vulkan_lib::runtime::resources::pipeline::{GraphicsPipelineDesc, VertexInputDesc};
+use vulkan_lib::shaders::layout::types::{int, vec2, vec4};
+use vulkan_lib::shaders::{DescriptorBindingsDesc, UniformBindingType};
 
 pub enum RenderMessage {
     Redraw { bg_color: [f32; 3] },
@@ -25,6 +34,39 @@ pub struct RenderTask {
     last_print: Instant,
 }
 
+define_layout! {
+    pub struct CircleAttributes {
+        pub color: vec4<0>,
+        pub pos: vec2<0>,
+        pub trig_time: int<0>,
+    }
+}
+
+// uniforms
+define_layout! {
+    pub struct Time {
+        pub time: int<0>
+    }
+}
+
+define_layout! {
+    pub struct MapStats {
+        pub r: float<0>,
+        pub ar: float<0>,
+        pub aspect: float<0>
+    }
+}
+
+
+impl Default for CircleAttributes {
+    fn default() -> Self {
+        Self {
+            color: [1.0, 1.0, 1.0, 0.0].into(),
+            pos: [0.0, 0.0].into(),
+            trig_time: 0.into(),
+        }
+    }
+}
 impl RenderTask {
     pub fn new(vulkan_renderer: VulkanRenderer) -> (Self, mpsc::Sender<RenderMessage>, Arc<AtomicBool>) {
         let (tx, rx) = mpsc::channel::<RenderMessage>();
@@ -88,8 +130,17 @@ impl RenderTask {
 
                 attachments_desc = attachments_desc.with_resolve_attachment(resolve_attachment);
             }
-            
+
             let render_pass = self.vulkan_renderer.new_render_pass(attachments_desc);
+            let attributes = CircleAttributes::get_attributes_configuration();
+            let bindings_desc = smallvec![
+                (0, UniformBindingType::UniformBuffer),
+                (1, UniformBindingType::UniformBuffer),
+                (2, UniformBindingType::CombinedImageSampler)
+            ];
+            let pipeline_desc = GraphicsPipelineDesc::new(use_shader!("circle"), attributes, bindings_desc);
+            let pipeline = self.vulkan_renderer.new_pipeline(render_pass.handle(), pipeline_desc);
+
 
             // let mut dev_buffer = self.vulkan_renderer.new_device_buffer(BufferUsageFlags::TRANSFER_DST | BufferUsageFlags::TRANSFER_SRC, 4*swapchain_extent.width as u64 * swapchain_extent.height as u64);
             loop {
@@ -118,9 +169,12 @@ impl RenderTask {
                             // dev_buffer = self.vulkan_renderer.new_device_buffer(BufferUsageFlags::TRANSFER_DST | BufferUsageFlags::TRANSFER_SRC, 4*swapchain_extent.width as u64 * swapchain_extent.height as u64);
                         }
 
+                        let g = range_event_start!("Wait previous submission");
                         self.vulkan_renderer.wait_prev_submission(2);
+                        drop(g);
 
                         // Acquire next swapchain image
+                        let g = range_event_start!("Acquire next image");
                         let (image_index, acquire_wait_ref, is_suboptimal) = match self.vulkan_renderer.acquire_next_image() {
                             Ok(result) => result,
                             Err(e) => {
@@ -128,6 +182,7 @@ impl RenderTask {
                                 continue;
                             }
                         };
+                        drop(g);
 
                         if is_suboptimal {
                             warn!("Swapchain is suboptimal after acquire");
@@ -173,6 +228,7 @@ impl RenderTask {
                             );
                         });
 
+                        let g = range_event_start!("Present");
                         if let Err(e) = self.vulkan_renderer.queue_present(image_index, present_wait_ref) {
                             error!("Present error: {:?}", e);
                         }
@@ -190,7 +246,7 @@ impl RenderTask {
                         break;
                     }
                 }
-                
+
                 if self.last_print.elapsed().as_secs() >= 3 {
                     self.vulkan_renderer.dump_resource_usage();
                     self.last_print = Instant::now();
