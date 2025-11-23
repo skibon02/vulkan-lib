@@ -1,3 +1,4 @@
+use std::sync::atomic::AtomicBool;
 use log::{error, info};
 use sparkles::config::SparklesConfig;
 use sparkles::{range_event_start, FinalizeGuard};
@@ -10,11 +11,38 @@ use crate::app::App;
 mod app;
 pub mod render;
 
+#[cfg(target_os = "android")]
+pub mod android;
+
+#[cfg(target_os = "android")]
+fn sparkles_init() -> FinalizeGuard{
+    sparkles::init(SparklesConfig::default()
+        .without_file_sender()
+        .with_udp_multicast_default())
+}
+#[cfg(not(target_os = "android"))]
 fn sparkles_init() -> FinalizeGuard{
     sparkles::init(SparklesConfig::default()
         .with_udp_multicast_default())
 }
 
+static FIRST_RUN: AtomicBool = AtomicBool::new(true);
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+fn android_main(app: winit::platform::android::activity::AndroidApp) {
+    use crate::android::android_main;
+
+    if !FIRST_RUN.swap(false, std::sync::atomic::Ordering::SeqCst) {
+        std::process::exit(0);
+    }
+
+    let g = sparkles_init();
+    let event_loop = android_main(app);
+    let mut winit_app: WinitApp = WinitApp::new(g);
+    event_loop.run_app(&mut winit_app).unwrap();
+    info!("Winit application exited without error!");
+    std::process::exit(0);
+}
 pub fn run() {
     let g = sparkles_init();
     let event_loop = EventLoop::new().unwrap();

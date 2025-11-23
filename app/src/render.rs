@@ -85,6 +85,8 @@ impl RenderTask {
 
     pub fn spawn(mut self) -> JoinHandle<()> {
         thread::Builder::new().name("Render".into()).spawn(move || {
+            info!("Render thread spawned!");
+
             let swapchain_extent = self.swapchain_image_handles[0].extent();
             let mut staging_buffer = self.vulkan_renderer.new_host_buffer((4 * swapchain_extent.width * swapchain_extent.height) as u64);
 

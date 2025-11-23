@@ -180,18 +180,18 @@ impl AttachmentsDescription {
 
     pub fn fill_defaults(&mut self, swapchain_format: Format) {
         self.color_attachment_desc.format = swapchain_format;
-        self.color_attachment_desc.load_op = AttachmentLoadOp::CLEAR;
-        self.color_attachment_desc.store_op = AttachmentStoreOp::STORE;
+        // self.color_attachment_desc.load_op = AttachmentLoadOp::CLEAR;
+        // self.color_attachment_desc.store_op = AttachmentStoreOp::STORE;
         if let Some(depth_attachment) = &mut self.depth_attachment_desc {
             depth_attachment.stencil_load_op = AttachmentLoadOp::DONT_CARE;
             depth_attachment.stencil_store_op = AttachmentStoreOp::DONT_CARE;
-            depth_attachment.load_op = AttachmentLoadOp::CLEAR;
-            depth_attachment.store_op = AttachmentStoreOp::DONT_CARE;
+            // depth_attachment.load_op = AttachmentLoadOp::CLEAR;
+            // depth_attachment.store_op = AttachmentStoreOp::DONT_CARE;
         }
         if let Some(resolve_attachment) = &mut self.resolve_attachment_desc {
             resolve_attachment.format = swapchain_format;
-            resolve_attachment.load_op = AttachmentLoadOp::DONT_CARE;
-            resolve_attachment.store_op = AttachmentStoreOp::STORE;
+            // resolve_attachment.load_op = AttachmentLoadOp::DONT_CARE;
+            // resolve_attachment.store_op = AttachmentStoreOp::STORE;
         }
     }
 }

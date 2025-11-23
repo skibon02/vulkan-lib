@@ -37,6 +37,9 @@ pub mod shaders;
 pub mod runtime;
 mod extensions;
 
+#[cfg(target_os = "android")]
+pub mod android;
+
 pub struct VulkanRenderer {
     debug_report: VkDebugReport,
     surface: VkSurfaceRef,

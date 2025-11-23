@@ -8,7 +8,7 @@ use slotmap::DefaultKey;
 use smallvec::{smallvec, SmallVec};
 use sparkles::external_events::ExternalEventsSource;
 use sparkles::{range_event_start, static_name};
-use sparkles::monotonic::{get_monotonic, get_monotonic_nanos, get_perf_frequency_windows};
+use sparkles::monotonic::{get_monotonic, get_monotonic_nanos, get_perf_frequency};
 use strum::IntoDiscriminant;
 use crate::runtime::recording::{DeviceCommand, RecordContext, SpecificResourceUsage};
 use crate::runtime::resources::{AttachmentsDescription, ImageInner, ResourceStorage, ResourceUsage, ResourceUsages};
@@ -79,7 +79,7 @@ impl RuntimeState {
         let mut sparkles_gpu_channel = ExternalEventsSource::new("Vulkan GPU".to_string());
         if let Some(calibrated_timestamps) = &calibrated_timestamps {
             if let Some((gpu_tm, host_tm, provider)) = calibrated_timestamps.get_timestamps_pair() {
-                sparkles_gpu_channel.push_sync_point(host_tm * 1_000_000_000 / get_perf_frequency_windows(), gpu_tm);
+                sparkles_gpu_channel.push_sync_point(host_tm * 1_000_000_000 / get_perf_frequency(), gpu_tm);
             }
         }
 
@@ -245,7 +245,7 @@ impl RuntimeState {
                 self.last_time_sync_tm = Some(Instant::now());
 
                 if let Some((gpu_tm, host_tm, provider)) = calibrated_timestamps.get_timestamps_pair() {
-                    self.sparkles_gpu_channel.push_sync_point(host_tm * (1_000_000_000 / get_perf_frequency_windows()), gpu_tm);
+                    self.sparkles_gpu_channel.push_sync_point(host_tm * (1_000_000_000 / get_perf_frequency()), gpu_tm);
                 }
             }
         }

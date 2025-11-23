@@ -1,0 +1,12 @@
+android:
+  manifest:
+    package: "com.skygrel19.vulkan_lib"
+    uses_permission:
+      - name: "android.permission.INTERNET"
+    sdk:
+      min_sdk_version: 24
+      target_sdk_version: 33
+  runtime_libs:
+    - "android/lib"
+  assets:
+    - "resources"
