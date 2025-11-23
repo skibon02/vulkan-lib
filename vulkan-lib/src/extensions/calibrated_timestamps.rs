@@ -43,20 +43,31 @@ impl CalibratedTimestamps {
         }
     }
 
-    pub fn get_timestamps_pair(&self) -> Option<(u64, u64)> {
+    pub fn get_timestamps_pair(&self) -> Option<(u64, u64, TimeDomainEXT)> {
         let (tms, max_dev) = self.get_timestamps();
         let mut gpu_tm = None;
         let mut host_tm = None;
-        for (source, tm) in tms {
-            if source == TimeDomainEXT::CLOCK_MONOTONIC {
-                host_tm = Some(tm);
+        let mut provider = TimeDomainEXT::CLOCK_MONOTONIC;
+        for (source, tm) in &tms {
+            if *source == TimeDomainEXT::CLOCK_MONOTONIC {
+                host_tm = Some(*tm);
             }
-            else if source == TimeDomainEXT::DEVICE {
-                gpu_tm = Some(tm);
+            else if *source == TimeDomainEXT::DEVICE {
+                gpu_tm = Some(*tm);
+            }
+        }
+        if host_tm.is_none() {
+            // try QUERY_PERFORMANCE_COUNTER
+            for (source, tm) in tms {
+                if source == TimeDomainEXT::QUERY_PERFORMANCE_COUNTER {
+                    host_tm = Some(tm);
+                    provider = TimeDomainEXT::QUERY_PERFORMANCE_COUNTER;
+                    break;
+                }
             }
         }
         if let (Some(gpu_tm), Some(host_tm)) = (gpu_tm, host_tm) {
-            Some((gpu_tm, host_tm))
+            Some((gpu_tm, host_tm, provider))
         }
         else {
             None

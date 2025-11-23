@@ -2,12 +2,13 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 use anyhow::Context;
 use ash::vk;
-use ash::vk::{AccessFlags, BufferCreateFlags, BufferMemoryBarrier, BufferUsageFlags, CommandBufferBeginInfo, DependencyFlags, Extent2D, Format, ImageAspectFlags, ImageLayout, ImageMemoryBarrier, ImageSubresourceRange, ImageUsageFlags, PhysicalDevice, PipelineStageFlags, Queue, SampleCountFlags, WHOLE_SIZE};
+use ash::vk::{AccessFlags, BufferCreateFlags, BufferMemoryBarrier, BufferUsageFlags, CommandBufferBeginInfo, DependencyFlags, Extent2D, Format, ImageAspectFlags, ImageLayout, ImageMemoryBarrier, ImageSubresourceRange, ImageUsageFlags, PhysicalDevice, PipelineStageFlags, Queue, SampleCountFlags, TimeDomainEXT, WHOLE_SIZE};
 use log::{info, warn};
 use slotmap::DefaultKey;
 use smallvec::{smallvec, SmallVec};
 use sparkles::external_events::ExternalEventsSource;
 use sparkles::{range_event_start, static_name};
+use sparkles::monotonic::{get_monotonic, get_monotonic_nanos, get_perf_frequency_windows};
 use strum::IntoDiscriminant;
 use crate::runtime::recording::{DeviceCommand, RecordContext, SpecificResourceUsage};
 use crate::runtime::resources::{AttachmentsDescription, ImageInner, ResourceStorage, ResourceUsage, ResourceUsages};
@@ -77,8 +78,8 @@ impl RuntimeState {
 
         let mut sparkles_gpu_channel = ExternalEventsSource::new("Vulkan GPU".to_string());
         if let Some(calibrated_timestamps) = &calibrated_timestamps {
-            if let Some((gpu_tm, host_tm)) = calibrated_timestamps.get_timestamps_pair() {
-                sparkles_gpu_channel.push_sync_point(host_tm, gpu_tm);
+            if let Some((gpu_tm, host_tm, provider)) = calibrated_timestamps.get_timestamps_pair() {
+                sparkles_gpu_channel.push_sync_point(host_tm * 1_000_000_000 / get_perf_frequency_windows(), gpu_tm);
             }
         }
 
@@ -243,8 +244,8 @@ impl RuntimeState {
             if self.last_time_sync_tm.is_none_or(| t| t.elapsed().as_millis() > 50) && self.timestamp_pool.is_some() {
                 self.last_time_sync_tm = Some(Instant::now());
 
-                if let Some((gpu_tm, host_tm)) = calibrated_timestamps.get_timestamps_pair() {
-                    self.sparkles_gpu_channel.push_sync_point(host_tm, gpu_tm);
+                if let Some((gpu_tm, host_tm, provider)) = calibrated_timestamps.get_timestamps_pair() {
+                    self.sparkles_gpu_channel.push_sync_point(host_tm * (1_000_000_000 / get_perf_frequency_windows()), gpu_tm);
                 }
             }
         }
