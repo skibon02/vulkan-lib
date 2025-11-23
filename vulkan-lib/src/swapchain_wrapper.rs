@@ -15,7 +15,6 @@ pub struct SwapchainWrapper {
     swapchain: SwapchainKHR,
     pub swapchain_loader: swapchain::Device,
     pub swapchain_images: Vec<Image>,
-    swapchain_image_views: Vec<ImageView>,
     swapchain_format: Format,
     pub swapchain_extent: Extent2D,
 
@@ -91,17 +90,11 @@ impl SwapchainWrapper {
         let swapchain = unsafe { swapchain_loader.create_swapchain(&swapchain_create_info, None)? };
         let swapchain_images = unsafe { swapchain_loader.get_swapchain_images(swapchain)? };
 
-        let swapchain_image_views = swapchain_images.iter().map(|image| {
-            let image_view_create_info = imageview_info_for_image(*image, swapchain_image_info, ImageAspectFlags::COLOR);
-            unsafe { device.create_image_view(&image_view_create_info, None).unwrap() }
-        }).collect::<Vec<_>>();
-        
         Ok(SwapchainWrapper {
             swapchain,
             swapchain_loader,
             swapchain_images,
             swapchain_image_handles: None,
-            swapchain_image_views,
             swapchain_format: surface_format.format,
             swapchain_extent,
 
@@ -113,10 +106,6 @@ impl SwapchainWrapper {
     pub fn get_swapchain(&self) -> SwapchainKHR {
         self.swapchain
     }
-    pub fn get_image_views(&self) -> Vec<ImageView> {
-        self.swapchain_image_views.clone()
-    }
-
     pub fn get_surface_format(&self) -> Format {
         self.swapchain_format
     }
@@ -149,9 +138,6 @@ impl SwapchainWrapper {
 impl Drop for SwapchainWrapper {
     fn drop(&mut self) {
         let g = range_event_start!("[Vulkan] Destroy swapchain");
-        for image_view in self.swapchain_image_views.iter() {
-            unsafe { self.device.destroy_image_view(*image_view, None); }
-        }
         unsafe { self.swapchain_loader.destroy_swapchain(self.swapchain, None); }
     }
 }

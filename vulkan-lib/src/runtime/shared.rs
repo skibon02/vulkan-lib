@@ -1,7 +1,8 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
-use ash::vk::{self, FenceCreateInfo};
-use log::warn;
+use ash::vk::{self, FenceCreateInfo, Framebuffer};
+use log::{info, warn};
 use parking_lot::Mutex;
 use crate::runtime::resources::buffers::BufferResourceDestroyHandle;
 use crate::runtime::resources::images::ImageResourceHandle;
@@ -9,29 +10,112 @@ use crate::runtime::resources::pipeline::GraphicsPipelineHandle;
 use crate::runtime::resources::render_pass::RenderPassHandle;
 use crate::wrappers::device::VkDeviceRef;
 
+#[derive(Default)]
+pub struct ScheduledForDestroy {
+    pub buffers: Vec<(BufferResourceDestroyHandle, usize)>,
+    pub images: Vec<(ImageResourceHandle, usize)>,
+    pub pipelines: Vec<(GraphicsPipelineHandle, usize)>,
+    pub render_passes: Vec<(RenderPassHandle, usize)>,
+    pub framebuffers: Vec<(Framebuffer, usize)>,
+}
+
+impl ScheduledForDestroy {
+    pub fn take_ready_for_destroy(&mut self, last_waited_submission: usize) -> Self {
+        let mut result = Self::default();
+
+        // Use swap_remove for efficiency since order doesn't matter
+        let mut i = 0;
+        while i < self.buffers.len() {
+            if self.buffers[i].1 <= last_waited_submission {
+                result.buffers.push(self.buffers.swap_remove(i));
+            } else {
+                i += 1;
+            }
+        }
+
+        i = 0;
+        while i < self.images.len() {
+            if self.images[i].1 <= last_waited_submission {
+                result.images.push(self.images.swap_remove(i));
+            } else {
+                i += 1;
+            }
+        }
+
+        i = 0;
+        while i < self.pipelines.len() {
+            if self.pipelines[i].1 <= last_waited_submission {
+                result.pipelines.push(self.pipelines.swap_remove(i));
+            } else {
+                i += 1;
+            }
+        }
+
+        i = 0;
+        while i < self.render_passes.len() {
+            if self.render_passes[i].1 <= last_waited_submission {
+                result.render_passes.push(self.render_passes.swap_remove(i));
+            } else {
+                i += 1;
+            }
+        }
+
+        i = 0;
+        while i < self.framebuffers.len() {
+            if self.framebuffers[i].1 <= last_waited_submission {
+                result.framebuffers.push(self.framebuffers.swap_remove(i));
+            } else {
+                i += 1;
+            }
+        }
+        
+        if !result.framebuffers.is_empty() {
+            info!("Destroying {} framebuffers", result.framebuffers.len());
+        }
+        if !result.render_passes.is_empty() {
+            info!("Destroying {} render passes", result.render_passes.len());
+        }
+        if !result.pipelines.is_empty() {
+            info!("Destroying {} pipelines", result.pipelines.len());
+        }
+        if !result.images.is_empty() {
+            info!("Destroying {} images", result.images.len());
+        }
+        if !result.buffers.is_empty() {
+            info!("Destroying {} buffers", result.buffers.len());
+        }
+
+        result
+    }
+    
+    pub fn is_empty(&self) -> bool {
+        self.buffers.is_empty() &&
+        self.images.is_empty() &&
+        self.pipelines.is_empty() &&
+        self.render_passes.is_empty() &&
+        self.framebuffers.is_empty()
+    }
+}
+
 struct SharedStateInner {
     device: VkDeviceRef,
     host_waited_submission: usize,
     active_fences: Vec<(usize, vk::Fence)>,
     free_fences: Vec<vk::Fence>,
 
-    scheduled_for_destroy_buffers: Vec<BufferResourceDestroyHandle>,
-    scheduled_for_destroy_images: Vec<ImageResourceHandle>,
-    scheduled_for_destroy_pipelines: Vec<GraphicsPipelineHandle>,
-    scheduled_for_destroy_render_passes: Vec<RenderPassHandle>,
+    scheduled_for_destroy: ScheduledForDestroy,
+    last_submission_num: Arc<AtomicUsize>,
 }
 impl SharedStateInner {
-    fn new(device: VkDeviceRef) -> Self {
+    fn new(device: VkDeviceRef, last_submission_num: Arc<AtomicUsize>) -> Self {
         Self {
             host_waited_submission: 0,
             active_fences: Vec::new(),
             free_fences: Vec::new(),
             device,
 
-            scheduled_for_destroy_buffers: Vec::new(),
-            scheduled_for_destroy_images: Vec::new(),
-            scheduled_for_destroy_pipelines: Vec::new(),
-            scheduled_for_destroy_render_passes: Vec::new(),
+            scheduled_for_destroy: ScheduledForDestroy::default(),
+            last_submission_num,
         }
     }
 }
@@ -97,19 +181,28 @@ impl SharedStateInner {
         }
     }
 
-    pub fn schedule_destroy_buffer(&mut self, handle: BufferResourceDestroyHandle) {
-        self.scheduled_for_destroy_buffers.push(handle);
+    pub fn schedule_destroy_buffer(&mut self, handle: BufferResourceDestroyHandle, submission_num: usize) {
+        self.scheduled_for_destroy.buffers.push((handle, submission_num));
     }
 
-    pub fn schedule_destroy_image(&mut self, handle: ImageResourceHandle) {
-        self.scheduled_for_destroy_images.push(handle);
+    pub fn schedule_destroy_image(&mut self, handle: ImageResourceHandle, submission_num: usize) {
+        self.scheduled_for_destroy.images.push((handle, submission_num));
     }
-    
-    pub fn schedule_destroy_pipeline(&mut self, handle: GraphicsPipelineHandle) {
-        self.scheduled_for_destroy_pipelines.push(handle);
+
+    pub fn schedule_destroy_pipeline(&mut self, handle: GraphicsPipelineHandle, submission_num: usize) {
+        self.scheduled_for_destroy.pipelines.push((handle, submission_num));
     }
-    pub fn schedule_destroy_render_pass(&mut self, handle: RenderPassHandle) {
-        self.scheduled_for_destroy_render_passes.push(handle);
+
+    pub fn schedule_destroy_render_pass(&mut self, handle: RenderPassHandle, submission_num: usize) {
+        self.scheduled_for_destroy.render_passes.push((handle, submission_num));
+    }
+
+    pub fn schedule_destroy_framebuffer(&mut self, framebuffer: Framebuffer, submission_num: usize) {
+        self.scheduled_for_destroy.framebuffers.push((framebuffer, submission_num));
+    }
+
+    pub fn take_ready_for_destroy(&mut self) -> ScheduledForDestroy {
+        self.scheduled_for_destroy.take_ready_for_destroy(self.host_waited_submission)
     }
 
     /// Check fences from oldest to newest, updating host_waited_submission
@@ -177,14 +270,25 @@ impl Drop for SharedStateInner {
 pub struct SharedState {
     device: VkDeviceRef,
     state: Arc<Mutex<SharedStateInner>>,
+    last_submission_num: Arc<AtomicUsize>,
 }
 
 impl SharedState {
     pub fn new(device: VkDeviceRef) -> Self {
+        let last_submission_num = Arc::new(AtomicUsize::new(0));
         Self {
             device: device.clone(),
-            state: Arc::new(Mutex::new(SharedStateInner::new(device))),
+            state: Arc::new(Mutex::new(SharedStateInner::new(device, last_submission_num.clone()))),
+            last_submission_num,
         }
+    }
+
+    pub fn last_submission_num(&self) -> usize {
+        self.last_submission_num.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn increment_and_get_submission_num(&self) -> usize {
+        self.last_submission_num.fetch_add(1, Ordering::Relaxed) + 1
     }
 
     pub fn last_host_waited_submission(&self) -> usize {
@@ -217,21 +321,38 @@ impl SharedState {
     }
 
     pub fn schedule_destroy_buffer(&self, handle: BufferResourceDestroyHandle) {
-        self.state.lock().schedule_destroy_buffer(handle);
+        // Use host_used_in from handle if available, otherwise use last submission
+        let submission_num = handle.host_used_in.unwrap_or_else(|| self.last_submission_num());
+        self.state.lock().schedule_destroy_buffer(handle, submission_num);
     }
+
     pub fn schedule_destroy_image(&self, handle: ImageResourceHandle) {
-        self.state.lock().schedule_destroy_image(handle);
+        let submission_num = self.last_submission_num();
+        self.state.lock().schedule_destroy_image(handle, submission_num);
     }
+
     pub fn schedule_destroy_pipeline(&self, handle: GraphicsPipelineHandle) {
-        self.state.lock().schedule_destroy_pipeline(handle);
+        let submission_num = self.last_submission_num();
+        self.state.lock().schedule_destroy_pipeline(handle, submission_num);
     }
+
     pub fn schedule_destroy_render_pass(&self, handle: RenderPassHandle) {
-        self.state.lock().schedule_destroy_render_pass(handle);
+        let submission_num = self.last_submission_num();
+        self.state.lock().schedule_destroy_render_pass(handle, submission_num);
+    }
+
+    pub fn schedule_destroy_framebuffer(&self, framebuffer: Framebuffer, submission_num: usize) {
+        self.state.lock().schedule_destroy_framebuffer(framebuffer, submission_num);
     }
 
     pub fn poll_completed_fences(&self) {
         self.state.lock().poll_completed_fences();
     }
+
+    pub fn take_ready_for_destroy(&self) -> ScheduledForDestroy {
+        self.state.lock().take_ready_for_destroy()
+    }
+
     pub fn device(&mut self) -> VkDeviceRef {
         self.state.lock().device.clone()
     }

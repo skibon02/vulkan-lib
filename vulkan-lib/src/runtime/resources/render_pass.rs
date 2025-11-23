@@ -20,7 +20,7 @@ impl RenderPassResource {
 }
 
 #[derive(Copy, Clone)]
-pub struct RenderPassHandle(DefaultKey);
+pub struct RenderPassHandle(pub(crate) DefaultKey);
 
 impl Drop for RenderPassResource {
     fn drop(&mut self) {

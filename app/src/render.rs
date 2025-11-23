@@ -3,9 +3,11 @@ use std::sync::{mpsc, Arc};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::thread::JoinHandle;
+use std::time::Instant;
 use log::{error, info, warn};
 use sparkles::range_event_start;
-use vulkan_lib::{BufferImageCopy, BufferUsageFlags, ClearColorValue, Extent3D, ImageAspectFlags, ImageLayout, ImageSubresourceLayers, Offset3D, PipelineStageFlags, VulkanRenderer};
+use vulkan_lib::{AttachmentDescription, AttachmentLoadOp, AttachmentStoreOp, BufferImageCopy, BufferUsageFlags, ClearColorValue, Extent3D, Format, ImageAspectFlags, ImageLayout, ImageSubresourceLayers, Offset3D, PipelineStageFlags, SampleCountFlags, VulkanRenderer};
+use vulkan_lib::runtime::resources::AttachmentsDescription;
 use vulkan_lib::runtime::resources::images::ImageResourceHandle;
 
 pub enum RenderMessage {
@@ -20,6 +22,7 @@ pub struct RenderTask {
     render_finished: Arc<AtomicBool>,
     swapchain_image_handles: SmallVec<[ImageResourceHandle; 3]>,
     swapchain_recreated: bool,
+    last_print: Instant,
 }
 
 impl RenderTask {
@@ -34,6 +37,7 @@ impl RenderTask {
             render_finished: render_finished.clone(),
             swapchain_image_handles,
             swapchain_recreated: false,
+            last_print: Instant::now(),
         }, tx, render_finished)
     }
 
@@ -41,6 +45,51 @@ impl RenderTask {
         thread::Builder::new().name("Render".into()).spawn(move || {
             let swapchain_extent = self.swapchain_image_handles[0].extent();
             let mut staging_buffer = self.vulkan_renderer.new_host_buffer((4 * swapchain_extent.width * swapchain_extent.height) as u64);
+
+            // Create render pass
+            let msaa_samples = SampleCountFlags::TYPE_1;
+
+            let need_resolve = msaa_samples != SampleCountFlags::TYPE_1;
+
+            let load_op = if need_resolve {
+                AttachmentLoadOp::CLEAR
+            } else {
+                AttachmentLoadOp::DONT_CARE
+            };
+
+            let color_attachment = AttachmentDescription::default()
+                .samples(SampleCountFlags::TYPE_1)
+                .load_op(load_op)
+                .store_op(AttachmentStoreOp::STORE)
+                .initial_layout(ImageLayout::UNDEFINED)
+                .final_layout(ImageLayout::PRESENT_SRC_KHR);
+
+            let depth_attachment = AttachmentDescription::default()
+                .format(Format::D16_UNORM)
+                .samples(msaa_samples)
+                .load_op(AttachmentLoadOp::CLEAR)
+                .store_op(AttachmentStoreOp::DONT_CARE)
+                .stencil_load_op(AttachmentLoadOp::DONT_CARE)
+                .stencil_store_op(AttachmentStoreOp::DONT_CARE)
+                .initial_layout(ImageLayout::UNDEFINED)
+                .final_layout(ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+
+            let mut attachments_desc = AttachmentsDescription::new(color_attachment)
+                .with_depth_attachment(depth_attachment);
+
+            if need_resolve {
+                // Add resolve attachment
+                let resolve_attachment = AttachmentDescription::default()
+                    .samples(SampleCountFlags::TYPE_1)
+                    .load_op(AttachmentLoadOp::DONT_CARE)
+                    .store_op(AttachmentStoreOp::STORE)
+                    .initial_layout(ImageLayout::UNDEFINED)
+                    .final_layout(ImageLayout::PRESENT_SRC_KHR);
+
+                attachments_desc = attachments_desc.with_resolve_attachment(resolve_attachment);
+            }
+            
+            let render_pass = self.vulkan_renderer.new_render_pass(attachments_desc);
 
             // let mut dev_buffer = self.vulkan_renderer.new_device_buffer(BufferUsageFlags::TRANSFER_DST | BufferUsageFlags::TRANSFER_SRC, 4*swapchain_extent.width as u64 * swapchain_extent.height as u64);
             loop {
@@ -140,6 +189,11 @@ impl RenderTask {
                         info!("Render thread exiting");
                         break;
                     }
+                }
+                
+                if self.last_print.elapsed().as_secs() >= 3 {
+                    self.vulkan_renderer.dump_resource_usage();
+                    self.last_print = Instant::now();
                 }
             }
         }).unwrap()

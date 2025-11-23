@@ -47,7 +47,7 @@ impl Drop for GraphicsPipeline {
 }
 #[derive(Copy, Clone)]
 pub struct GraphicsPipelineHandle {
-    key: DefaultKey
+    pub(crate) key: DefaultKey
 }
 #[derive(Debug, Clone)]
 pub struct VertexInputDesc {

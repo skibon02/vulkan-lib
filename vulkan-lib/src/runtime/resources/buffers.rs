@@ -121,10 +121,11 @@ pub struct BufferResourceHandle<'a> {
     pub(crate) host_state: Option<&'a BufferHostState>,
 }
 
+#[derive(Clone)]
 pub struct BufferResourceDestroyHandle {
     pub(crate) state_key: DefaultKey,
     size: u64,
-    host_used_in: Option<usize>
+    pub(crate) host_used_in: Option<usize>
 }
 
 impl From<BufferResourceHandle<'_>> for BufferResourceDestroyHandle {

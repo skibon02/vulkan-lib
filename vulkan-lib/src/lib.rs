@@ -22,6 +22,9 @@ pub use vk::ImageLayout;
 pub use vk::ImageAspectFlags;
 pub use vk::ImageSubresourceLayers;
 pub use vk::ClearColorValue;
+pub use vk::SampleCountFlags;
+pub use vk::AttachmentLoadOp;
+pub use vk::{AttachmentStoreOp, AttachmentDescription, Format};
 
 pub mod instance;
 mod wrappers;
