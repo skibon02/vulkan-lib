@@ -1,1 +1,3 @@
 target
+app/shaders/compiled
+app/trace
