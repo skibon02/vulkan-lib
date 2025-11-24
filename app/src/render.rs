@@ -147,12 +147,12 @@ impl RenderTask {
             // let mut dev_buffer = self.vulkan_renderer.new_device_buffer(BufferUsageFlags::TRANSFER_DST | BufferUsageFlags::TRANSFER_SRC, 4*swapchain_extent.width as u64 * swapchain_extent.height as u64);
             loop {
                 let msg = self.rx.recv();
-                if msg.is_err() {
+                let Ok(msg) = msg else {
                     info!("Render thread exiting due to channel close");
                     break;
-                }
+                };
                 match msg {
-                    Ok(RenderMessage::Redraw { bg_color}) => {
+                    RenderMessage::Redraw { bg_color} => 'render: {
                         let g = range_event_start!("Render");
 
                         let bg_clear_color = ClearColorValue {
@@ -181,7 +181,7 @@ impl RenderTask {
                             Ok(result) => result,
                             Err(e) => {
                                 error!("Failed to acquire next image: {:?}", e);
-                                continue;
+                                break 'render;
                             }
                         };
                         drop(g);
@@ -237,13 +237,13 @@ impl RenderTask {
 
                         self.render_finished.store(true, Ordering::Release);
                     }
-                    Ok(RenderMessage::Resize { width, height }) => {
+                    RenderMessage::Resize { width, height } => {
                         let g = range_event_start!("Recreate Resize");
                         self.vulkan_renderer.recreate_resize((width, height));
                         self.swapchain_image_handles = self.vulkan_renderer.swapchain_images();
                         self.swapchain_recreated = true;
                     }
-                    Ok(RenderMessage::Exit) | Err(_) => {
+                    RenderMessage::Exit => {
                         info!("Render thread exiting");
                         break;
                     }

@@ -70,6 +70,7 @@ impl TimestampPool {
         while i <= max_slot {
             let mut buffer = vec![(0u64, 0u64); 2];
             if self.slots[i].is_none() {
+                i+=1;
                 continue;
             }
 
