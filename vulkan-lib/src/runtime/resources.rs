@@ -1,11 +1,13 @@
+use std::collections::HashMap;
 use std::mem;
 use std::sync::atomic::AtomicBool;
 use ash::vk;
-use ash::vk::{AccessFlags, AttachmentDescription, AttachmentLoadOp, AttachmentStoreOp, Buffer, BufferCreateFlags, BufferCreateInfo, BufferUsageFlags, DeviceMemory, DeviceSize, Extent3D, Format, Framebuffer, Image, ImageCreateFlags, ImageCreateInfo, ImageLayout, ImageTiling, ImageType, ImageUsageFlags, ImageView, MemoryAllocateInfo, MemoryHeap, MemoryType, Pipeline, PipelineBindPoint, PipelineLayout, PipelineStageFlags, RenderPass, SampleCountFlags};
+use ash::vk::{AccessFlags, AttachmentDescription, AttachmentLoadOp, AttachmentStoreOp, Buffer, BufferCreateFlags, BufferCreateInfo, BufferUsageFlags, DescriptorSetLayout, DescriptorSetLayoutBinding, DescriptorSetLayoutCreateInfo, DeviceMemory, DeviceSize, Extent3D, Format, Framebuffer, Image, ImageCreateFlags, ImageCreateInfo, ImageLayout, ImageTiling, ImageType, ImageUsageFlags, ImageView, MemoryAllocateInfo, MemoryHeap, MemoryType, Pipeline, PipelineBindPoint, PipelineLayout, PipelineStageFlags, RenderPass, SampleCountFlags};
 use slotmap::{DefaultKey, SlotMap};
 use smallvec::{smallvec, SmallVec};
 use sparkles::range_event_start;
 use crate::runtime::{OptionSeqNumShared, SharedState};
+use crate::runtime::resources::descriptor_pool::DescriptorSetAllocator;
 use crate::runtime::shared::ScheduledForDestroy;
 use buffers::BufferResource;
 use render_pass::RenderPassHandle;
@@ -13,12 +15,14 @@ use crate::runtime::resources::images::{ImageResource, ImageResourceHandle};
 use crate::runtime::resources::render_pass::RenderPassResource;
 use crate::runtime::memory_manager::{MemoryManager, MemoryTypeAlgorithm};
 use crate::runtime::resources::pipeline::{create_graphics_pipeline, GraphicsPipeline, GraphicsPipelineDesc};
+use crate::shaders::DescriptorSetLayoutBindingDesc;
 use crate::wrappers::device::VkDeviceRef;
 
 pub mod pipeline;
 pub mod buffers;
 pub mod images;
 pub mod render_pass;
+pub mod descriptor_pool;
 
 #[derive(Copy, Clone, Debug)]
 pub struct ResourceUsage {
@@ -151,6 +155,8 @@ pub(crate) struct ResourceStorage {
     images: SlotMap<DefaultKey, ImageInner>,
     render_passes: SlotMap<DefaultKey, RenderPassInner>,
     pipelines: SlotMap<DefaultKey, GraphicsPipelineInner>,
+    descriptor_set_layouts: HashMap<Vec<DescriptorSetLayoutBindingDesc>, DescriptorSetLayout>,
+    descriptor_set_allocator: DescriptorSetAllocator,
 }
 
 pub struct AttachmentsDescription {
@@ -199,6 +205,7 @@ impl AttachmentsDescription {
 impl ResourceStorage {
     pub fn new(device: VkDeviceRef, memory_types: Vec<MemoryType>, memory_heaps: Vec<MemoryHeap>) -> Self{
         let memory_manager = MemoryManager::new(device.clone(), memory_types, memory_heaps);
+        let descriptor_set_allocator = DescriptorSetAllocator::new(device.clone());
         Self {
             device,
             memory_manager,
@@ -206,7 +213,35 @@ impl ResourceStorage {
             images: SlotMap::new(),
             pipelines: SlotMap::new(),
             render_passes: SlotMap::new(),
+            descriptor_set_layouts: HashMap::new(),
+            descriptor_set_allocator,
         }
+    }
+
+    fn get_or_create_descriptor_set_layout(&mut self, bindings_desc: &[DescriptorSetLayoutBindingDesc]) -> DescriptorSetLayout {
+        let key: Vec<DescriptorSetLayoutBindingDesc> = bindings_desc.to_vec();
+
+        if let Some(&layout) = self.descriptor_set_layouts.get(&key) {
+            return layout;
+        }
+
+        let bindings: Vec<DescriptorSetLayoutBinding> = bindings_desc.iter().map(|desc| {
+            DescriptorSetLayoutBinding::default()
+                .binding(desc.binding)
+                .descriptor_type(desc.descriptor_type)
+                .descriptor_count(desc.descriptor_count)
+                .stage_flags(desc.stage_flags)
+        }).collect();
+
+        let layout_create_info = DescriptorSetLayoutCreateInfo::default()
+            .bindings(&bindings);
+
+        let layout = unsafe {
+            self.device.create_descriptor_set_layout(&layout_create_info, None).unwrap()
+        };
+
+        self.descriptor_set_layouts.insert(key, layout);
+        layout
     }
 
     pub fn memory_manager(&mut self) -> &mut MemoryManager {
@@ -573,7 +608,12 @@ impl ResourceStorage {
 
     pub fn create_graphics_pipeline(&mut self, render_pass_handle: RenderPassHandle, desc: GraphicsPipelineDesc, shared: SharedState) -> GraphicsPipeline {
         let render_pass = self.render_passes.get(render_pass_handle.0).unwrap().render_pass;
-        let (inner, mut handle) = create_graphics_pipeline(self.device.clone(), render_pass, desc);
+
+        let descriptor_set_layouts: SmallVec<[DescriptorSetLayout; 4]> = desc.bindings.iter()
+            .map(|bindings_desc| self.get_or_create_descriptor_set_layout(bindings_desc))
+            .collect();
+
+        let (inner, mut handle) = create_graphics_pipeline(self.device.clone(), render_pass, desc, descriptor_set_layouts);
         let key = self.pipelines.insert(inner);
         handle.key = key;
         GraphicsPipeline {
@@ -640,10 +680,14 @@ impl Drop for ResourceStorage {
                 }
                 self.device.destroy_render_pass(render_pass_inner.render_pass, None);
             }
-            
+
             for (_, pipeline_inner) in self.pipelines.drain() {
                 self.device.destroy_pipeline(pipeline_inner.pipeline, None);
                 self.device.destroy_pipeline_layout(pipeline_inner.pipeline_layout, None);
+            }
+
+            for (_, descriptor_set_layout) in self.descriptor_set_layouts.drain() {
+                self.device.destroy_descriptor_set_layout(descriptor_set_layout, None);
             }
 
             for (_, buffer_inner) in self.buffers.drain() {

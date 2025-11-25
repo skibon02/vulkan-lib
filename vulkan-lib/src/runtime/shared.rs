@@ -196,7 +196,6 @@ impl SharedStateInner {
     pub fn schedule_destroy_pipeline(&mut self, handle: GraphicsPipelineHandle, submission_num: usize) {
         unsafe {
             // we can destroy these immediately
-            self.device.destroy_descriptor_set_layout(handle.descriptor_set_layout, None);
             self.device.destroy_pipeline_cache(handle.pipeline_cache, None);
         }
     self.scheduled_for_destroy.pipelines.push((handle.into(), submission_num));

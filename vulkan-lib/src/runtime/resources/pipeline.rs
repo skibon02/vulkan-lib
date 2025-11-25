@@ -3,11 +3,12 @@ use ash::vk;
 use ash::vk::{ColorComponentFlags, CompareOp, CullModeFlags, DescriptorSetLayout, DescriptorSetLayoutBinding, DescriptorType, DynamicState, Format, GraphicsPipelineCreateInfo, Pipeline, PipelineCache, PipelineCacheCreateInfo, PipelineColorBlendAttachmentState, PipelineColorBlendStateCreateInfo, PipelineDepthStencilStateCreateInfo, PipelineDynamicStateCreateInfo, PipelineInputAssemblyStateCreateInfo, PipelineLayout, PipelineLayoutCreateInfo, PipelineMultisampleStateCreateInfo, PipelineRasterizationStateCreateInfo, PipelineShaderStageCreateInfo, PipelineVertexInputStateCreateInfo, PipelineViewportStateCreateInfo, PrimitiveTopology, RenderPass, SampleCountFlags, ShaderModuleCreateInfo, ShaderStageFlags, VertexInputAttributeDescription, VertexInputBindingDescription, FALSE};
 use log::info;
 use slotmap::DefaultKey;
+use smallvec::SmallVec;
 use sparkles::range_event_start;
 use crate::runtime::{SharedState};
 use crate::runtime::resources::GraphicsPipelineInner;
 use crate::shaders::layout::MemberMeta;
-use crate::shaders::{DescriptorBindingsDesc, UniformBindingType};
+use crate::shaders::DescriptorSetLayoutBindingDesc;
 use crate::wrappers::device::VkDeviceRef;
 
 
@@ -34,7 +35,6 @@ pub struct GraphicsPipelineHandle {
     pub(crate) key: DefaultKey,
     pipeline_layout: PipelineLayout, // vkCmdBindDescriptorSets must not be recorded to any command buffer during destruction (lazy destroy)
     pub(crate) pipeline_cache: PipelineCache, // can be destroyed
-    pub(crate) descriptor_set_layout: DescriptorSetLayout, // can be destroyed
 }
 pub struct GraphicsPipelineDestroyHandle {
     pub(crate) key: DefaultKey,
@@ -91,13 +91,13 @@ pub enum VertexAssembly {
 pub struct GraphicsPipelineDesc {
     pub vertex_assembly: VertexAssembly,
     pub attributes: VertexInputDesc,
-    pub bindings: DescriptorBindingsDesc,
+    pub bindings: SmallVec<[&'static [DescriptorSetLayoutBindingDesc]; 4]>,
     pub vert_shader: Vec<u8>,
     pub frag_shader: Vec<u8>,
 }
 
 impl GraphicsPipelineDesc {
-    pub fn new(shaders: (&'static [u8], &'static [u8]), attributes: VertexInputDesc, bindings: DescriptorBindingsDesc) -> Self {
+    pub fn new(shaders: (&'static [u8], &'static [u8]), attributes: VertexInputDesc, bindings: SmallVec<[&'static [DescriptorSetLayoutBindingDesc]; 4]>) -> Self {
         Self {
             vertex_assembly: VertexAssembly::TriangleList,
             attributes,
@@ -108,36 +108,12 @@ impl GraphicsPipelineDesc {
     }
 }
 
-pub fn create_graphics_pipeline(device: VkDeviceRef, render_pass: RenderPass, pipeline_desc: GraphicsPipelineDesc) -> (GraphicsPipelineInner, GraphicsPipelineHandle) {
+pub fn create_graphics_pipeline(device: VkDeviceRef, render_pass: RenderPass, pipeline_desc: GraphicsPipelineDesc, descriptor_set_layouts: SmallVec<[DescriptorSetLayout; 4]>) -> (GraphicsPipelineInner, GraphicsPipelineHandle) {
     let g = range_event_start!("Create pipeline");
 
     // 1. Create layout
-    let uniform_bindings_desc = pipeline_desc.bindings;
-
-    let bindings_desc = uniform_bindings_desc.into_iter().map(|(binding, binding_type)| {
-        let descriptor_type = match binding_type {
-            UniformBindingType::UniformBuffer => DescriptorType::UNIFORM_BUFFER,
-            UniformBindingType::CombinedImageSampler => DescriptorType::COMBINED_IMAGE_SAMPLER,
-        };
-        DescriptorSetLayoutBinding::default()
-            .binding(binding)
-            .descriptor_count(1)
-            .descriptor_type(descriptor_type)
-            .stage_flags(ShaderStageFlags::FRAGMENT | ShaderStageFlags::VERTEX)
-    }).collect::<Vec<_>>();
-
-    let descriptor_set_layout_info =
-        vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings_desc);
-
-    let descriptor_set_layout = unsafe {
-        device
-            .create_descriptor_set_layout(&descriptor_set_layout_info, None)
-            .unwrap()
-    };
-
-    let set_layouts = [descriptor_set_layout];
     let pipeline_layout_info = PipelineLayoutCreateInfo::default()
-        .set_layouts(&set_layouts);
+        .set_layouts(&descriptor_set_layouts);
     let pipeline_layout = unsafe { device.create_pipeline_layout(&pipeline_layout_info, None).unwrap() };
 
     // shaders
@@ -236,7 +212,6 @@ pub fn create_graphics_pipeline(device: VkDeviceRef, render_pass: RenderPass, pi
             key: DefaultKey::default(),
             pipeline_layout,
             pipeline_cache,
-            descriptor_set_layout,
         }
     )
 }

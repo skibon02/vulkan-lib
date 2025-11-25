@@ -12,12 +12,11 @@ use std::time::Instant;
 use log::{error, info, warn};
 use sparkles::range_event_start;
 use render_macro::define_layout;
-use vulkan_lib::{use_shader, AttachmentDescription, AttachmentLoadOp, AttachmentStoreOp, BufferUsageFlags, ClearColorValue, Extent3D, Format, ImageAspectFlags, ImageLayout, ImageSubresourceLayers, Offset3D, PipelineStageFlags, SampleCountFlags, VulkanRenderer};
+use vulkan_lib::{descriptor_set, use_shader, AttachmentDescription, AttachmentLoadOp, AttachmentStoreOp, BufferUsageFlags, ClearColorValue, DescriptorType, Extent3D, Format, ImageAspectFlags, ImageLayout, ImageSubresourceLayers, Offset3D, PipelineStageFlags, SampleCountFlags, ShaderStageFlags, VulkanRenderer};
 use vulkan_lib::runtime::resources::AttachmentsDescription;
 use vulkan_lib::runtime::resources::images::ImageResourceHandle;
 use vulkan_lib::runtime::resources::pipeline::{GraphicsPipelineDesc, VertexInputDesc};
 use vulkan_lib::shaders::layout::types::{int, vec2, vec4};
-use vulkan_lib::shaders::{DescriptorBindingsDesc, UniformBindingType};
 
 pub enum RenderMessage {
     Redraw { bg_color: [f32; 3] },
@@ -54,6 +53,16 @@ define_layout! {
         pub r: float<0>,
         pub ar: float<0>,
         pub aspect: float<0>
+    }
+}
+// descriptor sets
+descriptor_set! {
+    pub struct GlobalDescriptorSet {
+        0 -> UniformBuffer,
+        #[vert]
+        1 -> UniformBuffer,
+        #[frag]
+        2 -> CombinedImageSampler[10]
     }
 }
 
@@ -135,12 +144,8 @@ impl RenderTask {
 
             let render_pass = self.vulkan_renderer.new_render_pass(attachments_desc);
             let attributes = CircleAttributes::get_attributes_configuration();
-            let bindings_desc = smallvec![
-                (0, UniformBindingType::UniformBuffer),
-                (1, UniformBindingType::UniformBuffer),
-                (2, UniformBindingType::CombinedImageSampler)
-            ];
-            let pipeline_desc = GraphicsPipelineDesc::new(use_shader!("circle"), attributes, bindings_desc);
+
+            let pipeline_desc = GraphicsPipelineDesc::new(use_shader!("circle"), attributes, smallvec![GlobalDescriptorSet::bindings()]);
             let pipeline = self.vulkan_renderer.new_pipeline(render_pass.handle(), pipeline_desc);
 
 
