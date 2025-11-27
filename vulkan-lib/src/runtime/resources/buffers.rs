@@ -124,6 +124,12 @@ pub struct BufferResourceHandle<'a> {
     pub(crate) host_state: Option<&'a BufferHostState>,
 }
 
+impl PartialEq for BufferResourceHandle<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.state_key == other.state_key && self.size == other.size
+    }
+}
+
 #[derive(Clone)]
 pub struct BufferResourceDestroyHandle {
     pub(crate) state_key: DefaultKey,

@@ -101,7 +101,7 @@ enum DescriptorSetSlot {
         pool_index: usize,
         layout: DescriptorSetLayout,
         required_descriptors: HashMap<DescriptorType, u32>,
-        last_used_in: Option<usize>,
+        last_used_in: usize,
         pending_recycle: bool,
     }
 }
@@ -180,7 +180,7 @@ impl DescriptorSetAllocator {
                 pool_index,
                 layout,
                 required_descriptors,
-                last_used_in: None,
+                last_used_in: 0,
                 pending_recycle: false,
             };
 
@@ -196,20 +196,23 @@ impl DescriptorSetAllocator {
             pool_index,
             layout,
             required_descriptors,
-            last_used_in: None,
+            last_used_in: 0,
             pending_recycle: false,
         })
     }
 
+    pub fn update_last_used(&mut self, key: DefaultKey, submission_num: usize) {
+        if let Some(slot) = self.slots.get_mut(key) {
+            if let DescriptorSetSlot::Allocated { last_used_in, .. } = slot {
+                *last_used_in = submission_num;
+            }
+        }
+    }
+
     pub fn reset_descriptor_set(&mut self, key: DefaultKey) {
         if let Some(slot) = self.slots.get_mut(key) {
-            if let DescriptorSetSlot::Allocated { descriptor_set, pool_index, required_descriptors, .. } = slot {
-                let ds = *descriptor_set;
-                let pool_idx = *pool_index;
-                let req_desc = required_descriptors.clone();
-
-                self.pools[pool_idx].free(&self.device, ds, &req_desc);
-                *slot = DescriptorSetSlot::Unallocated;
+            if let DescriptorSetSlot::Allocated { pending_recycle, .. } = slot {
+                *pending_recycle = true;
             }
         }
     }
@@ -217,7 +220,8 @@ impl DescriptorSetAllocator {
     pub fn on_submission_waited(&mut self, last_waited_submission: usize) {
         for (_key, slot) in &mut self.slots {
             if let DescriptorSetSlot::Allocated { pending_recycle, last_used_in, descriptor_set, pool_index, required_descriptors, .. } = slot {
-                if *pending_recycle && last_used_in.is_some_and(|sub| sub <= last_waited_submission) {
+                // Recycle descriptor sets that are pending and the GPU has finished using them
+                if *pending_recycle && *last_used_in <= last_waited_submission {
                     let ds = *descriptor_set;
                     let pool_idx = *pool_index;
                     let req_desc = required_descriptors.clone();

@@ -148,6 +148,9 @@ impl RenderTask {
             let pipeline_desc = GraphicsPipelineDesc::new(use_shader!("circle"), attributes, smallvec![GlobalDescriptorSet::bindings()]);
             let pipeline = self.vulkan_renderer.new_pipeline(render_pass.handle(), pipeline_desc);
 
+            let mut global_ds = self.vulkan_renderer.new_descriptor_set(GlobalDescriptorSet::bindings());
+            let global_ds_buffer = self.vulkan_renderer.new_device_buffer(BufferUsageFlags::UNIFORM_BUFFER, 16);
+            global_ds.bind_buffer(0, global_ds_buffer.handle_static());
 
             // let mut dev_buffer = self.vulkan_renderer.new_device_buffer(BufferUsageFlags::TRANSFER_DST | BufferUsageFlags::TRANSFER_SRC, 4*swapchain_extent.width as u64 * swapchain_extent.height as u64);
             loop {

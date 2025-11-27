@@ -6,6 +6,7 @@ use log::{info, warn};
 use parking_lot::Mutex;
 use sparkles::range_event_start;
 use crate::runtime::resources::buffers::BufferResourceDestroyHandle;
+use crate::runtime::resources::descriptor_sets::{DescriptorSetDestroyHandle, DescriptorSetHandle};
 use crate::runtime::resources::images::ImageResourceHandle;
 use crate::runtime::resources::pipeline::{GraphicsPipelineDestroyHandle, GraphicsPipelineHandle};
 use crate::runtime::resources::render_pass::RenderPassHandle;
@@ -18,6 +19,7 @@ pub struct ScheduledForDestroy {
     pub pipelines: Vec<(GraphicsPipelineDestroyHandle, usize)>,
     pub render_passes: Vec<(RenderPassHandle, usize)>,
     pub framebuffers: Vec<(Framebuffer, usize)>,
+    pub descriptor_sets: Vec<(DescriptorSetDestroyHandle, usize)>,
 }
 
 impl ScheduledForDestroy {
@@ -70,6 +72,15 @@ impl ScheduledForDestroy {
             }
         }
 
+        i = 0;
+        while i < self.descriptor_sets.len() {
+            if self.descriptor_sets[i].1 <= last_waited_submission {
+                result.descriptor_sets.push(self.descriptor_sets.swap_remove(i));
+            } else {
+                i += 1;
+            }
+        }
+
         if !result.framebuffers.is_empty() {
             info!("Destroying {} framebuffers", result.framebuffers.len());
         }
@@ -85,6 +96,9 @@ impl ScheduledForDestroy {
         if !result.buffers.is_empty() {
             info!("Destroying {} buffers", result.buffers.len());
         }
+        if !result.descriptor_sets.is_empty() {
+            info!("Recycling {} descriptor sets", result.descriptor_sets.len());
+        }
 
         result
     }
@@ -94,7 +108,8 @@ impl ScheduledForDestroy {
         self.images.is_empty() &&
         self.pipelines.is_empty() &&
         self.render_passes.is_empty() &&
-        self.framebuffers.is_empty()
+        self.framebuffers.is_empty() &&
+        self.descriptor_sets.is_empty()
     }
 }
 
@@ -207,6 +222,10 @@ impl SharedStateInner {
 
     pub fn schedule_destroy_framebuffer(&mut self, framebuffer: Framebuffer, submission_num: usize) {
         self.scheduled_for_destroy.framebuffers.push((framebuffer, submission_num));
+    }
+
+    pub fn schedule_recycle_descriptor_set(&mut self, handle: DescriptorSetDestroyHandle, submission_num: usize) {
+        self.scheduled_for_destroy.descriptor_sets.push((handle, submission_num));
     }
 
     pub fn take_ready_for_destroy(&mut self) -> ScheduledForDestroy {
@@ -354,6 +373,11 @@ impl SharedState {
 
     pub fn schedule_destroy_framebuffer(&self, framebuffer: Framebuffer, submission_num: usize) {
         self.state.lock().schedule_destroy_framebuffer(framebuffer, submission_num);
+    }
+
+    pub fn schedule_recycle_descriptor_set(&self, handle: DescriptorSetDestroyHandle) {
+        let submission_num = self.last_submission_num();
+        self.state.lock().schedule_recycle_descriptor_set(handle, submission_num);
     }
 
     pub fn poll_completed_fences(&self) {

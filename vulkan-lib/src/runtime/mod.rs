@@ -28,10 +28,12 @@ pub mod memory_manager;
 
 pub use semaphores::{SignalSemaphoreRef, WaitSemaphoreRef, WaitSemaphoreStagesRef};
 use resources::buffers::{BufferResource, MappableBufferResource};
+use resources::descriptor_sets::DescriptorSet;
 use resources::images::{ImageResource, ImageResourceHandle};
 use crate::extensions::calibrated_timestamps::CalibratedTimestamps;
 use crate::runtime::resources::pipeline::{GraphicsPipeline, GraphicsPipelineDesc};
 use crate::runtime::resources::render_pass::{RenderPassHandle, RenderPassResource};
+use crate::shaders::DescriptorSetLayoutBindingDesc;
 use crate::swapchain_wrapper::SwapchainWrapper;
 use crate::wrappers::timestamp_pool::TimestampPool;
 
@@ -129,6 +131,10 @@ impl RuntimeState {
     pub fn new_render_pass(&mut self, attachments_desc: AttachmentsDescription) -> RenderPassResource {
         let swapchain_images = self.swapchain_wrapper.get_images();
         self.resource_storage.create_render_pass(self.device.clone(), self.shared_state.clone(), swapchain_images, attachments_desc)
+    }
+
+    pub fn new_descriptor_set<'a, 'b>(&'a mut self, bindings: &'static [DescriptorSetLayoutBindingDesc]) -> DescriptorSet<'b> {
+        self.resource_storage.allocate_descriptor_set(bindings, self.shared_state.clone())
     }
 
     pub fn new_pipeline(&mut self, render_pass: RenderPassHandle, pipeline_desc: GraphicsPipelineDesc) -> GraphicsPipeline {
@@ -585,6 +591,11 @@ impl RuntimeState {
                                     .layer_count(1)],
                             );
                         }
+                    }
+                    DeviceCommand::RenderPass {
+                        ..
+                    } => {
+
                     }
                 }
             }

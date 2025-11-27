@@ -35,7 +35,7 @@ impl Drop for ImageResource {
     }
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, PartialEq)]
 pub struct ImageResourceHandle {
     pub(crate) state_key: DefaultKey,
     pub(crate) width: u32,

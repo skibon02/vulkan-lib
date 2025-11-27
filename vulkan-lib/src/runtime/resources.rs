@@ -23,6 +23,7 @@ pub mod buffers;
 pub mod images;
 pub mod render_pass;
 pub mod descriptor_pool;
+pub mod descriptor_sets;
 
 #[derive(Copy, Clone, Debug)]
 pub struct ResourceUsage {
@@ -633,6 +634,24 @@ impl ResourceStorage {
         }
     }
 
+    pub fn allocate_descriptor_set<'a, 'b>(&'a mut self, bindings: &'static [DescriptorSetLayoutBindingDesc], shared: SharedState) -> descriptor_sets::DescriptorSet<'b> {
+        let layout = self.get_or_create_descriptor_set_layout(bindings);
+        let key = self.descriptor_set_allocator.allocate_descriptor_set(layout, bindings);
+        descriptor_sets::DescriptorSet::new(shared, key, bindings)
+    }
+
+    pub fn update_descriptor_set_usage(&mut self, key: DefaultKey, submission_num: usize) {
+        self.descriptor_set_allocator.update_last_used(key, submission_num);
+    }
+
+    pub fn recycle_descriptor_set(&mut self, key: DefaultKey) {
+        self.descriptor_set_allocator.reset_descriptor_set(key);
+    }
+
+    pub fn on_submission_waited(&mut self, last_waited_submission: usize) {
+        self.descriptor_set_allocator.on_submission_waited(last_waited_submission);
+    }
+
     pub fn destroy_scheduled_resources(&mut self, scheduled: ScheduledForDestroy) {
         for (buffer_handle, _) in scheduled.buffers {
             self.destroy_buffer(buffer_handle.state_key);
@@ -648,6 +667,10 @@ impl ResourceStorage {
 
         for (render_pass_handle, _) in scheduled.render_passes {
             self.destroy_render_pass(render_pass_handle);
+        }
+
+        for (descriptor_set_handle, _) in scheduled.descriptor_sets {
+            self.recycle_descriptor_set(descriptor_set_handle.key);
         }
 
         unsafe {
