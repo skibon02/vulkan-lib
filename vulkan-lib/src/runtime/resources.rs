@@ -138,7 +138,7 @@ impl ImageInner {
 }
 
 pub(crate) struct RenderPassInner {
-    attachments_description: AttachmentsDescription,
+    pub attachments_description: AttachmentsDescription,
     pub render_pass: RenderPass,
     pub framebuffers: SmallVec<[(Framebuffer, SmallVec<[ImageResource; 5]>); 5]>,
     pub last_used_in: usize,
@@ -161,6 +161,7 @@ pub(crate) struct ResourceStorage {
     descriptor_set_allocator: DescriptorSetAllocator,
 }
 
+#[derive(Clone)]
 pub struct AttachmentsDescription {
     swapchain_attachment_desc: AttachmentDescription,
     depth_attachment_desc: Option<AttachmentDescription>,
@@ -185,6 +186,18 @@ impl AttachmentsDescription {
     pub fn with_color_attachment(mut self, color_attachment_desc: AttachmentDescription) -> Self {
         self.color_attachement_desc = Some(color_attachment_desc);
         self
+    }
+
+    pub fn get_swapchain_desc(&self) -> AttachmentDescription {
+        self.swapchain_attachment_desc
+    }
+
+    pub fn get_depth_attachment_desc(&self) -> Option<AttachmentDescription> {
+        self.depth_attachment_desc
+    }
+
+    pub fn get_color_attachment_desc(&self) -> Option<AttachmentDescription> {
+        self.color_attachement_desc
     }
 
     pub fn fill_defaults(&mut self, swapchain_format: Format) {

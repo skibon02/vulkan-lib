@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 use anyhow::Context;
 use ash::vk;
-use ash::vk::{AccessFlags, BufferCreateFlags, BufferMemoryBarrier, BufferUsageFlags, CommandBufferBeginInfo, DependencyFlags, Extent2D, Format, ImageAspectFlags, ImageLayout, ImageMemoryBarrier, ImageSubresourceRange, ImageUsageFlags, PhysicalDevice, PipelineBindPoint, PipelineStageFlags, Queue, Rect2D, RenderPassBeginInfo, SampleCountFlags, SubpassContents, TimeDomainEXT, WHOLE_SIZE};
+use ash::vk::{AccessFlags, BufferCreateFlags, BufferMemoryBarrier, BufferUsageFlags, CommandBufferBeginInfo, DependencyFlags, Extent2D, Format, ImageAspectFlags, ImageLayout, ImageMemoryBarrier, ImageSubresourceRange, ImageUsageFlags, PhysicalDevice, PipelineBindPoint, PipelineStageFlags, Queue, Rect2D, RenderPassBeginInfo, SampleCountFlags, SubpassContents, TimeDomainEXT, Viewport, WHOLE_SIZE};
 use log::{info, warn};
 use smallvec::{smallvec, SmallVec};
 use sparkles::external_events::ExternalEventsSource;
@@ -32,6 +32,7 @@ use resources::images::{ImageResource, ImageResourceHandle};
 use crate::extensions::calibrated_timestamps::CalibratedTimestamps;
 use crate::runtime::resources::pipeline::{GraphicsPipeline, GraphicsPipelineDesc};
 use crate::runtime::resources::render_pass::{RenderPassHandle, RenderPassResource};
+use crate::runtime::resources::ResourceUsages::DeviceUsage;
 use crate::shaders::DescriptorSetLayoutBindingDesc;
 use crate::swapchain_wrapper::SwapchainWrapper;
 use crate::wrappers::timestamp_pool::TimestampPool;
@@ -134,6 +135,28 @@ impl RuntimeState {
 
     pub fn new_descriptor_set<'a, 'b>(&'a mut self, bindings: &'static [DescriptorSetLayoutBindingDesc]) -> DescriptorSet<'b> {
         self.resource_storage.allocate_descriptor_set(bindings, self.shared_state.clone())
+    }
+
+    pub fn new_double_buffered_descriptor_sets<'a, R, F>(
+        &mut self,
+        bindings: &'static [DescriptorSetLayoutBindingDesc],
+        mut setup: F,
+    ) -> DoubleBufferedDescriptorSets<'a, R>
+    where
+        F: FnMut(&mut DescriptorSet<'a>, &mut Self) -> R,
+    {
+        use std::array::from_fn;
+        let frames: [_; 2] = from_fn(|_| {
+            let mut ds = self.new_descriptor_set(bindings);
+            let resources = setup(&mut ds, self);
+            (ds, resources)
+        });
+        let [f0, f1] = frames;
+        DoubleBufferedDescriptorSets {
+            sets: [f0.0, f1.0],
+            resources: [f0.1, f1.1],
+            current: 0,
+        }
     }
 
     pub fn new_pipeline(&mut self, render_pass: RenderPassHandle, pipeline_desc: GraphicsPipelineDesc) -> GraphicsPipeline {
@@ -329,11 +352,12 @@ impl RuntimeState {
 
         let submission_num = self.shared_state.increment_and_get_submission_num();
 
-        self.shared_state.poll_completed_fences();
+        self.shared_state.poll_completed_fences(); // fast check if any of previous submissions are finished
         let last_waited_submission = self.shared_state.last_host_waited_submission();
-        self.semaphore_manager.on_last_waited_submission(last_waited_submission);
-        self.command_buffer_manager.on_last_waited_submission(last_waited_submission);
+        self.semaphore_manager.on_last_waited_submission(last_waited_submission); // recycle old semaphores
+        self.command_buffer_manager.on_last_waited_submission(last_waited_submission); // recycle old command buffers
 
+        // handle wait semaphore
          let mut wait_semaphore = None;
          if let Some(wait_sem) = wait_ref {
              let stage_flags = wait_sem.stage_flags;
@@ -342,6 +366,7 @@ impl RuntimeState {
              for waited_op in &sem_waited_operations {
                  if let WaitedOperation::SwapchainImageAcquired(image_handle) = waited_op {
                      let image_inner = self.resource_storage.image(image_handle.state_key);
+                     // reset usages for image we just acquired. Future commands will synchronize with stage_flags from the semaphore
                      image_inner.usages = ResourceUsages::DeviceUsage(ResourceUsage::new(None, stage_flags, AccessFlags::empty(), true));
                  }
              }
@@ -377,9 +402,9 @@ impl RuntimeState {
             let mut src_stage_mask = PipelineStageFlags::empty();
             let mut dst_stage_mask = PipelineStageFlags::empty();
 
-            // accumulate barriers for all commands in the group
+            // 1) accumulate barriers for all commands in the group
             for cmd in group.iter() {
-                for usage in cmd.usages(submission_num) {
+                for usage in cmd.usages(submission_num, &mut self.resource_storage, self.swapchain_wrapper.get_images()) {
                     match usage {
                         SpecificResourceUsage::BufferUsage {
                             usage,
@@ -489,9 +514,42 @@ impl RuntimeState {
                         }
                     }
                 }
+                if let DeviceCommand::RenderPassEnd {render_pass, framebuffer_index} = cmd {
+                    // mark attachments as having a new layout, update last used in
+                    let attachments_description = self.resource_storage.render_pass(render_pass.0).attachments_description.clone();
+
+                    let swapchain_image_final_layout = attachments_description.get_swapchain_desc().final_layout;
+                    let swapchain_images = self.swapchain_wrapper.get_images();
+                    let swapchain_image_inner = self.resource_storage.image(swapchain_images[*framebuffer_index as usize].state_key);
+                    swapchain_image_inner.layout = swapchain_image_final_layout;
+
+                    let mut attachment_i = 0;
+                    if let Some(depth_att_desc) = attachments_description.get_depth_attachment_desc() {
+                        let depth_image_final_layout = depth_att_desc.final_layout;
+
+                        let image_handle = self.resource_storage.render_pass(render_pass.0).framebuffers[*framebuffer_index as usize].1[attachment_i].handle();
+                        let depth_image = self.resource_storage.image(image_handle.state_key);
+                        depth_image.layout = depth_image_final_layout;
+
+                        attachment_i += 1;
+                    }
+
+                    if let Some(color_attachment_desc) = attachments_description.get_color_attachment_desc() {
+                        let color_attachment_final_layout = color_attachment_desc.final_layout;
+
+                        let image_handle = self.resource_storage.render_pass(render_pass.0).framebuffers[*framebuffer_index as usize].1[attachment_i].handle();
+                        let color_attachment_image = self.resource_storage.image(image_handle.state_key);
+                        color_attachment_image.layout = color_attachment_final_layout;
+
+                        attachment_i += 1;
+                    }
+
+                    // update last_used_in
+                    self.resource_storage.render_pass(render_pass.0).last_used_in = submission_num;
+                }
             }
 
-            // insert single barrier for entire group if needed
+            // 2) insert single barrier for entire group if needed
             if !buffer_barriers.is_empty() || !image_barriers.is_empty() {
                 #[cfg(feature = "recording-logs")]
                 info!("  <- Barrier inserted. SRC: {:?}, DST: {:?}, Buffers: {:?}, Images: {:?}",
@@ -513,7 +571,7 @@ impl RuntimeState {
                 }
             }
 
-            // execute all commands in the group
+            // 3) Record all commands from group to the command buffer
             for cmd in group.iter() {
                 #[cfg(feature = "recording-logs")]
                 info!("  Recording command: {:?}", cmd.discriminant());
@@ -604,6 +662,15 @@ impl RuntimeState {
                             .render_area(Rect2D::default().extent(self.swapchain_wrapper.swapchain_extent));
                         unsafe {
                             self.device.cmd_begin_render_pass(cmd_buffer, &info, SubpassContents::INLINE);
+
+                            // set dynamic scissors and viewport
+                            self.device.cmd_set_viewport(cmd_buffer, 0, &[Viewport::default()
+                                .height(self.swapchain_wrapper.get_extent().height as f32)
+                                .width(self.swapchain_wrapper.get_extent().width as f32)
+                                .min_depth(0.0)
+                                .max_depth(1.0)
+                            ]);
+                            self.device.cmd_set_scissor(cmd_buffer, 0, &[self.swapchain_wrapper.get_extent().into()])
                         }
                     }
                     DeviceCommand::DrawCommand(DrawCommand::Draw {
@@ -646,7 +713,10 @@ impl RuntimeState {
                             self.device.cmd_draw(cmd_buffer, *vertex_count, *instance_count, *first_vertex, *first_instance);
                         }
                     }
-                    DeviceCommand::RenderPassEnd => {
+                    DeviceCommand::RenderPassEnd {
+                        render_pass,
+                        framebuffer_index,
+                    } => {
                         unsafe {
                             self.device.cmd_end_render_pass(cmd_buffer);
                         }
@@ -802,6 +872,58 @@ impl RuntimeState {
 
     pub fn dump_resource_usage(&self) {
         self.resource_storage.dump_resource_usage();
+    }
+}
+
+pub struct DoubleBufferedDescriptorSets<'a, R> {
+    sets: [DescriptorSet<'a>; 2],
+    resources: [R; 2],
+    current: usize,
+}
+
+impl<'a, R> DoubleBufferedDescriptorSets<'a, R> {
+    pub fn current(&self) -> &DescriptorSet<'a> {
+        &self.sets[self.current]
+    }
+
+    pub fn next_frame(&mut self) {
+        self.current = (self.current + 1) % 2;
+    }
+}
+
+pub struct DoubleBuffered<R> {
+    resources: [R; 2],
+    current: usize,
+}
+
+impl<R> DoubleBuffered<R> {
+    pub fn new(mut init: impl FnMut() -> R) -> Self {
+        use std::array::from_fn;
+        Self {
+            resources: from_fn(|_| init()),
+            current: 0,
+        }
+    }
+
+    pub fn current(&self) -> &R {
+        &self.resources[self.current]
+    }
+
+    pub fn current_mut(&mut self) -> &mut R {
+        &mut self.resources[self.current]
+    }
+
+    pub fn next_frame(&mut self) {
+        self.current = (self.current + 1) % 2;
+    }
+
+    pub fn both(&self) -> (&R, &R) {
+        (&self.resources[0], &self.resources[1])
+    }
+
+    pub fn both_mut(&mut self) -> (&mut R, &mut R) {
+        let [r0, r1] = &mut self.resources;
+        (r0, r1)
     }
 }
 

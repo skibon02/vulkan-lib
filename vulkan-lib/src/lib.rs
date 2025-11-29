@@ -24,6 +24,7 @@ pub use vk::ClearColorValue;
 pub use vk::SampleCountFlags;
 pub use vk::AttachmentLoadOp;
 pub use vk::{AttachmentStoreOp, AttachmentDescription, Format, DescriptorType, ShaderStageFlags, ClearValue, ClearDepthStencilValue};
+pub use crate::runtime::{DoubleBufferedDescriptorSets, DoubleBuffered};
 use crate::extensions::calibrated_timestamps::CalibratedTimestamps;
 use crate::wrappers::timestamp_pool::TimestampPool;
 

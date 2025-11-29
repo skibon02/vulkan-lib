@@ -1,15 +1,28 @@
 #version 450
 
-layout(location = 0) in vec3 pos;
-layout(location = 1) in vec3 col;
+// Per-instance attributes (binding 0, per instance)
+layout(location = 0) in vec2 pos;      // top-left corner position
+layout(location = 1) in vec2 size;     // width and height
+layout(location = 2) in vec4 color;    // solid color
 
-layout(location = 0) out vec3 fragColor;
+layout(location = 0) out vec4 fragColor;
 
-layout(binding = 0) uniform Color {
+layout(binding = 0) uniform UniformData {
     int data[4];
-} color;
+} uniformData;
+
+// 4 vertices per instance: top-left, top-right, bottom-left, bottom-right
+const vec2 vertices[4] = vec2[4](
+    vec2(0.0, 0.0),  // top-left
+    vec2(1.0, 0.0),  // top-right
+    vec2(0.0, 1.0),  // bottom-left
+    vec2(1.0, 1.0)   // bottom-right
+);
 
 void main() {
-    gl_Position = vec4(pos, 1.0);
-    fragColor = col;
+    vec2 vertexOffset = vertices[gl_VertexIndex];
+    vec2 vertexPos = pos + vertexOffset * size;
+
+    gl_Position = vec4(vertexPos, 0.0, 1.0);
+    fragColor = color;
 }

@@ -2,14 +2,15 @@ use strum::EnumDiscriminants;
 use std::collections::HashMap;
 use std::iter;
 use std::ops::{Deref, DerefMut};
+use std::sync::atomic::Ordering;
 use smallvec::{smallvec, SmallVec};
-use ash::vk::{AccessFlags, BufferCopy, BufferImageCopy, ClearValue, DescriptorSetLayoutBinding, ImageAspectFlags, ImageLayout, PipelineStageFlags};
+use ash::vk::{AccessFlags, BufferCopy, BufferImageCopy, ClearValue, DescriptorSetLayoutBinding, Format, ImageAspectFlags, ImageLayout, PipelineStageFlags};
 use crate::runtime::resources::buffers::BufferResourceHandle;
-use crate::runtime::resources::descriptor_sets::DescriptorSetHandle;
+use crate::runtime::resources::descriptor_sets::{BoundResource, DescriptorSetHandle};
 use crate::runtime::resources::images::ImageResourceHandle;
 use crate::runtime::resources::pipeline::GraphicsPipelineHandle;
 use crate::runtime::resources::render_pass::RenderPassHandle;
-use crate::runtime::resources::ResourceUsage;
+use crate::runtime::resources::{ResourceStorage, ResourceUsage};
 
 pub struct RecordContext<'a> {
     commands: Vec<DeviceCommand<'a>>,
@@ -126,7 +127,10 @@ impl<'a> RecordContext<'a> {
             base: &mut *self,
         };
         f(&mut render_pass_ctx);
-        self.commands.push(DeviceCommand::RenderPassEnd);
+        self.commands.push(DeviceCommand::RenderPassEnd {
+            render_pass,
+            framebuffer_index,
+        });
     }
 
     pub(crate) fn take_commands(self) -> Vec<DeviceCommand<'a>> {
@@ -153,6 +157,10 @@ impl<'a, 'b> DerefMut for RenderPassContext<'a, 'b> {
 }
 
 impl<'a, 'b> RenderPassContext<'a, 'b> {
+    pub fn barrier(&mut self) {
+        panic!("Pipeline barriers are not allowed inside render passes! Barriers must be placed before RenderPassBegin.");
+    }
+
     pub fn draw(&mut self, vertex_count: u32, instance_count: u32, first_vertex: u32, first_instance: u32) {
         let mut new_descriptor_set_bindings = SmallVec::new();
         for (i, binding) in &self.bound_descriptor_sets {
@@ -243,11 +251,14 @@ pub enum DeviceCommand<'a> {
         clear_values: SmallVec<[ClearValue; 3]>,
     },
     DrawCommand(DrawCommand),
-    RenderPassEnd,
+    RenderPassEnd {
+        render_pass: RenderPassHandle,
+        framebuffer_index: u32,
+    },
 }
 
 impl<'a> DeviceCommand<'a> {
-    pub fn usages(&self, submission_num: usize) -> Box<dyn Iterator<Item=SpecificResourceUsage<'a>> + 'a> {
+    pub fn usages(&self, submission_num: usize, resource_storage: &mut ResourceStorage, swapchain_images: SmallVec<[ImageResourceHandle; 3]>) -> Box<dyn Iterator<Item=SpecificResourceUsage<'a>> + 'a> {
         match self {
             DeviceCommand::CopyBuffer {
                 src,
@@ -368,11 +379,153 @@ impl<'a> DeviceCommand<'a> {
                     }
                 },
             )),
-            DeviceCommand::RenderPassBegin { .. } => {
-                Box::new(iter::empty())
+            DeviceCommand::RenderPassBegin { render_pass, framebuffer_index, .. } => {
+                // usages for attachments
+                let attachments = resource_storage.render_pass(render_pass.0).attachments_description.clone();
+                let swapchain_desc = attachments.get_swapchain_desc();
+                let swapchain_image_handle = swapchain_images[*framebuffer_index as usize];
+                let required_layout = if swapchain_desc.initial_layout == ImageLayout::UNDEFINED {
+                    None
+                }
+                else {
+                    Some(swapchain_desc.initial_layout)
+                };
+                let mut usages: SmallVec<[_; 4]> = smallvec![
+                    SpecificResourceUsage::ImageUsage {
+                        handle: swapchain_image_handle,
+                        usage: ResourceUsage::new(
+                            Some(submission_num),
+                            PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                            AccessFlags::COLOR_ATTACHMENT_READ | AccessFlags::COLOR_ATTACHMENT_WRITE,
+                            false
+                        ),
+                        required_layout,
+                        image_aspect: ImageAspectFlags::COLOR,
+                    }
+                    // render pass declared single subpass with some attachments
+                ];
+
+                let mut next_image_i = 0;
+                if let Some(depth_desc) = attachments.get_depth_attachment_desc() {
+                    let image_handle = resource_storage.render_pass(render_pass.0).framebuffers[*framebuffer_index as usize].1[next_image_i].handle();
+                    let format = depth_desc.format;
+                    let contains_stencil = matches!(format, Format::S8_UINT | Format::D16_UNORM_S8_UINT | Format::D24_UNORM_S8_UINT | Format::D32_SFLOAT_S8_UINT);
+                    let contains_depth = !matches!(format, Format::S8_UINT);
+                    let mut aspect_mask = ImageAspectFlags::empty();
+                    if contains_depth {
+                        aspect_mask |= ImageAspectFlags::DEPTH
+                    }
+                    if contains_stencil {
+                        aspect_mask |= ImageAspectFlags::STENCIL
+                    }
+                    let required_layout = if depth_desc.initial_layout == ImageLayout::UNDEFINED {
+                        None
+                    }
+                    else {
+                        Some(depth_desc.initial_layout)
+                    };
+                    usages.push(SpecificResourceUsage::ImageUsage {
+                        handle: image_handle,
+                        usage: ResourceUsage::new(
+                            Some(submission_num),
+                            PipelineStageFlags::EARLY_FRAGMENT_TESTS | PipelineStageFlags::LATE_FRAGMENT_TESTS,
+                            AccessFlags::DEPTH_STENCIL_ATTACHMENT_READ | AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
+                            false
+                        ),
+                        required_layout,
+                        image_aspect: aspect_mask,
+                    });
+
+                    next_image_i += 1;
+                }
+
+                if let Some(color_desc) = attachments.get_color_attachment_desc() {
+                    let image_handle = resource_storage.render_pass(render_pass.0).framebuffers[*framebuffer_index as usize].1[next_image_i].handle();
+                    let required_layout = if color_desc.initial_layout == ImageLayout::UNDEFINED {
+                        None
+                    }
+                    else {
+                        Some(color_desc.initial_layout)
+                    };
+                    usages.push(SpecificResourceUsage::ImageUsage {
+                        handle: image_handle,
+                        usage: ResourceUsage::new(
+                            Some(submission_num),
+                            PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                            AccessFlags::COLOR_ATTACHMENT_READ | AccessFlags::COLOR_ATTACHMENT_WRITE,
+                            false
+                        ),
+                        required_layout,
+                        image_aspect: ImageAspectFlags::COLOR,
+                    });
+
+                    next_image_i += 1;
+                }
+
+                Box::new(usages.into_iter())
             }
-            DeviceCommand::DrawCommand(_) => {
-                Box::new(iter::empty())
+            DeviceCommand::DrawCommand(
+                DrawCommand::Draw {
+                    new_vertex_buffer,
+                    new_descriptor_set_bindings,
+                    pipeline_handle,
+                    pipeline_handle_changed,
+                    ..
+                }
+            ) => {
+                let mut usages: SmallVec<[_; 10]> = smallvec![];
+                if let Some(v_buf) = new_vertex_buffer {
+                    usages.push(SpecificResourceUsage::BufferUsage {
+                        handle: v_buf.clone(),
+                        usage: ResourceUsage::new(
+                            Some(submission_num),
+                            PipelineStageFlags::VERTEX_INPUT,
+                            AccessFlags::VERTEX_ATTRIBUTE_READ,
+                            true
+                        ),
+                    })
+                }
+                for (set_index, descriptor_set_handle) in new_descriptor_set_bindings {
+                    // collect usage for bound resources
+                    for binding in &descriptor_set_handle.bindings {
+                        match binding.resource.expect("all descriptor set resources must be bound") {
+                            BoundResource::Buffer(buf) => {
+                                usages.push(SpecificResourceUsage::BufferUsage {
+                                    handle: buf.clone(),
+                                    usage: ResourceUsage::new(
+                                        Some(submission_num),
+                                        PipelineStageFlags::VERTEX_SHADER | PipelineStageFlags::FRAGMENT_SHADER,
+                                        AccessFlags::UNIFORM_READ,
+                                        true
+                                    ),
+                                })
+                            }
+                            BoundResource::Image(img) => {
+                                usages.push(SpecificResourceUsage::ImageUsage {
+                                    handle: img.clone(),
+                                    usage: ResourceUsage::new(
+                                        Some(submission_num),
+                                        PipelineStageFlags::FRAGMENT_SHADER,
+                                        AccessFlags::SHADER_READ,
+                                        true
+                                    ),
+                                    required_layout: Some(ImageLayout::SHADER_READ_ONLY_OPTIMAL),
+                                    image_aspect: ImageAspectFlags::COLOR,
+                                })
+                            }
+                            _ => {
+
+                            }
+                        }
+                    }
+
+                    // mark descriptor set used
+                }
+
+                if *pipeline_handle_changed {
+                    // mark pipeline used
+                }
+                Box::new(usages.into_iter())
             }
             DeviceCommand::RenderPassEnd { .. } => {
                 Box::new(iter::empty())

@@ -12,10 +12,10 @@ use std::time::Instant;
 use log::{error, info, warn};
 use sparkles::range_event_start;
 use render_macro::define_layout;
-use vulkan_lib::{descriptor_set, use_shader, AttachmentDescription, AttachmentLoadOp, AttachmentStoreOp, BufferUsageFlags, ClearColorValue, ClearDepthStencilValue, ClearValue, DescriptorType, Extent3D, Format, ImageAspectFlags, ImageLayout, ImageSubresourceLayers, Offset3D, PipelineStageFlags, SampleCountFlags, ShaderStageFlags, VulkanRenderer};
+use vulkan_lib::{descriptor_set, use_shader, AttachmentDescription, AttachmentLoadOp, AttachmentStoreOp, BufferCopy, BufferUsageFlags, ClearColorValue, ClearDepthStencilValue, ClearValue, DoubleBuffered, Format, ImageLayout, PipelineStageFlags, SampleCountFlags, VulkanRenderer};
 use vulkan_lib::runtime::resources::AttachmentsDescription;
 use vulkan_lib::runtime::resources::images::ImageResourceHandle;
-use vulkan_lib::runtime::resources::pipeline::{GraphicsPipelineDesc, VertexInputDesc};
+use vulkan_lib::runtime::resources::pipeline::GraphicsPipelineDesc;
 use vulkan_lib::shaders::layout::types::{int, vec2, vec4};
 
 pub enum RenderMessage {
@@ -34,26 +34,14 @@ pub struct RenderTask {
 }
 
 define_layout! {
-    pub struct CircleAttributes {
-        pub color: vec4<0>,
+    pub struct SolidAttributes {
         pub pos: vec2<0>,
-        pub trig_time: int<0>,
+        pub size: vec2<0>,
+        pub color: vec4<0>,
     }
 }
 
 // uniforms
-define_layout! {
-    pub struct Time {
-        pub time: int<0>
-    }
-}
-
-define_layout! {
-    pub struct Input {
-        pub pos: vec4<0>,
-        pub norm: vec4<0>,
-    }
-}
 define_layout! {
     pub struct Color {
         pub color: vec4<0>,
@@ -65,20 +53,20 @@ descriptor_set! {
     pub struct GlobalDescriptorSet {
         #[vert]
         0 -> UniformBuffer,
-        #[frag]
-        1 -> UniformBuffer,
-        #[frag]
-        2 -> CombinedImageSampler,
+        // #[frag]
+        // 1 -> UniformBuffer,
+        // #[frag]
+        // 2 -> CombinedImageSampler,
     }
 }
 
 
-impl Default for CircleAttributes {
+impl Default for SolidAttributes {
     fn default() -> Self {
         Self {
-            color: [1.0, 1.0, 1.0, 0.0].into(),
+            color: [1.0, 1.0, 1.0, 1.0].into(),
             pos: [0.0, 0.0].into(),
-            trig_time: 0.into(),
+            size: [0.5, 0.5].into(),
         }
     }
 }
@@ -103,7 +91,8 @@ impl RenderTask {
             info!("Render thread spawned!");
 
             let swapchain_extent = self.swapchain_image_handles[0].extent();
-            let mut staging_buffer = self.vulkan_renderer.new_host_buffer((4 * swapchain_extent.width * swapchain_extent.height) as u64);
+            let bytes_per_instance = SolidAttributes::SIZE as u64;
+            let mut staging_buffer = self.vulkan_renderer.new_host_buffer(bytes_per_instance);
 
             // Create render pass
             let msaa_samples = SampleCountFlags::TYPE_1;
@@ -130,7 +119,7 @@ impl RenderTask {
                 .stencil_load_op(AttachmentLoadOp::DONT_CARE)
                 .stencil_store_op(AttachmentStoreOp::DONT_CARE)
                 .initial_layout(ImageLayout::UNDEFINED)
-                .final_layout(ImageLayout::DEPTH_ATTACHMENT_OPTIMAL);
+                .final_layout(ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
 
             let mut attachments_desc = AttachmentsDescription::new(swapchain_attachment)
                 .with_depth_attachment(depth_attachment);
@@ -148,14 +137,59 @@ impl RenderTask {
             }
 
             let render_pass = self.vulkan_renderer.new_render_pass(attachments_desc);
-            let attributes = CircleAttributes::get_attributes_configuration();
+            let attributes = SolidAttributes::get_attributes_configuration();
+
+            let bytes_per_instance = SolidAttributes::SIZE;
+            let mut vertex_buffer = DoubleBuffered::new(|| {
+                let buf = self.vulkan_renderer.new_device_buffer(
+                    BufferUsageFlags::VERTEX_BUFFER | BufferUsageFlags::TRANSFER_DST,
+                    bytes_per_instance as u64
+                );
+                buf
+            });
+
+            // Fill all copies with green rectangle centered on screen
+            let green_rect = SolidAttributes {
+                pos: [-0.25, -0.25].into(),
+                size: [0.5, 0.5].into(),
+                color: [0.0, 1.0, 0.0, 1.0].into(),
+            };
+
+            // Write to staging buffer
+            staging_buffer.map_write(0, unsafe {
+                std::slice::from_raw_parts(
+                    &green_rect as *const SolidAttributes as *const u8,
+                    bytes_per_instance
+                )
+            });
+
+            // Copy to both vertex buffer copies
+            let region = BufferCopy::default()
+                .src_offset(0)
+                .dst_offset(0)
+                .size(bytes_per_instance as u64);
+
+            let (vb0, vb1) = vertex_buffer.both();
+
+            self.vulkan_renderer.record_device_commands(None, |ctx| {
+                ctx.copy_buffer(staging_buffer.handle(), vb0.handle_static(), smallvec![region]);
+            });
+
+            self.vulkan_renderer.record_device_commands(None, |ctx| {
+                ctx.copy_buffer(staging_buffer.handle(), vb1.handle_static(), smallvec![region]);
+            });
 
             let pipeline_desc = GraphicsPipelineDesc::new(use_shader!("solid"), attributes, smallvec![GlobalDescriptorSet::bindings()]);
             let pipeline = self.vulkan_renderer.new_pipeline(render_pass.handle(), pipeline_desc);
 
-            let mut global_ds = self.vulkan_renderer.new_descriptor_set(GlobalDescriptorSet::bindings());
-            let global_ds_buffer = self.vulkan_renderer.new_device_buffer(BufferUsageFlags::UNIFORM_BUFFER, 16);
-            global_ds.bind_buffer(0, global_ds_buffer.handle_static());
+            let mut global_ds = self.vulkan_renderer.new_double_buffered_descriptor_sets(
+                GlobalDescriptorSet::bindings(),
+                |ds, renderer| {
+                    let buffer = renderer.new_device_buffer(BufferUsageFlags::UNIFORM_BUFFER, 16);
+                    ds.bind_buffer(0, buffer.handle_static());
+                    buffer
+                },
+            );
 
             // let mut dev_buffer = self.vulkan_renderer.new_device_buffer(BufferUsageFlags::TRANSFER_DST | BufferUsageFlags::TRANSFER_SRC, 4*swapchain_extent.width as u64 * swapchain_extent.height as u64);
             loop {
@@ -185,7 +219,7 @@ impl RenderTask {
                         }
 
                         let g = range_event_start!("Wait previous submission");
-                        self.vulkan_renderer.wait_prev_submission(2);
+                        self.vulkan_renderer.wait_prev_submission(1);
                         drop(g);
 
                         // Acquire next swapchain image
@@ -216,8 +250,9 @@ impl RenderTask {
                         ];
                         let present_wait_ref = self.vulkan_renderer.record_device_commands_signal(Some(acquire_wait_ref.with_stages(PipelineStageFlags::TRANSFER)), |ctx| {
                             ctx.render_pass(render_pass.handle(), image_index, clear_values, |ctx| {
+                                ctx.bind_vertex_buffer(vertex_buffer.current().handle_static());
                                 ctx.bind_pipeline(pipeline.handle());
-                                ctx.bind_descriptor_set(0, global_ds.handle());
+                                ctx.bind_descriptor_set(0, global_ds.current().handle());
                                 ctx.draw(4, 1, 0, 0);
                             })
                         });
@@ -227,6 +262,8 @@ impl RenderTask {
                             error!("Present error: {:?}", e);
                         }
 
+                        global_ds.next_frame();
+                        vertex_buffer.next_frame();
                         self.render_finished.store(true, Ordering::Release);
                     }
                     RenderMessage::Resize { width, height } => {
