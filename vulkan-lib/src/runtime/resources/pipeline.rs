@@ -56,7 +56,6 @@ pub struct VertexInputDesc {
 }
 impl VertexInputDesc {
     pub fn new(members_meta: &'static [MemberMeta], size: usize) -> Self {
-
         let binding_desc = vec![VertexInputBindingDescription::default()
                 .binding(0)
                 .input_rate(vk::VertexInputRate::INSTANCE)
@@ -99,7 +98,7 @@ pub struct GraphicsPipelineDesc {
 impl GraphicsPipelineDesc {
     pub fn new(shaders: (&'static [u8], &'static [u8]), attributes: VertexInputDesc, bindings: SmallVec<[&'static [DescriptorSetLayoutBindingDesc]; 4]>) -> Self {
         Self {
-            vertex_assembly: VertexAssembly::TriangleList,
+            vertex_assembly: VertexAssembly::TriangleStrip,
             attributes,
             bindings,
             vert_shader: shaders.0.to_vec(),

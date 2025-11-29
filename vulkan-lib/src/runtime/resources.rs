@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::mem;
 use std::sync::atomic::AtomicBool;
 use ash::vk;
-use ash::vk::{AccessFlags, AttachmentDescription, AttachmentLoadOp, AttachmentStoreOp, Buffer, BufferCreateFlags, BufferCreateInfo, BufferUsageFlags, DescriptorSetLayout, DescriptorSetLayoutBinding, DescriptorSetLayoutCreateInfo, DeviceMemory, DeviceSize, Extent3D, Format, Framebuffer, Image, ImageCreateFlags, ImageCreateInfo, ImageLayout, ImageTiling, ImageType, ImageUsageFlags, ImageView, MemoryAllocateInfo, MemoryHeap, MemoryType, Pipeline, PipelineBindPoint, PipelineLayout, PipelineStageFlags, RenderPass, SampleCountFlags};
+use ash::vk::{AccessFlags, AttachmentDescription, AttachmentLoadOp, AttachmentStoreOp, Buffer, BufferCreateFlags, BufferCreateInfo, BufferUsageFlags, DescriptorBufferInfo, DescriptorImageInfo, DescriptorSetLayout, DescriptorSetLayoutBinding, DescriptorSetLayoutCreateInfo, DescriptorType, DeviceMemory, DeviceSize, Extent3D, Format, Framebuffer, Image, ImageCreateFlags, ImageCreateInfo, ImageLayout, ImageTiling, ImageType, ImageUsageFlags, ImageView, MemoryAllocateInfo, MemoryHeap, MemoryType, Pipeline, PipelineBindPoint, PipelineLayout, PipelineStageFlags, RenderPass, SampleCountFlags, WriteDescriptorSet, WHOLE_SIZE};
 use slotmap::{DefaultKey, SlotMap};
 use smallvec::{smallvec, SmallVec};
 use sparkles::range_event_start;
@@ -14,6 +14,7 @@ use render_pass::RenderPassHandle;
 use crate::runtime::resources::images::{ImageResource, ImageResourceHandle};
 use crate::runtime::resources::render_pass::RenderPassResource;
 use crate::runtime::memory_manager::{MemoryManager, MemoryTypeAlgorithm};
+use crate::runtime::resources::descriptor_sets::{BoundResource, DescriptorSetHandle};
 use crate::runtime::resources::pipeline::{create_graphics_pipeline, GraphicsPipeline, GraphicsPipelineDesc};
 use crate::shaders::DescriptorSetLayoutBindingDesc;
 use crate::wrappers::device::VkDeviceRef;
@@ -138,14 +139,14 @@ impl ImageInner {
 
 pub(crate) struct RenderPassInner {
     attachments_description: AttachmentsDescription,
-    render_pass: RenderPass,
-    framebuffers: SmallVec<[(Framebuffer, SmallVec<[ImageResource; 5]>); 5]>,
+    pub render_pass: RenderPass,
+    pub framebuffers: SmallVec<[(Framebuffer, SmallVec<[ImageResource; 5]>); 5]>,
     pub last_used_in: usize,
 }
 
 pub(crate) struct GraphicsPipelineInner {
-    pipeline: Pipeline, // must not be used in command buffer during destruction (lazy destroy)
-    pipeline_layout: PipelineLayout, // vkCmdBindDescriptorSets must not be recorded to any command buffer during destruction (lazy destroy)
+    pub pipeline: Pipeline, // must not be used in command buffer during destruction (lazy destroy)
+    pub pipeline_layout: PipelineLayout, // vkCmdBindDescriptorSets must not be recorded to any command buffer during destruction (lazy destroy)
 }
 
 
@@ -161,17 +162,18 @@ pub(crate) struct ResourceStorage {
 }
 
 pub struct AttachmentsDescription {
-    color_attachment_desc: AttachmentDescription,
+    swapchain_attachment_desc: AttachmentDescription,
     depth_attachment_desc: Option<AttachmentDescription>,
-    resolve_attachment_desc: Option<AttachmentDescription>,
+    /// If present, swapchain_attachment_desc is used as resolve attachment
+    color_attachement_desc: Option<AttachmentDescription>,
 }
 
 impl AttachmentsDescription {
-    pub fn new(color_attachment_desc: AttachmentDescription) -> Self {
+    pub fn new(swapchain_attachment_desc: AttachmentDescription) -> Self {
         Self {
-            color_attachment_desc,
+            swapchain_attachment_desc,
             depth_attachment_desc: None,
-            resolve_attachment_desc: None,
+            color_attachement_desc: None,
         }
     }
 
@@ -180,13 +182,13 @@ impl AttachmentsDescription {
         self
     }
 
-    pub fn with_resolve_attachment(mut self, resolve_attachment_desc: AttachmentDescription) -> Self {
-        self.resolve_attachment_desc = Some(resolve_attachment_desc);
+    pub fn with_color_attachment(mut self, color_attachment_desc: AttachmentDescription) -> Self {
+        self.color_attachement_desc = Some(color_attachment_desc);
         self
     }
 
     pub fn fill_defaults(&mut self, swapchain_format: Format) {
-        self.color_attachment_desc.format = swapchain_format;
+        self.swapchain_attachment_desc.format = swapchain_format;
         // self.color_attachment_desc.load_op = AttachmentLoadOp::CLEAR;
         // self.color_attachment_desc.store_op = AttachmentStoreOp::STORE;
         if let Some(depth_attachment) = &mut self.depth_attachment_desc {
@@ -195,8 +197,8 @@ impl AttachmentsDescription {
             // depth_attachment.load_op = AttachmentLoadOp::CLEAR;
             // depth_attachment.store_op = AttachmentStoreOp::DONT_CARE;
         }
-        if let Some(resolve_attachment) = &mut self.resolve_attachment_desc {
-            resolve_attachment.format = swapchain_format;
+        if let Some(color_attachment_desc) = &mut self.color_attachement_desc {
+            color_attachment_desc.format = swapchain_format;
             // resolve_attachment.load_op = AttachmentLoadOp::DONT_CARE;
             // resolve_attachment.store_op = AttachmentStoreOp::STORE;
         }
@@ -464,7 +466,7 @@ impl ResourceStorage {
         let swapchain_format = self.image(swapchain_images[0].state_key).format;
 
         attachments_description.fill_defaults(swapchain_format);
-        let mut attachments: SmallVec<[AttachmentDescription; 5]> = smallvec![attachments_description.color_attachment_desc];
+        let mut attachments: SmallVec<[AttachmentDescription; 5]> = smallvec![attachments_description.swapchain_attachment_desc];
         let mut attachment_i = 1;
         let mut subpass = vk::SubpassDescription::default()
             .pipeline_bind_point(PipelineBindPoint::GRAPHICS);
@@ -480,20 +482,23 @@ impl ResourceStorage {
         }
         let color_attachment_refs;
         let resolve_attachment_refs;
-        if let Some(attachment) = attachments_description.resolve_attachment_desc {
+        if let Some(attachment) = attachments_description.color_attachement_desc {
             attachments.push(attachment);
+            color_attachment_refs = [vk::AttachmentReference::default()
+                .attachment(attachment_i)
+                .layout(ImageLayout::COLOR_ATTACHMENT_OPTIMAL)];
+
+            // attachment 0 is treated as resolve attachment
             resolve_attachment_refs = [vk::AttachmentReference::default()
                 .attachment(0)
                 .layout(ImageLayout::COLOR_ATTACHMENT_OPTIMAL)];
 
-            color_attachment_refs = [vk::AttachmentReference::default()
-                .attachment(attachment_i)
-                .layout(ImageLayout::COLOR_ATTACHMENT_OPTIMAL)];
             subpass = subpass.resolve_attachments(&resolve_attachment_refs);
             subpass = subpass.color_attachments(&color_attachment_refs);
             attachment_i += 1;
         }
         else {
+            // attachment 0 is treated as color attachment
             color_attachment_refs = [vk::AttachmentReference::default()
                 .attachment(0)
                 .layout(ImageLayout::COLOR_ATTACHMENT_OPTIMAL)];
@@ -551,6 +556,9 @@ impl ResourceStorage {
     pub fn render_passes(&self) -> SmallVec<[RenderPassHandle; 5]> {
         self.render_passes.keys().map(|k| RenderPassHandle(k)).collect()
     }
+    pub fn render_pass(&mut self, k: DefaultKey) -> &mut RenderPassInner {
+        self.render_passes.get_mut(k).unwrap()
+    }
     pub fn destroy_render_pass_resources(&mut self, render_pass_handle: RenderPassHandle, shared: SharedState) {
         let render_pass_inner = self.render_passes.get_mut(render_pass_handle.0).unwrap();
         let used_in = render_pass_inner.last_used_in;
@@ -569,11 +577,11 @@ impl ResourceStorage {
         let render_pass = render_pass_inner.render_pass;
         let attachments_description = &render_pass_inner.attachments_description;
         let mut attachments = SmallVec::<[AttachmentDescription; 5]>::new();
-        attachments.push(attachments_description.color_attachment_desc);
+        attachments.push(attachments_description.swapchain_attachment_desc);
         if let Some(depth_attachment) = &attachments_description.depth_attachment_desc {
             attachments.push(*depth_attachment);
         }
-        if let Some(resolve_attachment) = &attachments_description.resolve_attachment_desc {
+        if let Some(resolve_attachment) = &attachments_description.color_attachement_desc {
             attachments.push(*resolve_attachment);
         }
         let swapchain_format = self.image(swapchain_images[0].state_key).format;
@@ -638,6 +646,48 @@ impl ResourceStorage {
         let layout = self.get_or_create_descriptor_set_layout(bindings);
         let key = self.descriptor_set_allocator.allocate_descriptor_set(layout, bindings);
         descriptor_sets::DescriptorSet::new(shared, key, bindings)
+    }
+
+    pub fn update_descriptor_set(&mut self, handle: DescriptorSetHandle) {
+        let descriptor_set = self.descriptor_set_allocator.get_descriptor_set(handle.key);
+        let mut descriptor_writes: SmallVec<[WriteDescriptorSet; 4]> = smallvec![];
+        let mut buffer_infos: SmallVec<[DescriptorBufferInfo; 4]> = smallvec![];
+        let mut image_infos: SmallVec<[DescriptorImageInfo; 4]> = smallvec![];
+        for binding in handle.bindings {
+            if let Some(resource) = binding.resource {
+                match resource {
+                    BoundResource::Buffer(buffer) => {
+                        let buffer = self.buffers.get(buffer.state_key).unwrap();
+                        buffer_infos.push(DescriptorBufferInfo::default()
+                            .buffer(buffer.buffer).range(WHOLE_SIZE));
+                        descriptor_writes.push(WriteDescriptorSet::default()
+                            .buffer_info(&buffer_infos[buffer_infos.len() - 1..])
+                            .dst_set(descriptor_set)
+                            .dst_binding(binding.binding_index)
+                            .dst_array_element(0)
+                            .descriptor_type(DescriptorType::UNIFORM_BUFFER)
+                        )
+                    }
+                    BoundResource::Image(image) => {
+                        let image_view = self.image_view(image.state_key);
+                        image_infos.push(DescriptorImageInfo::default()
+                            .image_view(image_view).image_layout(ImageLayout::READ_ONLY_OPTIMAL));
+                        descriptor_writes.push(WriteDescriptorSet::default()
+                            .image_info(&image_infos[image_infos.len() - 1..])
+                            .dst_set(descriptor_set)
+                            .dst_binding(binding.binding_index)
+                            .dst_array_element(0)
+                            .descriptor_type(DescriptorType::SAMPLED_IMAGE)
+                        )
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        unsafe {
+            self.device.update_descriptor_sets(&descriptor_writes, &[]);
+        }
     }
 
     pub fn update_descriptor_set_usage(&mut self, key: DefaultKey, submission_num: usize) {

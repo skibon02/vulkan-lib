@@ -12,7 +12,7 @@ use std::time::Instant;
 use log::{error, info, warn};
 use sparkles::range_event_start;
 use render_macro::define_layout;
-use vulkan_lib::{descriptor_set, use_shader, AttachmentDescription, AttachmentLoadOp, AttachmentStoreOp, BufferUsageFlags, ClearColorValue, DescriptorType, Extent3D, Format, ImageAspectFlags, ImageLayout, ImageSubresourceLayers, Offset3D, PipelineStageFlags, SampleCountFlags, ShaderStageFlags, VulkanRenderer};
+use vulkan_lib::{descriptor_set, use_shader, AttachmentDescription, AttachmentLoadOp, AttachmentStoreOp, BufferUsageFlags, ClearColorValue, ClearDepthStencilValue, ClearValue, DescriptorType, Extent3D, Format, ImageAspectFlags, ImageLayout, ImageSubresourceLayers, Offset3D, PipelineStageFlags, SampleCountFlags, ShaderStageFlags, VulkanRenderer};
 use vulkan_lib::runtime::resources::AttachmentsDescription;
 use vulkan_lib::runtime::resources::images::ImageResourceHandle;
 use vulkan_lib::runtime::resources::pipeline::{GraphicsPipelineDesc, VertexInputDesc};
@@ -49,20 +49,26 @@ define_layout! {
 }
 
 define_layout! {
-    pub struct MapStats {
-        pub r: float<0>,
-        pub ar: float<0>,
-        pub aspect: float<0>
+    pub struct Input {
+        pub pos: vec4<0>,
+        pub norm: vec4<0>,
     }
 }
+define_layout! {
+    pub struct Color {
+        pub color: vec4<0>,
+    }
+}
+
 // descriptor sets
 descriptor_set! {
     pub struct GlobalDescriptorSet {
-        0 -> UniformBuffer,
         #[vert]
+        0 -> UniformBuffer,
+        #[frag]
         1 -> UniformBuffer,
         #[frag]
-        2 -> CombinedImageSampler[10]
+        2 -> CombinedImageSampler,
     }
 }
 
@@ -109,8 +115,7 @@ impl RenderTask {
             } else {
                 AttachmentLoadOp::DONT_CARE
             };
-
-            let color_attachment = AttachmentDescription::default()
+            let swapchain_attachment = AttachmentDescription::default()
                 .samples(SampleCountFlags::TYPE_1)
                 .load_op(load_op)
                 .store_op(AttachmentStoreOp::STORE)
@@ -125,27 +130,27 @@ impl RenderTask {
                 .stencil_load_op(AttachmentLoadOp::DONT_CARE)
                 .stencil_store_op(AttachmentStoreOp::DONT_CARE)
                 .initial_layout(ImageLayout::UNDEFINED)
-                .final_layout(ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+                .final_layout(ImageLayout::DEPTH_ATTACHMENT_OPTIMAL);
 
-            let mut attachments_desc = AttachmentsDescription::new(color_attachment)
+            let mut attachments_desc = AttachmentsDescription::new(swapchain_attachment)
                 .with_depth_attachment(depth_attachment);
 
             if need_resolve {
                 // Add resolve attachment
-                let resolve_attachment = AttachmentDescription::default()
-                    .samples(SampleCountFlags::TYPE_1)
+                let color_attachment = AttachmentDescription::default()
+                    .samples(msaa_samples)
                     .load_op(AttachmentLoadOp::DONT_CARE)
-                    .store_op(AttachmentStoreOp::STORE)
+                    .store_op(AttachmentStoreOp::DONT_CARE)
                     .initial_layout(ImageLayout::UNDEFINED)
-                    .final_layout(ImageLayout::PRESENT_SRC_KHR);
+                    .final_layout(ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
 
-                attachments_desc = attachments_desc.with_resolve_attachment(resolve_attachment);
+                attachments_desc = attachments_desc.with_color_attachment(color_attachment);
             }
 
             let render_pass = self.vulkan_renderer.new_render_pass(attachments_desc);
             let attributes = CircleAttributes::get_attributes_configuration();
 
-            let pipeline_desc = GraphicsPipelineDesc::new(use_shader!("circle"), attributes, smallvec![GlobalDescriptorSet::bindings()]);
+            let pipeline_desc = GraphicsPipelineDesc::new(use_shader!("solid"), attributes, smallvec![GlobalDescriptorSet::bindings()]);
             let pipeline = self.vulkan_renderer.new_pipeline(render_pass.handle(), pipeline_desc);
 
             let mut global_ds = self.vulkan_renderer.new_descriptor_set(GlobalDescriptorSet::bindings());
@@ -198,44 +203,23 @@ impl RenderTask {
                             warn!("Swapchain is suboptimal after acquire");
                         }
 
+                        let clear_values = smallvec![
+                            ClearValue {
+                                color: bg_clear_color,
+                            },
+                            ClearValue {
+                                depth_stencil: ClearDepthStencilValue::default(),
+                            },
+                            ClearValue {
+                                color: bg_clear_color,
+                            },
+                        ];
                         let present_wait_ref = self.vulkan_renderer.record_device_commands_signal(Some(acquire_wait_ref.with_stages(PipelineStageFlags::TRANSFER)), |ctx| {
-                            // ctx.fill_buffer(
-                            //     dev_buffer.handle_static(),
-                            //     0,
-                            //     (4 * swapchain_extent.width * swapchain_extent.height) as u64,
-                            //     bg_color_u32,
-                            // );
-                            // ctx.copy_buffer_to_image_single(
-                            //     dev_buffer.handle_static(),
-                            //     self.swapchain_image_handles[image_index as usize],
-                            //     BufferImageCopy {
-                            //         buffer_offset: 0,
-                            //         buffer_row_length: 0,
-                            //         buffer_image_height: 0,
-                            //         image_subresource: ImageSubresourceLayers {
-                            //             aspect_mask: ImageAspectFlags::COLOR,
-                            //             mip_level: 0,
-                            //             base_array_layer: 0,
-                            //             layer_count: 1,
-                            //         },
-                            //         image_offset: Offset3D { x: 0, y: 0, z: 0 },
-                            //         image_extent: Extent3D {
-                            //             width: swapchain_extent.width,
-                            //             height: swapchain_extent.height,
-                            //             depth: 1,
-                            //         },
-                            //     },
-                            // );
-                            ctx.clear_color_image(
-                                self.swapchain_image_handles[image_index as usize],
-                                bg_clear_color,
-                                ImageAspectFlags::COLOR,
-                            );
-                            ctx.transition_image_layout(
-                                self.swapchain_image_handles[image_index as usize],
-                                ImageLayout::PRESENT_SRC_KHR,
-                                ImageAspectFlags::COLOR,
-                            );
+                            ctx.render_pass(render_pass.handle(), image_index, clear_values, |ctx| {
+                                ctx.bind_pipeline(pipeline.handle());
+                                ctx.bind_descriptor_set(0, global_ds.handle());
+                                ctx.draw(4, 1, 0, 0);
+                            })
                         });
 
                         let g = range_event_start!("Present");

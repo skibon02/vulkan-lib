@@ -1,4 +1,7 @@
+use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use ash::vk::DescriptorType;
+use log::warn;
 use slotmap::DefaultKey;
 use smallvec::SmallVec;
 use crate::runtime::resources::buffers::BufferResourceHandle;
@@ -44,6 +47,7 @@ impl<'a> DescriptorSet<'a> {
             handle: DescriptorSetHandle {
                 key,
                 bindings,
+                bindings_updated: Rc::new(AtomicBool::new(false)),
             },
         }
     }
@@ -55,12 +59,20 @@ impl<'a> DescriptorSet<'a> {
     pub fn bind_buffer(&mut self, binding_index: u32, buffer: BufferResourceHandle<'a>) {
         if let Some(binding) = self.handle.bindings.iter_mut().find(|b| b.binding_index == binding_index) {
             binding.resource = Some(BoundResource::Buffer(buffer));
+            self.handle.bindings_updated.store(true, Ordering::Relaxed);
+        }
+        else {
+            warn!("Incorrect binding index specified in bind_buffer!");
         }
     }
 
     pub fn bind_image(&mut self, binding_index: u32, image: ImageResourceHandle) {
         if let Some(binding) = self.handle.bindings.iter_mut().find(|b| b.binding_index == binding_index) {
             binding.resource = Some(BoundResource::CombinedImageSampler { image });
+            self.handle.bindings_updated.store(true, Ordering::Relaxed);
+        }
+        else {
+            warn!("Incorrect binding index specified in bind_image!");
         }
     }
 }
@@ -74,7 +86,8 @@ impl Drop for DescriptorSet<'_> {
 #[derive(Clone)]
 pub struct DescriptorSetHandle<'a> {
     pub(crate) key: DefaultKey,
-    bindings: SmallVec<[DescriptorSetBinding<'a>; 4]>,
+    pub(crate) bindings: SmallVec<[DescriptorSetBinding<'a>; 4]>,
+    pub(crate) bindings_updated: Rc<AtomicBool>,
 }
 
 pub struct DescriptorSetDestroyHandle {

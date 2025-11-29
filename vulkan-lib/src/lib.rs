@@ -23,7 +23,7 @@ pub use vk::ImageSubresourceLayers;
 pub use vk::ClearColorValue;
 pub use vk::SampleCountFlags;
 pub use vk::AttachmentLoadOp;
-pub use vk::{AttachmentStoreOp, AttachmentDescription, Format, DescriptorType, ShaderStageFlags};
+pub use vk::{AttachmentStoreOp, AttachmentDescription, Format, DescriptorType, ShaderStageFlags, ClearValue, ClearDepthStencilValue};
 use crate::extensions::calibrated_timestamps::CalibratedTimestamps;
 use crate::wrappers::timestamp_pool::TimestampPool;
 

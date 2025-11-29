@@ -200,6 +200,15 @@ impl DescriptorSetAllocator {
             pending_recycle: false,
         })
     }
+    
+    pub fn get_descriptor_set(&mut self, key: DefaultKey) -> DescriptorSet {
+        if let Some(slot) = self.slots.get_mut(key) {
+            if let DescriptorSetSlot::Allocated { descriptor_set, .. } = slot {
+                return *descriptor_set
+            }
+        }
+        panic!("Called get_descriptor_set on invalid or unallocated descriptor set slot")
+    }
 
     pub fn update_last_used(&mut self, key: DefaultKey, submission_num: usize) {
         if let Some(slot) = self.slots.get_mut(key) {

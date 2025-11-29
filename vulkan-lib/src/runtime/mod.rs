@@ -2,15 +2,13 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 use anyhow::Context;
 use ash::vk;
-use ash::vk::{AccessFlags, BufferCreateFlags, BufferMemoryBarrier, BufferUsageFlags, CommandBufferBeginInfo, DependencyFlags, Extent2D, Format, ImageAspectFlags, ImageLayout, ImageMemoryBarrier, ImageSubresourceRange, ImageUsageFlags, PhysicalDevice, PipelineStageFlags, Queue, SampleCountFlags, TimeDomainEXT, WHOLE_SIZE};
+use ash::vk::{AccessFlags, BufferCreateFlags, BufferMemoryBarrier, BufferUsageFlags, CommandBufferBeginInfo, DependencyFlags, Extent2D, Format, ImageAspectFlags, ImageLayout, ImageMemoryBarrier, ImageSubresourceRange, ImageUsageFlags, PhysicalDevice, PipelineBindPoint, PipelineStageFlags, Queue, Rect2D, RenderPassBeginInfo, SampleCountFlags, SubpassContents, TimeDomainEXT, WHOLE_SIZE};
 use log::{info, warn};
-use slotmap::DefaultKey;
 use smallvec::{smallvec, SmallVec};
 use sparkles::external_events::ExternalEventsSource;
 use sparkles::{range_event_start, static_name};
 use sparkles::monotonic::{get_monotonic, get_monotonic_nanos, get_perf_frequency};
-use strum::IntoDiscriminant;
-use crate::runtime::recording::{DeviceCommand, RecordContext, SpecificResourceUsage};
+use crate::runtime::recording::{DeviceCommand, DrawCommand, RecordContext, SpecificResourceUsage};
 use crate::runtime::resources::{AttachmentsDescription, ImageInner, ResourceStorage, ResourceUsage, ResourceUsages};
 use crate::runtime::semaphores::{SemaphoreManager, WaitedOperation};
 use crate::runtime::command_buffers::CommandBufferManager;
@@ -592,10 +590,54 @@ impl RuntimeState {
                             );
                         }
                     }
-                    DeviceCommand::RenderPass {
-                        ..
+                    DeviceCommand::RenderPassBegin {
+                        render_pass,
+                        framebuffer_index,
+                        clear_values,
                     } => {
+                        let render_pass = self.resource_storage.render_pass(render_pass.0);
+                        let info = RenderPassBeginInfo::default()
+                            .render_pass(render_pass.render_pass)
+                            .framebuffer(render_pass.framebuffers[*framebuffer_index as usize].0)
+                            .clear_values(clear_values)
+                            .render_area(Rect2D::default().extent(self.swapchain_wrapper.swapchain_extent));
+                        unsafe {
+                            self.device.cmd_begin_render_pass(cmd_buffer, &info, SubpassContents::INLINE);
+                        }
+                    }
+                    DeviceCommand::DrawCommand(DrawCommand::Draw {
+                        vertex_count,
+                        instance_count,
+                        first_vertex,
+                        first_instance,
+                        vert_buffer_binding,
+                        pipeline_binding,
+                        desc_set_bindings,
+                    } ) => {
+                        unsafe {
+                            if let Some(vert_binding) = vert_buffer_binding {
+                                let buffer = self.resource_storage.buffer(vert_binding.state_key).buffer;
+                                self.device.cmd_bind_vertex_buffers(cmd_buffer, 0, &[buffer], &[0]);
+                            }
+                            if let Some(pipeline_binding) = pipeline_binding {
+                                let pipeline = self.resource_storage.pipeline(pipeline_binding.key).pipeline;
+                                self.device.cmd_bind_pipeline(cmd_buffer, PipelineBindPoint::GRAPHICS, pipeline);
+                            }
+                            for (binding, desc_set_handle) in desc_set_bindings {
+                                // update descriptor set
+                                if desc_set_handle.bindings_updated.load(Ordering::Relaxed) {
+                                    self.resource_storage.update_descriptor_set(desc_set_hanlde);
+                                }
 
+                                // bind descriptor set if changed
+                            }
+                            self.device.cmd_draw(cmd_buffer, *vertex_count, *instance_count, *first_vertex, *first_instance);
+                        }
+                    }
+                    DeviceCommand::RenderPassEnd => {
+                        unsafe {
+                            self.device.cmd_end_render_pass(cmd_buffer);
+                        }
                     }
                 }
             }

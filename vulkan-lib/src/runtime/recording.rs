@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::iter;
 use std::ops::{Deref, DerefMut};
 use smallvec::{smallvec, SmallVec};
-use ash::vk::{AccessFlags, BufferCopy, BufferImageCopy, ImageAspectFlags, ImageLayout, PipelineStageFlags};
+use ash::vk::{AccessFlags, BufferCopy, BufferImageCopy, ClearValue, DescriptorSetLayoutBinding, ImageAspectFlags, ImageLayout, PipelineStageFlags};
 use crate::runtime::resources::buffers::BufferResourceHandle;
 use crate::runtime::resources::descriptor_sets::DescriptorSetHandle;
 use crate::runtime::resources::images::ImageResourceHandle;
@@ -14,8 +14,8 @@ use crate::runtime::resources::ResourceUsage;
 pub struct RecordContext<'a> {
     commands: Vec<DeviceCommand<'a>>,
     bound_pipeline: Option<GraphicsPipelineHandle>,
-    // Map from set number to descriptor set handle
-    bound_descriptor_sets: HashMap<u32, DescriptorSetHandle>,
+    bound_descriptor_sets: HashMap<u32, DescriptorSetHandle<'static>>,
+    bound_vertex_buffer: Option<BufferResourceHandle<'static>>
 }
 
 impl<'a> RecordContext<'a> {
@@ -23,25 +23,21 @@ impl<'a> RecordContext<'a> {
         Self {
             commands: Vec::new(),
             bound_pipeline: None,
+            bound_vertex_buffer: None,
             bound_descriptor_sets: HashMap::new(),
         }
     }
 
-    // Binding methods (change state, don't add commands)
     pub fn bind_pipeline(&mut self, pipeline: GraphicsPipelineHandle) {
-        // When binding a new pipeline, invalidate all descriptor sets
-        // because the pipeline layout may be incompatible
         self.bound_pipeline = Some(pipeline);
-        self.bound_descriptor_sets.clear();
     }
 
-    pub fn bind_descriptor_set(&mut self, set: u32, descriptor_set: DescriptorSetHandle) {
-        // Bind the descriptor set at the specific set number
+    pub fn bind_descriptor_set(&mut self, set: u32, descriptor_set: DescriptorSetHandle<'static>) {
         self.bound_descriptor_sets.insert(set, descriptor_set);
+    }
 
-        // Invalidate all descriptor sets with higher set numbers
-        // because they may not be compatible with the new binding
-        self.bound_descriptor_sets.retain(|&k, _| k <= set);
+    pub fn bind_vertex_buffer(&mut self, buf: BufferResourceHandle<'static>) {
+        self.bound_vertex_buffer = Some(buf);
     }
 
     pub fn copy_buffer<'b>(&'b mut self, src: BufferResourceHandle<'a>, dst: BufferResourceHandle<'a>, regions: SmallVec<[BufferCopy; 1]>) {
@@ -114,25 +110,20 @@ impl<'a> RecordContext<'a> {
         self.commands.push(DeviceCommand::Barrier)
     }
 
-    pub fn render_pass<F>(&mut self, render_pass: RenderPassHandle, framebuffer_index: u32, f: F)
+    pub fn render_pass<F>(&mut self, render_pass: RenderPassHandle, framebuffer_index: u32, clear_values: SmallVec<[ClearValue; 3]>, f: F)
     where
         F: FnOnce(&mut RenderPassContext<'a, '_>)
     {
-        let draw_commands = {
-            let mut render_pass_ctx = RenderPassContext {
-                base: &mut *self,
-                draw_commands: Vec::new(),
-            };
-
-            f(&mut render_pass_ctx);
-            render_pass_ctx.draw_commands
-        };
-
-        self.commands.push(DeviceCommand::RenderPass {
+        self.commands.push(DeviceCommand::RenderPassBegin {
             render_pass,
             framebuffer_index,
-            draw_commands,
+            clear_values
         });
+        let mut render_pass_ctx = RenderPassContext {
+            base: &mut *self,
+        };
+        f(&mut render_pass_ctx);
+        self.commands.push(DeviceCommand::RenderPassEnd);
     }
 
     pub(crate) fn take_commands(self) -> Vec<DeviceCommand<'a>> {
@@ -142,7 +133,6 @@ impl<'a> RecordContext<'a> {
 
 pub struct RenderPassContext<'a, 'b> {
     base: &'b mut RecordContext<'a>,
-    draw_commands: Vec<DrawCommand>,
 }
 
 impl<'a, 'b> Deref for RenderPassContext<'a, 'b> {
@@ -160,14 +150,23 @@ impl<'a, 'b> DerefMut for RenderPassContext<'a, 'b> {
 }
 
 impl<'a, 'b> RenderPassContext<'a, 'b> {
-    // Draw command methods (render pass specific)
     pub fn draw(&mut self, vertex_count: u32, instance_count: u32, first_vertex: u32, first_instance: u32) {
-        self.draw_commands.push(DrawCommand::Draw {
+        let mut desc_set_bindings = SmallVec::new();
+        for (i, binding) in &self.bound_descriptor_sets {
+            desc_set_bindings.push((*i, binding.clone()));
+        }
+        let vert_buffer_binding = self.bound_vertex_buffer.take();
+        let pipeline_binding = self.bound_pipeline.take();
+
+        self.commands.push(DeviceCommand::DrawCommand(DrawCommand::Draw {
             vertex_count,
             instance_count,
             first_vertex,
             first_instance,
-        });
+            vert_buffer_binding,
+            desc_set_bindings,
+            pipeline_binding
+        }));
     }
 }
 
@@ -177,8 +176,10 @@ pub enum DrawCommand {
         instance_count: u32,
         first_vertex: u32,
         first_instance: u32,
+        vert_buffer_binding: Option<BufferResourceHandle<'static>>,
+        pipeline_binding: Option<GraphicsPipelineHandle>,
+        desc_set_bindings: SmallVec<[(u32, DescriptorSetHandle<'static>); 4]>,
     },
-    // More draw commands will be added later
 }
 
 pub enum SpecificResourceUsage<'a> {
@@ -228,11 +229,13 @@ pub enum DeviceCommand<'a> {
         depth_value: Option<f32>,
         stencil_value: Option<u32>,
     },
-    RenderPass {
+    RenderPassBegin {
         render_pass: RenderPassHandle,
         framebuffer_index: u32,
-        draw_commands: Vec<DrawCommand>,
-    }
+        clear_values: SmallVec<[ClearValue; 3]>,
+    },
+    DrawCommand(DrawCommand),
+    RenderPassEnd,
 }
 
 impl<'a> DeviceCommand<'a> {
@@ -357,9 +360,13 @@ impl<'a> DeviceCommand<'a> {
                     }
                 },
             )),
-            DeviceCommand::RenderPass { .. } => {
-                // Render pass resource usage will be handled when we implement draw commands
-                // For now, no resource usage from the render pass itself
+            DeviceCommand::RenderPassBegin { .. } => {
+                Box::new(iter::empty())
+            }
+            DeviceCommand::DrawCommand(_) => {
+                Box::new(iter::empty())
+            }
+            DeviceCommand::RenderPassEnd { .. } => {
                 Box::new(iter::empty())
             }
         }
