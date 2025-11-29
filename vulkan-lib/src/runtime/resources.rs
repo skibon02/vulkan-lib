@@ -26,78 +26,144 @@ pub mod render_pass;
 pub mod descriptor_pool;
 pub mod descriptor_sets;
 
+/// Event of specific resource usage
 #[derive(Copy, Clone, Debug)]
 pub struct ResourceUsage {
     pub submission_num: Option<usize>,
     pub stage_flags: PipelineStageFlags,
     pub access_flags: AccessFlags,
-    pub is_readonly: bool,
 }
 
 impl ResourceUsage {
-    pub fn new(submission_num: Option<usize>, stage_flags: PipelineStageFlags, access_flags: AccessFlags, is_readonly: bool) -> Self {
+    pub fn new(submission_num: Option<usize>, stage_flags: PipelineStageFlags, access_flags: AccessFlags) -> Self {
+        // todo: validate access flags over stage flags
         Self {
             submission_num,
             stage_flags,
             access_flags,
-            is_readonly
         }
     }
-    
-    pub fn empty(submission_num: Option<usize>) -> Self {
-        Self {
-            submission_num,
-            stage_flags: PipelineStageFlags::empty(),
-            access_flags: AccessFlags::empty(),
-            is_readonly: true
-        }
+
+    pub fn is_readonly(&self) -> bool {
+        // todo: add flags from extensions
+        // A usage is considered readonly if it does not have any write access flags
+        let write_access_flags = AccessFlags::SHADER_WRITE
+            | AccessFlags::COLOR_ATTACHMENT_WRITE
+            | AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE
+            | AccessFlags::TRANSFER_WRITE
+            | AccessFlags::HOST_WRITE
+            | AccessFlags::MEMORY_WRITE;
+
+        self.access_flags & write_access_flags == AccessFlags::empty()
     }
 }
 
 #[derive(Clone, Debug)]
-pub enum ResourceUsages {
-    DeviceUsage (ResourceUsage),
+pub enum LastResourceUsage {
+    HasWrite {
+        last_write: Option<ResourceUsage>,
+        visible_for: AccessFlags,
+    },
     None
 }
 
-impl ResourceUsages {
+#[derive(Copy, Clone, Debug, Default)]
+pub struct RequiredSync {
+    pub src_stages: PipelineStageFlags,
+    pub dst_stages: PipelineStageFlags,
+    pub src_access: AccessFlags,
+    pub dst_access: AccessFlags,
+}
+
+impl LastResourceUsage {
     pub fn new() -> Self {
         Self::None
     }
 
-    pub fn on_host_waited(&mut self, last_waited_num: usize) {
-        if let Self::DeviceUsage(resource_usage) = self && let Some(submission_num) = resource_usage.submission_num && last_waited_num >= submission_num {
-            *self = Self::None;
+    pub fn on_host_waited(&mut self, last_waited_num: usize, had_host_writes: bool) {
+        if let Self::HasWrite{ last_write, visible_for } = self
+            && let Some(last_write_fr) = last_write
+            && let Some(submission_num) = last_write_fr.submission_num
+            && last_waited_num >= submission_num {
+
+            *last_write = None;
+            if had_host_writes {
+                *visible_for = AccessFlags::empty();
+            }
+        }
+        else {
+            *self = Self::HasWrite {
+                last_write: None,
+                visible_for: AccessFlags::empty(),
+            }
         }
     }
 
     /// Add new usage, returning previous usage if a sync barrier is needed.
     /// Returns Some(previous_usage) if we need synchronization, None if no sync needed.
-    pub fn add_usage(&mut self, new_usage: ResourceUsage) -> Option<ResourceUsage> {
-        if let ResourceUsages::DeviceUsage (prev_usage)= self {
-            if prev_usage.is_readonly && new_usage.is_readonly {
-                prev_usage.submission_num = new_usage.submission_num;
-                prev_usage.stage_flags |= new_usage.stage_flags;
-                prev_usage.access_flags |= new_usage.access_flags;
-                return None;
+    pub fn add_usage(&mut self, new_usage: ResourceUsage) -> Option<RequiredSync> {
+        if let Self::HasWrite {
+            last_write,
+            visible_for,
+        } = self {
+            let need_visible = new_usage.access_flags & !*visible_for;
+            if let Some(last_write_fr) = last_write {
+                let required_sync = RequiredSync {
+                    src_stages: last_write_fr.stage_flags,
+                    src_access: last_write_fr.access_flags,
+
+                    dst_stages: new_usage.stage_flags,
+                    dst_access: need_visible,
+                };
+
+                // Update visible_for
+                if new_usage.is_readonly() {
+                    *last_write = None;
+                    *visible_for |= new_usage.access_flags;
+                }
+                else {
+                    // Save new write
+                    *last_write_fr = new_usage;
+                    *visible_for = AccessFlags::empty();
+                }
+                Some(required_sync)
+            }
+            else {
+                if !new_usage.is_readonly() {
+                    *last_write = Some(new_usage);
+                    *visible_for = AccessFlags::empty();
+                }
+                if !need_visible.is_empty() {
+                    // Need sync for new read usages
+                    let required_sync = RequiredSync {
+                        src_stages: PipelineStageFlags::empty(),
+                        src_access: AccessFlags::empty(),
+
+                        dst_stages: new_usage.stage_flags,
+                        dst_access: need_visible,
+                    };
+
+                    if new_usage.is_readonly() {
+                        *visible_for |= new_usage.access_flags;
+                    }
+                    return Some(required_sync);
+                }
+
+                None
             }
         }
+        else {
+            if !new_usage.is_readonly() {
+                *self = LastResourceUsage::HasWrite {
+                    last_write: Some(new_usage),
+                    visible_for: AccessFlags::empty(),
+                };
+            }
 
-        let prev_usage = self.last_usage();
-
-        *self = ResourceUsages::DeviceUsage(new_usage);
-        
-        prev_usage
-    }
-
-    pub fn last_usage(&self) -> Option<ResourceUsage> {
-        if let ResourceUsages::DeviceUsage (last_usage) = self {
-            Some(*last_usage)
-        } else { 
             None
         }
     }
-    
+
     pub fn is_none(&self) -> bool {
         matches!(self, Self::None)
     }
@@ -114,14 +180,14 @@ pub struct BufferHostState {
 pub(crate) struct BufferInner {
     pub buffer: Buffer,
     pub memory: DeviceMemory,
-    pub usages: ResourceUsages,
+    pub usages: LastResourceUsage,
 }
 
 pub(crate) struct ImageInner {
     pub image: Image,
     pub image_view: Option<ImageView>,
     pub memory: Option<DeviceMemory>,
-    pub usages: ResourceUsages,
+    pub usages: LastResourceUsage,
     pub layout: ImageLayout,
     pub format: Format,
 }
@@ -291,7 +357,7 @@ impl ResourceStorage {
 
         let buffer_inner = BufferInner {
             buffer,
-            usages: ResourceUsages::new(),
+            usages: LastResourceUsage::new(),
             memory,
         };
         let state_key = self.buffers.insert(buffer_inner);
@@ -316,7 +382,7 @@ impl ResourceStorage {
         let image_inner = ImageInner {
             image,
             image_view: None,
-            usages: ResourceUsages::new(),
+            usages: LastResourceUsage::new(),
             memory: None,
             layout: ImageLayout::UNDEFINED,
             format,
@@ -370,7 +436,7 @@ impl ResourceStorage {
         let image_inner = ImageInner {
             image,
             image_view: None,
-            usages: ResourceUsages::new(),
+            usages: LastResourceUsage::new(),
             memory: Some(memory),
             layout: ImageLayout::UNDEFINED,
             format,

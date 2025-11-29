@@ -135,12 +135,6 @@ impl SemaphoreManager {
         match slot {
             SemaphoreSlot::Signaled{semaphore, waited_operations} => {
                 let sem = *semaphore;
-                if let Some(submission_num) = used_in_submission {
-                    waited_operations.push(WaitedOperation::Submission(
-                        submission_num,
-                        wait_ref.stage_flags,
-                    ));
-                }
                 let waited_operations = waited_operations.clone();
                 *slot = SemaphoreSlot::WaitScheduled {
                     semaphore: sem,

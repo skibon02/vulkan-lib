@@ -272,7 +272,6 @@ impl<'a> DeviceCommand<'a> {
                                 Some(submission_num),
                                 PipelineStageFlags::TRANSFER,
                                 AccessFlags::TRANSFER_READ,
-                                true
                                 ),
                             handle: *src
                         },
@@ -281,7 +280,6 @@ impl<'a> DeviceCommand<'a> {
                                 Some(submission_num),
                                 PipelineStageFlags::TRANSFER,
                                 AccessFlags::TRANSFER_WRITE,
-                                false
                             ),
                             handle: *dst
                         },
@@ -303,7 +301,6 @@ impl<'a> DeviceCommand<'a> {
                                 Some(submission_num),
                                 PipelineStageFlags::TRANSFER,
                                 AccessFlags::TRANSFER_READ,
-                                true
                             ),
                             handle: *src
                         },
@@ -312,7 +309,6 @@ impl<'a> DeviceCommand<'a> {
                                 Some(submission_num),
                                 PipelineStageFlags::TRANSFER,
                                 AccessFlags::TRANSFER_WRITE,
-                                false
                             ),
                             handle: *dst,
                             required_layout: Some(ImageLayout::TRANSFER_DST_OPTIMAL),
@@ -328,7 +324,6 @@ impl<'a> DeviceCommand<'a> {
                             Some(submission_num),
                             PipelineStageFlags::TRANSFER,
                             AccessFlags::TRANSFER_WRITE,
-                            false
                         ),
                         handle: *buffer
                     },
@@ -341,7 +336,6 @@ impl<'a> DeviceCommand<'a> {
                         Some(submission_num),
                         PipelineStageFlags::TRANSFER, // keep non-empty stage flag for execution dependency
                         AccessFlags::empty(),
-                        true
                     ),
                     handle: *image,
                     required_layout: Some(*new_layout),
@@ -354,7 +348,6 @@ impl<'a> DeviceCommand<'a> {
                         Some(submission_num),
                         PipelineStageFlags::TRANSFER,
                         AccessFlags::TRANSFER_WRITE,
-                        false
                     ),
                     handle: *image,
                     required_layout: Some(ImageLayout::TRANSFER_DST_OPTIMAL),
@@ -367,7 +360,6 @@ impl<'a> DeviceCommand<'a> {
                         Some(submission_num),
                         PipelineStageFlags::TRANSFER,
                         AccessFlags::TRANSFER_WRITE,
-                        false
                     ),
                     handle: *image,
                     required_layout: Some(ImageLayout::TRANSFER_DST_OPTIMAL),
@@ -397,7 +389,6 @@ impl<'a> DeviceCommand<'a> {
                             Some(submission_num),
                             PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
                             AccessFlags::COLOR_ATTACHMENT_READ | AccessFlags::COLOR_ATTACHMENT_WRITE,
-                            false
                         ),
                         required_layout,
                         image_aspect: ImageAspectFlags::COLOR,
@@ -430,7 +421,6 @@ impl<'a> DeviceCommand<'a> {
                             Some(submission_num),
                             PipelineStageFlags::EARLY_FRAGMENT_TESTS | PipelineStageFlags::LATE_FRAGMENT_TESTS,
                             AccessFlags::DEPTH_STENCIL_ATTACHMENT_READ | AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
-                            false
                         ),
                         required_layout,
                         image_aspect: aspect_mask,
@@ -453,7 +443,6 @@ impl<'a> DeviceCommand<'a> {
                             Some(submission_num),
                             PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
                             AccessFlags::COLOR_ATTACHMENT_READ | AccessFlags::COLOR_ATTACHMENT_WRITE,
-                            false
                         ),
                         required_layout,
                         image_aspect: ImageAspectFlags::COLOR,
@@ -481,7 +470,6 @@ impl<'a> DeviceCommand<'a> {
                             Some(submission_num),
                             PipelineStageFlags::VERTEX_INPUT,
                             AccessFlags::VERTEX_ATTRIBUTE_READ,
-                            true
                         ),
                     })
                 }
@@ -496,7 +484,6 @@ impl<'a> DeviceCommand<'a> {
                                         Some(submission_num),
                                         PipelineStageFlags::VERTEX_SHADER | PipelineStageFlags::FRAGMENT_SHADER,
                                         AccessFlags::UNIFORM_READ,
-                                        true
                                     ),
                                 })
                             }
@@ -507,7 +494,6 @@ impl<'a> DeviceCommand<'a> {
                                         Some(submission_num),
                                         PipelineStageFlags::FRAGMENT_SHADER,
                                         AccessFlags::SHADER_READ,
-                                        true
                                     ),
                                     required_layout: Some(ImageLayout::SHADER_READ_ONLY_OPTIMAL),
                                     image_aspect: ImageAspectFlags::COLOR,

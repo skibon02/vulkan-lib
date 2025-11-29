@@ -10,7 +10,7 @@ use sparkles::{range_event_start, static_name};
 use sparkles::monotonic::{get_monotonic, get_monotonic_nanos, get_perf_frequency};
 use strum::IntoDiscriminant;
 use crate::runtime::recording::{DeviceCommand, DrawCommand, RecordContext, SpecificResourceUsage};
-use crate::runtime::resources::{AttachmentsDescription, ImageInner, ResourceStorage, ResourceUsage, ResourceUsages};
+use crate::runtime::resources::{AttachmentsDescription, ImageInner, ResourceStorage, ResourceUsage, LastResourceUsage, RequiredSync};
 use crate::runtime::semaphores::{SemaphoreManager, WaitedOperation};
 use crate::runtime::command_buffers::CommandBufferManager;
 use crate::runtime::shared::SharedState;
@@ -32,7 +32,6 @@ use resources::images::{ImageResource, ImageResourceHandle};
 use crate::extensions::calibrated_timestamps::CalibratedTimestamps;
 use crate::runtime::resources::pipeline::{GraphicsPipeline, GraphicsPipelineDesc};
 use crate::runtime::resources::render_pass::{RenderPassHandle, RenderPassResource};
-use crate::runtime::resources::ResourceUsages::DeviceUsage;
 use crate::shaders::DescriptorSetLayoutBindingDesc;
 use crate::swapchain_wrapper::SwapchainWrapper;
 use crate::wrappers::timestamp_pool::TimestampPool;
@@ -81,7 +80,7 @@ impl RuntimeState {
         let mut sparkles_gpu_channel = ExternalEventsSource::new("Vulkan GPU".to_string());
         if let Some(calibrated_timestamps) = &calibrated_timestamps {
             if let Some((gpu_tm, host_tm, provider)) = calibrated_timestamps.get_timestamps_pair() {
-                sparkles_gpu_channel.push_sync_point(host_tm * 1_000_000_000 / get_perf_frequency(), gpu_tm);
+                sparkles_gpu_channel.push_sync_point(host_tm * (1_000_000_000 / get_perf_frequency()), gpu_tm);
             }
         }
 
@@ -314,9 +313,25 @@ impl RuntimeState {
             .collect();
 
         if barrier_positions.is_empty() {
-            // no explicit barriers: each command gets its own group
-            for i in 0..commands.len() {
-                groups.push(&commands[i..i+1]);
+            // no explicit barriers: each command gets its own group, except render passes stay together
+            let mut i = 0;
+            while i < commands.len() {
+                if matches!(commands[i], DeviceCommand::RenderPassBegin { .. }) {
+                    // find matching RenderPassEnd
+                    let start = i;
+                    i += 1;
+                    while i < commands.len() {
+                        if matches!(commands[i], DeviceCommand::RenderPassEnd { .. }) {
+                            i += 1;
+                            break;
+                        }
+                        i += 1;
+                    }
+                    groups.push(&commands[start..i]);
+                } else {
+                    groups.push(&commands[i..i+1]);
+                    i += 1;
+                }
             }
         } else {
             // group commands between barrier markers
@@ -366,11 +381,17 @@ impl RuntimeState {
              for waited_op in &sem_waited_operations {
                  if let WaitedOperation::SwapchainImageAcquired(image_handle) = waited_op {
                      let image_inner = self.resource_storage.image(image_handle.state_key);
-                     // reset usages for image we just acquired. Future commands will synchronize with stage_flags from the semaphore
-                     image_inner.usages = ResourceUsages::DeviceUsage(ResourceUsage::new(None, stage_flags, AccessFlags::empty(), true));
+                     // create usage with the same stage flags to create dependency chain with waited semaphore
+                     image_inner.usages = LastResourceUsage::HasWrite {
+                         last_write: Some(ResourceUsage::new(None, stage_flags, AccessFlags::empty())),
+                         visible_for: AccessFlags::empty(),
+                     };
                  }
              }
-             wait_semaphore = Some((sem, stage_flags, sem_waited_operations));
+             let waited_except_swapchain_image_acq = sem_waited_operations.into_iter().filter(|op| {
+                 !matches!(op, WaitedOperation::SwapchainImageAcquired(_))
+             }).collect::<SmallVec<_>>();
+             wait_semaphore = Some((sem, stage_flags, waited_except_swapchain_image_acq));
          }
 
         let cmd_buffer = self.command_buffer_manager.take_command_buffer(submission_num);
@@ -415,44 +436,32 @@ impl RuntimeState {
                                 host_state.last_used_in.store(Some(submission_num));
                             }
 
+                            let had_host_writes = handle.host_state.is_some_and(|s| s.has_host_writes.swap(false, Ordering::Relaxed));
+
                             let buffer_inner = self.resource_storage.buffer(handle.state_key);
 
                             // 1) update state if waited on host
-                            buffer_inner.usages.on_host_waited(last_waited_submission);
+                            buffer_inner.usages.on_host_waited(last_waited_submission, had_host_writes);
 
-                            // 2) update usage information and get prev usage information
-                            let prev_usage = buffer_inner.usages.add_usage(usage);
+                            // 2) Add new usage and get required memory synchronization state
+                            let required_sync = buffer_inner.usages.add_usage(usage);
 
                             let buffer = buffer_inner.buffer;
 
-                            // 3) add memory barrier if usage changed or host write occurred
-                            let need_barrier = prev_usage.is_some() ||  handle.host_state.is_some_and(|s| s.has_host_writes.load(Ordering::Relaxed));
-                            if need_barrier {
+                            // 3) add memory barrier if required
+                            if let Some(required_sync) = required_sync {
                                 if buffer_barriers.iter().any(|b| b.buffer == buffer) {
-                                    panic!("Missing required pipeline barrier between same buffer usages! Usage1: {:?}, Usage2: {:?}", prev_usage, usage);
+                                    panic!("Missing required pipeline barrier between same buffer usages! Required sync: {:?}", required_sync);
                                 }
 
-                                let mut barrier = BufferMemoryBarrier::default()
+                                let barrier = BufferMemoryBarrier::default()
                                     .buffer(buffer)
                                     .size(WHOLE_SIZE)
-                                    .dst_access_mask(usage.access_flags);
+                                    .src_access_mask(required_sync.src_access)
+                                    .dst_access_mask(required_sync.dst_access);
 
-                                dst_stage_mask |= usage.stage_flags;
-
-                                // 3.1 add memory barrier if usage changed
-                                if let Some(prev_usage) = prev_usage {
-                                    barrier = barrier
-                                        .src_access_mask(prev_usage.access_flags);
-
-                                    src_stage_mask |= prev_usage.stage_flags;
-                                }
-
-                                // 3.2 add host_write dependency if host writes occurred
-                                if let Some(host_state) = handle.host_state && host_state.has_host_writes.swap(false, Ordering::Relaxed) {
-                                    barrier.src_access_mask |= AccessFlags::HOST_WRITE;
-
-                                    src_stage_mask |= PipelineStageFlags::HOST;
-                                }
+                                src_stage_mask |= required_sync.src_stages;
+                                dst_stage_mask |= required_sync.dst_stages;
 
                                 buffer_barriers.push(barrier);
                             }
@@ -467,19 +476,22 @@ impl RuntimeState {
                             let prev_layout = image_inner.layout;
 
                             // 1) update state if waited on host
-                            image_inner.usages.on_host_waited(last_waited_submission);
+                            image_inner.usages.on_host_waited(last_waited_submission, false);
 
-                            // 2) update usage information and get prev usage information
-                            let prev_usage = image_inner.usages.add_usage(usage);
+                            // 2) Add new usage and get required memory synchronization state
+                            let need_layout_transition = required_layout.is_some_and(|required_layout| prev_layout == ImageLayout::GENERAL || required_layout != prev_layout);
+                            let required_sync = image_inner.usages.add_usage(usage);
 
                             let image = image_inner.image;
 
                             // 3) add memory barrier if usage changed or layout transition required
-                            let need_barrier = prev_usage.is_some() || required_layout.is_some_and(|required_layout| prev_layout == ImageLayout::GENERAL || required_layout != prev_layout);
+                            let need_barrier = required_sync.is_some() || need_layout_transition;
                             if need_barrier {
                                 if image_barriers.iter().any(|b| b.image == image) {
-                                    panic!("Missing required pipeline barrier between same image usages! Usage1: {:?}, Usage2: {:?}", prev_usage, usage);
+                                    panic!("Missing required pipeline barrier between same image usages! Usage1: {:?}, Usage2: {:?}", required_sync, usage);
                                 }
+
+                                let required_sync = required_sync.unwrap_or(RequiredSync::default());
 
                                 let mut barrier = ImageMemoryBarrier::default()
                                     .image(image)
@@ -489,16 +501,11 @@ impl RuntimeState {
                                         .layer_count(1)
                                         .level_count(1)
                                         .aspect_mask(image_aspect))
-                                    .dst_access_mask(usage.access_flags);
-                                dst_stage_mask |= usage.stage_flags;
+                                    .src_access_mask(required_sync.src_access)
+                                    .dst_access_mask(required_sync.dst_access);
 
-                                // 3.1 add execution and memory deps if needed
-                                if let Some(prev_usage) = prev_usage {
-                                    barrier = barrier
-                                        .src_access_mask(prev_usage.access_flags);
-
-                                    src_stage_mask |= prev_usage.stage_flags;
-                                }
+                                src_stage_mask |= required_sync.src_stages;
+                                dst_stage_mask |= required_sync.dst_stages;
 
                                 // 3.2 add layout transition if needed
                                 if let Some(required_layout) = required_layout && (prev_layout == ImageLayout::GENERAL || required_layout != prev_layout) {
@@ -508,6 +515,11 @@ impl RuntimeState {
 
                                     image_inner.layout = required_layout;
                                 }
+                                else {
+                                    barrier = barrier
+                                        .old_layout(prev_layout)
+                                        .new_layout(prev_layout)
+                                }
 
                                 image_barriers.push(barrier);
                             }
@@ -515,7 +527,7 @@ impl RuntimeState {
                     }
                 }
                 if let DeviceCommand::RenderPassEnd {render_pass, framebuffer_index} = cmd {
-                    // mark attachments as having a new layout, update last used in
+                    // mark attachments as having a new layout
                     let attachments_description = self.resource_storage.render_pass(render_pass.0).attachments_description.clone();
 
                     let swapchain_image_final_layout = attachments_description.get_swapchain_desc().final_layout;
@@ -551,6 +563,11 @@ impl RuntimeState {
 
             // 2) insert single barrier for entire group if needed
             if !buffer_barriers.is_empty() || !image_barriers.is_empty() {
+                let src_stage_mask = if src_stage_mask == PipelineStageFlags::empty() {
+                    PipelineStageFlags::TOP_OF_PIPE
+                } else {
+                    src_stage_mask
+                };
                 #[cfg(feature = "recording-logs")]
                 info!("  <- Barrier inserted. SRC: {:?}, DST: {:?}, Buffers: {:?}, Images: {:?}",
                     src_stage_mask,
@@ -764,14 +781,8 @@ impl RuntimeState {
         // handle optional signal semaphore
         if let Some(signal) = signal_ref {
             let mut waited_operations = wait_semaphore.map(|(_, _, s)| s).unwrap_or(SmallVec::new());
-            // add current submission to waited submissions
-            if waited_operations.len() == 1 && let WaitedOperation::Submission(waited_sub_num, PipelineStageFlags::ALL_COMMANDS) = &mut waited_operations[0] {
-                // fast path, update submission number
-                *waited_sub_num = submission_num;
-            }
-            else {
-                waited_operations.push(WaitedOperation::Submission(submission_num, vk::PipelineStageFlags::ALL_COMMANDS));
-            }
+            // add information about waiting for this submission to complete
+            waited_operations.push(WaitedOperation::Submission(submission_num, vk::PipelineStageFlags::ALL_COMMANDS));
             let signal_semaphore = self.semaphore_manager.allocate_signal_semaphore(&signal, waited_operations);
             signal_semaphores = [signal_semaphore];
 
@@ -836,20 +847,22 @@ impl RuntimeState {
         if image_inner.layout != ImageLayout::GENERAL && image_inner.layout != ImageLayout::PRESENT_SRC_KHR {
             warn!("Image layout for presentable image must be PRESENT or GENERAL!");
         }
-        if let ResourceUsages::DeviceUsage(usage) = &mut image_inner.usages {
-            let usage_stages = &mut usage.stage_flags;
-            if let Some(usage_sub_num) = usage.submission_num {
+        if let LastResourceUsage::HasWrite{last_write: Some(ResourceUsage {submission_num, ..}), ..} = &mut image_inner.usages {
+            if let Some(usage_sub_num) = submission_num {
+                let mut write_syncronized = false;
                 for waited_op in waited_operations {
                     if let WaitedOperation::Submission(sub_num, stages) = waited_op {
-                        if sub_num >= usage_sub_num {
-                            *usage_stages &= !stages;
+                        if sub_num >= *usage_sub_num {
+                            write_syncronized = true;
                         }
                     }
                 }
-            }
 
-            if !usage_stages.is_empty() {
-                warn!("Called Queue present on swapchain image with non-synchronized device usage!")
+                if !write_syncronized {
+                    warn!("Found unsynchronized write to swapchain image before present! Last write submission: {}",
+                        usage_sub_num,
+                    );
+                }
             }
         }
 

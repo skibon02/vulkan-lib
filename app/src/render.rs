@@ -100,9 +100,9 @@ impl RenderTask {
             let need_resolve = msaa_samples != SampleCountFlags::TYPE_1;
 
             let load_op = if need_resolve {
-                AttachmentLoadOp::CLEAR
-            } else {
                 AttachmentLoadOp::DONT_CARE
+            } else {
+                AttachmentLoadOp::CLEAR
             };
             let swapchain_attachment = AttachmentDescription::default()
                 .samples(SampleCountFlags::TYPE_1)
@@ -154,14 +154,11 @@ impl RenderTask {
                 size: [0.5, 0.5].into(),
                 color: [0.0, 1.0, 0.0, 1.0].into(),
             };
+            let green_rect_bytes = green_rect.as_bytes();
+            info!("Green rect bytes len: {}, expected: {}", green_rect_bytes.len(), bytes_per_instance);
 
             // Write to staging buffer
-            staging_buffer.map_write(0, unsafe {
-                std::slice::from_raw_parts(
-                    &green_rect as *const SolidAttributes as *const u8,
-                    bytes_per_instance
-                )
-            });
+            staging_buffer.map_write(0, green_rect.as_bytes());
 
             // Copy to both vertex buffer copies
             let region = BufferCopy::default()
@@ -242,7 +239,7 @@ impl RenderTask {
                                 color: bg_clear_color,
                             },
                             ClearValue {
-                                depth_stencil: ClearDepthStencilValue::default(),
+                                depth_stencil: ClearDepthStencilValue::default().depth(1.0)
                             },
                             ClearValue {
                                 color: bg_clear_color,
