@@ -92,9 +92,11 @@ impl LastResourceUsage {
             }
         }
         else {
-            *self = Self::HasWrite {
-                last_write: None,
-                visible_for: AccessFlags::empty(),
+            if self.is_none() {
+                *self = Self::HasWrite {
+                    last_write: None,
+                    visible_for: AccessFlags::empty(),
+                }
             }
         }
     }

@@ -516,9 +516,16 @@ impl RuntimeState {
                                     image_inner.layout = required_layout;
                                 }
                                 else {
-                                    barrier = barrier
-                                        .old_layout(prev_layout)
-                                        .new_layout(prev_layout)
+                                    if prev_layout != ImageLayout::UNDEFINED {
+                                        barrier = barrier
+                                            .old_layout(prev_layout)
+                                            .new_layout(prev_layout)
+                                    }
+                                    else {
+                                        barrier = barrier
+                                            .old_layout(prev_layout)
+                                            .new_layout(ImageLayout::GENERAL)
+                                    }
                                 }
 
                                 image_barriers.push(barrier);

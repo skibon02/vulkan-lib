@@ -245,7 +245,7 @@ impl RenderTask {
                                 color: bg_clear_color,
                             },
                         ];
-                        let present_wait_ref = self.vulkan_renderer.record_device_commands_signal(Some(acquire_wait_ref.with_stages(PipelineStageFlags::TRANSFER)), |ctx| {
+                        let present_wait_ref = self.vulkan_renderer.record_device_commands_signal(Some(acquire_wait_ref.with_stages(PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)), |ctx| {
                             ctx.render_pass(render_pass.handle(), image_index, clear_values, |ctx| {
                                 ctx.bind_vertex_buffer(vertex_buffer.current().handle_static());
                                 ctx.bind_pipeline(pipeline.handle());
