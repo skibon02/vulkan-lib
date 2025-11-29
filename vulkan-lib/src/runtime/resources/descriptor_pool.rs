@@ -2,6 +2,7 @@ use ash::vk::{DescriptorPool, DescriptorPoolCreateFlags, DescriptorPoolCreateInf
 use slotmap::{DefaultKey, SlotMap};
 use smallvec::SmallVec;
 use std::collections::HashMap;
+use ash::vk;
 use crate::shaders::DescriptorSetLayoutBindingDesc;
 use crate::wrappers::device::VkDeviceRef;
 
@@ -201,7 +202,7 @@ impl DescriptorSetAllocator {
         })
     }
     
-    pub fn get_descriptor_set(&mut self, key: DefaultKey) -> DescriptorSet {
+    pub fn get_descriptor_set(&mut self, key: DefaultKey) -> vk::DescriptorSet {
         if let Some(slot) = self.slots.get_mut(key) {
             if let DescriptorSetSlot::Allocated { descriptor_set, .. } = slot {
                 return *descriptor_set

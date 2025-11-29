@@ -8,6 +8,7 @@ use smallvec::{smallvec, SmallVec};
 use sparkles::external_events::ExternalEventsSource;
 use sparkles::{range_event_start, static_name};
 use sparkles::monotonic::{get_monotonic, get_monotonic_nanos, get_perf_frequency};
+use strum::IntoDiscriminant;
 use crate::runtime::recording::{DeviceCommand, DrawCommand, RecordContext, SpecificResourceUsage};
 use crate::runtime::resources::{AttachmentsDescription, ImageInner, ResourceStorage, ResourceUsage, ResourceUsages};
 use crate::runtime::semaphores::{SemaphoreManager, WaitedOperation};
@@ -610,26 +611,37 @@ impl RuntimeState {
                         instance_count,
                         first_vertex,
                         first_instance,
-                        vert_buffer_binding,
-                        pipeline_binding,
-                        desc_set_bindings,
+                        new_vertex_buffer,
+                        pipeline_handle,
+                        pipeline_handle_changed,
+                        new_descriptor_set_bindings,
                     } ) => {
                         unsafe {
-                            if let Some(vert_binding) = vert_buffer_binding {
+                            if let Some(vert_binding) = new_vertex_buffer {
                                 let buffer = self.resource_storage.buffer(vert_binding.state_key).buffer;
                                 self.device.cmd_bind_vertex_buffers(cmd_buffer, 0, &[buffer], &[0]);
                             }
-                            if let Some(pipeline_binding) = pipeline_binding {
-                                let pipeline = self.resource_storage.pipeline(pipeline_binding.key).pipeline;
+                            if *pipeline_handle_changed {
+                                let pipeline = self.resource_storage.pipeline(pipeline_handle.key).pipeline;
                                 self.device.cmd_bind_pipeline(cmd_buffer, PipelineBindPoint::GRAPHICS, pipeline);
                             }
-                            for (binding, desc_set_handle) in desc_set_bindings {
-                                // update descriptor set
+                            for (binding, desc_set_handle) in new_descriptor_set_bindings {
+                                // update descriptor set if have new bindings
                                 if desc_set_handle.bindings_updated.load(Ordering::Relaxed) {
-                                    self.resource_storage.update_descriptor_set(desc_set_hanlde);
+                                    self.resource_storage.update_descriptor_set(desc_set_handle.clone());
                                 }
 
-                                // bind descriptor set if changed
+                                // bind descriptor set
+                                let descriptor_set = self.resource_storage.descriptor_set(desc_set_handle.key);
+                                let pipeline_layout = self.resource_storage.pipeline(pipeline_handle.key).pipeline_layout;
+                                self.device.cmd_bind_descriptor_sets(
+                                    cmd_buffer,
+                                    PipelineBindPoint::GRAPHICS,
+                                    pipeline_layout,
+                                    *binding,
+                                    &[descriptor_set],
+                                    &[],
+                                );
                             }
                             self.device.cmd_draw(cmd_buffer, *vertex_count, *instance_count, *first_vertex, *first_instance);
                         }

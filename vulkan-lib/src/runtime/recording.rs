@@ -14,6 +14,7 @@ use crate::runtime::resources::ResourceUsage;
 pub struct RecordContext<'a> {
     commands: Vec<DeviceCommand<'a>>,
     bound_pipeline: Option<GraphicsPipelineHandle>,
+    pipeline_changed: bool,
     bound_descriptor_sets: HashMap<u32, DescriptorSetHandle<'static>>,
     bound_vertex_buffer: Option<BufferResourceHandle<'static>>
 }
@@ -23,6 +24,7 @@ impl<'a> RecordContext<'a> {
         Self {
             commands: Vec::new(),
             bound_pipeline: None,
+            pipeline_changed: false,
             bound_vertex_buffer: None,
             bound_descriptor_sets: HashMap::new(),
         }
@@ -30,6 +32,7 @@ impl<'a> RecordContext<'a> {
 
     pub fn bind_pipeline(&mut self, pipeline: GraphicsPipelineHandle) {
         self.bound_pipeline = Some(pipeline);
+        self.pipeline_changed = true;
     }
 
     pub fn bind_descriptor_set(&mut self, set: u32, descriptor_set: DescriptorSetHandle<'static>) {
@@ -151,21 +154,25 @@ impl<'a, 'b> DerefMut for RenderPassContext<'a, 'b> {
 
 impl<'a, 'b> RenderPassContext<'a, 'b> {
     pub fn draw(&mut self, vertex_count: u32, instance_count: u32, first_vertex: u32, first_instance: u32) {
-        let mut desc_set_bindings = SmallVec::new();
+        let mut new_descriptor_set_bindings = SmallVec::new();
         for (i, binding) in &self.bound_descriptor_sets {
-            desc_set_bindings.push((*i, binding.clone()));
+            new_descriptor_set_bindings.push((*i, binding.clone()));
         }
-        let vert_buffer_binding = self.bound_vertex_buffer.take();
-        let pipeline_binding = self.bound_pipeline.take();
+        self.bound_descriptor_sets.clear();
+        let new_vertex_buffer = self.bound_vertex_buffer.take();
+        let pipeline_handle = self.bound_pipeline.clone().unwrap();
+        let pipeline_handle_changed = self.pipeline_changed;
+        self.pipeline_changed = false;
 
         self.commands.push(DeviceCommand::DrawCommand(DrawCommand::Draw {
             vertex_count,
             instance_count,
             first_vertex,
             first_instance,
-            vert_buffer_binding,
-            desc_set_bindings,
-            pipeline_binding
+            new_vertex_buffer,
+            new_descriptor_set_bindings,
+            pipeline_handle,
+            pipeline_handle_changed
         }));
     }
 }
@@ -176,9 +183,10 @@ pub enum DrawCommand {
         instance_count: u32,
         first_vertex: u32,
         first_instance: u32,
-        vert_buffer_binding: Option<BufferResourceHandle<'static>>,
-        pipeline_binding: Option<GraphicsPipelineHandle>,
-        desc_set_bindings: SmallVec<[(u32, DescriptorSetHandle<'static>); 4]>,
+        new_vertex_buffer: Option<BufferResourceHandle<'static>>,
+        pipeline_handle: GraphicsPipelineHandle,
+        pipeline_handle_changed: bool,
+        new_descriptor_set_bindings: SmallVec<[(u32, DescriptorSetHandle<'static>); 4]>,
     },
 }
 

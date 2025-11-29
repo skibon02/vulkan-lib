@@ -648,41 +648,62 @@ impl ResourceStorage {
         descriptor_sets::DescriptorSet::new(shared, key, bindings)
     }
 
+    pub fn descriptor_set(&mut self, key: DefaultKey) -> vk::DescriptorSet {
+        self.descriptor_set_allocator.get_descriptor_set(key)
+    }
+
     pub fn update_descriptor_set(&mut self, handle: DescriptorSetHandle) {
         let descriptor_set = self.descriptor_set_allocator.get_descriptor_set(handle.key);
-        let mut descriptor_writes: SmallVec<[WriteDescriptorSet; 4]> = smallvec![];
-        let mut buffer_infos: SmallVec<[DescriptorBufferInfo; 4]> = smallvec![];
-        let mut image_infos: SmallVec<[DescriptorImageInfo; 4]> = smallvec![];
+        let mut buffer_bindings: SmallVec<[_; 4]> = smallvec![];
+        let mut image_bindings: SmallVec<[_; 4]> = smallvec![];
         for binding in handle.bindings {
             if let Some(resource) = binding.resource {
                 match resource {
                     BoundResource::Buffer(buffer) => {
                         let buffer = self.buffers.get(buffer.state_key).unwrap();
-                        buffer_infos.push(DescriptorBufferInfo::default()
-                            .buffer(buffer.buffer).range(WHOLE_SIZE));
-                        descriptor_writes.push(WriteDescriptorSet::default()
-                            .buffer_info(&buffer_infos[buffer_infos.len() - 1..])
-                            .dst_set(descriptor_set)
-                            .dst_binding(binding.binding_index)
-                            .dst_array_element(0)
-                            .descriptor_type(DescriptorType::UNIFORM_BUFFER)
-                        )
+                        buffer_bindings.push((binding.binding_index, buffer.buffer));
                     }
                     BoundResource::Image(image) => {
                         let image_view = self.image_view(image.state_key);
-                        image_infos.push(DescriptorImageInfo::default()
-                            .image_view(image_view).image_layout(ImageLayout::READ_ONLY_OPTIMAL));
-                        descriptor_writes.push(WriteDescriptorSet::default()
-                            .image_info(&image_infos[image_infos.len() - 1..])
-                            .dst_set(descriptor_set)
-                            .dst_binding(binding.binding_index)
-                            .dst_array_element(0)
-                            .descriptor_type(DescriptorType::SAMPLED_IMAGE)
-                        )
+                        image_bindings.push((binding.binding_index, image_view))
                     }
                     _ => {}
                 }
             }
+        }
+
+        let buffer_infos: SmallVec<[_; 4]> = buffer_bindings.into_iter()
+            .map(|(i, buf)| {
+                (i, DescriptorBufferInfo::default()
+                    .buffer(buf)
+                    .offset(0)
+                    .range(WHOLE_SIZE))
+            }).collect();
+
+        let image_infos: SmallVec<[_; 4]> = image_bindings.into_iter()
+            .map(|(i, iv)| {
+                (i, DescriptorImageInfo::default()
+                    .image_view(iv)
+                    .image_layout(ImageLayout::SHADER_READ_ONLY_OPTIMAL))
+            }).collect();
+
+        let mut descriptor_writes: SmallVec<[_; 4]> = smallvec![];
+        for (binding, buffer_info) in buffer_infos.iter() {
+            descriptor_writes.push(WriteDescriptorSet::default()
+                .dst_set(descriptor_set)
+                .dst_binding(*binding)
+                .descriptor_type(DescriptorType::UNIFORM_BUFFER)
+                .buffer_info(std::slice::from_ref(&buffer_info))
+            );
+        }
+
+        for (binding, image_info) in image_infos.iter() {
+            descriptor_writes.push(WriteDescriptorSet::default()
+                .dst_set(descriptor_set)
+                .dst_binding(*binding)
+                .descriptor_type(DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .image_info(std::slice::from_ref(&image_info))
+            );
         }
 
         unsafe {
