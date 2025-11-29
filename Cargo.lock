@@ -135,6 +135,7 @@ dependencies = [
  "log",
  "ndk",
  "ndk-sys",
+ "rand",
  "raw-window-handle",
  "render-macro",
  "simple_logger",

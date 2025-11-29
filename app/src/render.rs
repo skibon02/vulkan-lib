@@ -10,6 +10,7 @@ use std::thread;
 use std::thread::JoinHandle;
 use std::time::Instant;
 use log::{error, info, warn};
+use rand::Rng;
 use sparkles::range_event_start;
 use render_macro::define_layout;
 use vulkan_lib::{descriptor_set, use_shader, AttachmentDescription, AttachmentLoadOp, AttachmentStoreOp, BufferCopy, BufferUsageFlags, ClearColorValue, ClearDepthStencilValue, ClearValue, DoubleBuffered, Format, ImageLayout, PipelineStageFlags, SampleCountFlags, VulkanRenderer};
@@ -90,9 +91,10 @@ impl RenderTask {
         thread::Builder::new().name("Render".into()).spawn(move || {
             info!("Render thread spawned!");
 
-            let swapchain_extent = self.swapchain_image_handles[0].extent();
+            const NUM_INSTANCES: u32 = 10;
             let bytes_per_instance = SolidAttributes::SIZE as u64;
-            let mut staging_buffer = self.vulkan_renderer.new_host_buffer(bytes_per_instance);
+            let total_bytes = bytes_per_instance * NUM_INSTANCES as u64;
+            let mut staging_buffer = self.vulkan_renderer.new_host_buffer(total_bytes);
 
             // Create render pass
             let msaa_samples = SampleCountFlags::TYPE_1;
@@ -139,32 +141,51 @@ impl RenderTask {
             let render_pass = self.vulkan_renderer.new_render_pass(attachments_desc);
             let attributes = SolidAttributes::get_attributes_configuration();
 
-            let bytes_per_instance = SolidAttributes::SIZE;
             let mut vertex_buffer = DoubleBuffered::new(|| {
                 let buf = self.vulkan_renderer.new_device_buffer(
                     BufferUsageFlags::VERTEX_BUFFER | BufferUsageFlags::TRANSFER_DST,
-                    bytes_per_instance as u64
+                    total_bytes
                 );
                 buf
             });
 
-            // Fill all copies with green rectangle centered on screen
-            let green_rect = SolidAttributes {
-                pos: [-0.25, -0.25].into(),
-                size: [0.5, 0.5].into(),
-                color: [0.0, 1.0, 0.0, 1.0].into(),
-            };
-            let green_rect_bytes = green_rect.as_bytes();
-            info!("Green rect bytes len: {}, expected: {}", green_rect_bytes.len(), bytes_per_instance);
+            let mut rng = rand::rng();
+            let mut rects = Vec::with_capacity(NUM_INSTANCES as usize);
 
-            // Write to staging buffer
-            staging_buffer.map_write(0, green_rect.as_bytes());
+            for _ in 0..NUM_INSTANCES {
+                let x1: f32 = rng.random_range(-1.0..1.0);
+                let x2: f32 = rng.random_range(-1.0..1.0);
+                let y1: f32 = rng.random_range(-1.0..1.0);
+                let y2: f32 = rng.random_range(-1.0..1.0);
 
-            // Copy to both vertex buffer copies
+                let pos_x = x1.min(x2);
+                let pos_y = y1.min(y2);
+                let width = (x2 - x1).abs();
+                let height = (y2 - y1).abs();
+
+                let r: f32 = rng.random_range(0.0..1.0);
+                let g: f32 = rng.random_range(0.0..1.0);
+                let b: f32 = rng.random_range(0.0..1.0);
+
+                rects.push(SolidAttributes {
+                    pos: [pos_x, pos_y].into(),
+                    size: [width, height].into(),
+                    color: [r, g, b, 1.0].into(),
+                });
+            }
+
+            info!("Generated {} random rectangles, total bytes: {}", NUM_INSTANCES, total_bytes);
+
+            let mut offset = 0usize;
+            for rect in &rects {
+                staging_buffer.map_write(offset, rect.as_bytes());
+                offset += bytes_per_instance as usize;
+            }
+
             let region = BufferCopy::default()
                 .src_offset(0)
                 .dst_offset(0)
-                .size(bytes_per_instance as u64);
+                .size(total_bytes);
 
             let (vb0, vb1) = vertex_buffer.both();
 
@@ -250,7 +271,7 @@ impl RenderTask {
                                 ctx.bind_vertex_buffer(vertex_buffer.current().handle_static());
                                 ctx.bind_pipeline(pipeline.handle());
                                 ctx.bind_descriptor_set(0, global_ds.current().handle());
-                                ctx.draw(4, 1, 0, 0);
+                                ctx.draw(4, NUM_INSTANCES, 0, 0);
                             })
                         });
 
