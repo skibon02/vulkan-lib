@@ -94,7 +94,9 @@ impl RenderTask {
             const NUM_INSTANCES: u32 = 10;
             let bytes_per_instance = SolidAttributes::SIZE as u64;
             let total_bytes = bytes_per_instance * NUM_INSTANCES as u64;
-            let mut staging_buffer = self.vulkan_renderer.new_host_buffer(total_bytes);
+            let mut staging_buffers = DoubleBuffered::new(|| {
+                self.vulkan_renderer.new_host_buffer(total_bytes)
+            });
 
             // Create render pass
             let msaa_samples = SampleCountFlags::TYPE_1;
@@ -149,54 +151,6 @@ impl RenderTask {
                 buf
             });
 
-            let mut rng = rand::rng();
-            let mut rects = Vec::with_capacity(NUM_INSTANCES as usize);
-
-            for _ in 0..NUM_INSTANCES {
-                let x1: f32 = rng.random_range(-1.0..1.0);
-                let x2: f32 = rng.random_range(-1.0..1.0);
-                let y1: f32 = rng.random_range(-1.0..1.0);
-                let y2: f32 = rng.random_range(-1.0..1.0);
-
-                let pos_x = x1.min(x2);
-                let pos_y = y1.min(y2);
-                let width = (x2 - x1).abs();
-                let height = (y2 - y1).abs();
-
-                let r: f32 = rng.random_range(0.0..1.0);
-                let g: f32 = rng.random_range(0.0..1.0);
-                let b: f32 = rng.random_range(0.0..1.0);
-
-                rects.push(SolidAttributes {
-                    pos: [pos_x, pos_y].into(),
-                    size: [width, height].into(),
-                    color: [r, g, b, 1.0].into(),
-                });
-            }
-
-            info!("Generated {} random rectangles, total bytes: {}", NUM_INSTANCES, total_bytes);
-
-            let mut offset = 0usize;
-            for rect in &rects {
-                staging_buffer.map_write(offset, rect.as_bytes());
-                offset += bytes_per_instance as usize;
-            }
-
-            let region = BufferCopy::default()
-                .src_offset(0)
-                .dst_offset(0)
-                .size(total_bytes);
-
-            let (vb0, vb1) = vertex_buffer.both();
-
-            self.vulkan_renderer.record_device_commands(None, |ctx| {
-                ctx.copy_buffer(staging_buffer.handle(), vb0.handle_static(), smallvec![region]);
-            });
-
-            self.vulkan_renderer.record_device_commands(None, |ctx| {
-                ctx.copy_buffer(staging_buffer.handle(), vb1.handle_static(), smallvec![region]);
-            });
-
             let pipeline_desc = GraphicsPipelineDesc::new(use_shader!("solid"), attributes, smallvec![GlobalDescriptorSet::bindings()]);
             let pipeline = self.vulkan_renderer.new_pipeline(render_pass.handle(), pipeline_desc);
 
@@ -231,14 +185,45 @@ impl RenderTask {
                         let swapchain_extent = self.swapchain_image_handles[0].extent();
                         if self.swapchain_recreated {
                             self.swapchain_recreated = false;
-
-                            staging_buffer = self.vulkan_renderer.new_host_buffer((4 * swapchain_extent.width * swapchain_extent.height) as u64);
-                            // dev_buffer = self.vulkan_renderer.new_device_buffer(BufferUsageFlags::TRANSFER_DST | BufferUsageFlags::TRANSFER_SRC, 4*swapchain_extent.width as u64 * swapchain_extent.height as u64);
                         }
 
                         let g = range_event_start!("Wait previous submission");
                         self.vulkan_renderer.wait_prev_submission(1);
                         drop(g);
+
+                        // update resources
+                        let mut rng = rand::rng();
+                        let mut rects = Vec::with_capacity(NUM_INSTANCES as usize);
+
+                        for _ in 0..NUM_INSTANCES {
+                            let x1: f32 = rng.random_range(-1.0..1.0);
+                            let x2: f32 = rng.random_range(-1.0..1.0);
+                            let y1: f32 = rng.random_range(-1.0..1.0);
+                            let y2: f32 = rng.random_range(-1.0..1.0);
+
+                            let pos_x = x1.min(x2);
+                            let pos_y = y1.min(y2);
+                            let width = (x2 - x1).abs();
+                            let height = (y2 - y1).abs();
+
+                            let r: f32 = rng.random_range(0.0..1.0);
+                            let g: f32 = rng.random_range(0.0..1.0);
+                            let b: f32 = rng.random_range(0.0..1.0);
+
+                            rects.push(SolidAttributes {
+                                pos: [pos_x, pos_y].into(),
+                                size: [width, height].into(),
+                                color: [r, g, b, 1.0].into(),
+                            });
+                        }
+
+                        // info!("Generated {} random rectangles, total bytes: {}", NUM_INSTANCES, total_bytes);
+
+                        let mut offset = 0usize;
+                        for rect in &rects {
+                            staging_buffers.current_mut().map_write(offset, rect.as_bytes());
+                            offset += bytes_per_instance as usize;
+                        }
 
                         // Acquire next swapchain image
                         let g = range_event_start!("Acquire next image");
@@ -266,7 +251,15 @@ impl RenderTask {
                                 color: bg_clear_color,
                             },
                         ];
+
+                        let region = BufferCopy::default()
+                            .src_offset(0)
+                            .dst_offset(0)
+                            .size(total_bytes);
+
+
                         let present_wait_ref = self.vulkan_renderer.record_device_commands_signal(Some(acquire_wait_ref.with_stages(PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)), |ctx| {
+                            ctx.copy_buffer(staging_buffers.current().handle(), vertex_buffer.current().handle_static(), smallvec![region]);
                             ctx.render_pass(render_pass.handle(), image_index, clear_values, |ctx| {
                                 ctx.bind_vertex_buffer(vertex_buffer.current().handle_static());
                                 ctx.bind_pipeline(pipeline.handle());
@@ -282,6 +275,7 @@ impl RenderTask {
 
                         global_ds.next_frame();
                         vertex_buffer.next_frame();
+                        staging_buffers.next_frame();
                         self.render_finished.store(true, Ordering::Release);
                     }
                     RenderMessage::Resize { width, height } => {

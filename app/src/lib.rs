@@ -23,7 +23,6 @@ fn sparkles_init() -> FinalizeGuard{
 #[cfg(not(target_os = "android"))]
 fn sparkles_init() -> FinalizeGuard{
     sparkles::init(SparklesConfig::default()
-        .without_file_sender()
         .with_udp_multicast_default())
 }
 
