@@ -29,6 +29,7 @@ pub struct RenderTask {
     rx: mpsc::Receiver<RenderMessage>,
     vulkan_renderer: VulkanRenderer,
     render_finished: Arc<AtomicBool>,
+    resize_finished: Arc<AtomicBool>,
     swapchain_image_handles: SmallVec<[ImageResourceHandle; 3]>,
     swapchain_recreated: bool,
     last_print: Instant,
@@ -72,19 +73,21 @@ impl Default for SolidAttributes {
     }
 }
 impl RenderTask {
-    pub fn new(vulkan_renderer: VulkanRenderer) -> (Self, mpsc::Sender<RenderMessage>, Arc<AtomicBool>) {
+    pub fn new(vulkan_renderer: VulkanRenderer) -> (Self, mpsc::Sender<RenderMessage>, Arc<AtomicBool>, Arc<AtomicBool>) {
         let (tx, rx) = mpsc::channel::<RenderMessage>();
         let render_finished = Arc::new(AtomicBool::new(true));
+        let resize_finished = Arc::new(AtomicBool::new(true));
         let swapchain_image_handles = vulkan_renderer.swapchain_images();
 
         (Self  {
             rx,
             vulkan_renderer,
             render_finished: render_finished.clone(),
+            resize_finished: resize_finished.clone(),
             swapchain_image_handles,
             swapchain_recreated: false,
             last_print: Instant::now(),
-        }, tx, render_finished)
+        }, tx, render_finished, resize_finished)
     }
 
     pub fn spawn(mut self) -> JoinHandle<()> {
@@ -220,10 +223,15 @@ impl RenderTask {
                         // info!("Generated {} random rectangles, total bytes: {}", NUM_INSTANCES, total_bytes);
 
                         let mut offset = 0usize;
-                        for rect in &rects {
-                            staging_buffers.current_mut().map_write(offset, rect.as_bytes());
-                            offset += bytes_per_instance as usize;
-                        }
+                        staging_buffers.current_mut().map_update(0..bytes_per_instance*NUM_INSTANCES as u64, |data| {
+                            for rect in &rects {
+                                let start = offset;
+                                let end = start + bytes_per_instance as usize;
+                                data[start..end].copy_from_slice(rect.as_bytes());
+                                offset += bytes_per_instance as usize;
+                            }
+                        });
+
 
                         // Acquire next swapchain image
                         let g = range_event_start!("Acquire next image");
@@ -283,6 +291,7 @@ impl RenderTask {
                         self.vulkan_renderer.recreate_resize((width, height));
                         self.swapchain_image_handles = self.vulkan_renderer.swapchain_images();
                         self.swapchain_recreated = true;
+                        self.resize_finished.store(true, Ordering::Release);
                     }
                     RenderMessage::Exit => {
                         info!("Render thread exiting");

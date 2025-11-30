@@ -59,12 +59,13 @@ impl VulkanRenderer {
 
         let app_name = CString::new("Hello Vulkan")?;
 
+        let api_version = vk::API_VERSION_1_0;
         let app_info = ApplicationInfo::default()
             .application_name(&app_name)
             .application_version(make_api_version(0, 1, 0, 0))
             .engine_name(&app_name)
             .engine_version(make_api_version(0, 1, 0, 0))
-            .api_version(vk::API_VERSION_1_0);
+            .api_version(api_version);
 
         //define desired layers
         // 1. Khronos validation layers (optional)
@@ -149,6 +150,7 @@ impl VulkanRenderer {
                 panic!("No available queue family found");
             });
 
+        // desired device extensions to be enabled
         let device_extensions = vec![ash::khr::swapchain::NAME.as_ptr(), ash::ext::calibrated_timestamps::NAME.as_ptr()];
 
         let queue_create_infos = [vk::DeviceQueueCreateInfo::default()

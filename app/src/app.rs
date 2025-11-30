@@ -1,7 +1,8 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
+use std::thread;
 use std::thread::JoinHandle;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use log::{error, info, warn};
 use raw_window_handle::{HasRawDisplayHandle, HasRawWindowHandle};
 use sparkles::range_event_start;
@@ -26,6 +27,7 @@ pub struct App {
     render_tx: mpsc::Sender<RenderMessage>,
     render_thread: Option<JoinHandle<()>>,
     render_ready: Arc<AtomicBool>,
+    resize_ready: Arc<AtomicBool>,
 
     // some stats
     frame_cnt: usize,
@@ -44,7 +46,7 @@ impl App {
         vulkan_renderer.test_buffer_sizes(BufferUsageFlags::TRANSFER_SRC);
         vulkan_renderer.test_buffer_sizes(BufferUsageFlags::VERTEX_BUFFER);
         vulkan_renderer.test_buffer_sizes(BufferUsageFlags::UNIFORM_BUFFER);
-        let (render_task, render_tx, render_ready) = render::RenderTask::new(vulkan_renderer);
+        let (render_task, render_tx, render_ready, resize_ready) = render::RenderTask::new(vulkan_renderer);
         let render_jh = render_task.spawn();
 
         Self {
@@ -56,6 +58,7 @@ impl App {
 
             render_tx,
             render_ready,
+            resize_ready,
             render_thread: Some(render_jh),
 
             frame_cnt: 0,
@@ -149,6 +152,11 @@ impl App {
                 } else {
                     if self.is_collapsed {
                         info!("Continue rendering...");
+                    }
+
+                    // wait until previous resize operation is finished
+                    while !self.resize_ready.swap(false, Ordering::Relaxed) {
+                        thread::sleep(Duration::from_millis(1));
                     }
 
                     let _ = self.render_tx.send(RenderMessage::Resize {
