@@ -10,6 +10,8 @@ use crate::wrappers::debug_report::VkDebugReport;
 use crate::wrappers::device::VkDeviceRef;
 use crate::wrappers::surface::{VkSurface, VkSurfaceRef};
 use crate::runtime::RuntimeState;
+use crate::extensions::calibrated_timestamps::CalibratedTimestamps;
+use crate::wrappers::timestamp_pool::TimestampPool;
 
 pub use vk::BufferUsageFlags;
 pub use vk::PipelineStageFlags;
@@ -23,10 +25,9 @@ pub use vk::ImageSubresourceLayers;
 pub use vk::ClearColorValue;
 pub use vk::SampleCountFlags;
 pub use vk::AttachmentLoadOp;
-pub use vk::{AttachmentStoreOp, AttachmentDescription, Format, DescriptorType, ShaderStageFlags, ClearValue, ClearDepthStencilValue};
+pub use vk::{AttachmentStoreOp, AttachmentDescription, Format, DescriptorType, ShaderStageFlags, ClearValue, ClearDepthStencilValue, SamplerCreateInfo, ImageUsageFlags,
+    Filter};
 pub use crate::runtime::{DoubleBufferedDescriptorSets, DoubleBuffered};
-use crate::extensions::calibrated_timestamps::CalibratedTimestamps;
-use crate::wrappers::timestamp_pool::TimestampPool;
 
 pub mod instance;
 mod wrappers;

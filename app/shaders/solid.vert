@@ -6,6 +6,7 @@ layout(location = 1) in vec2 size;     // width and height
 layout(location = 2) in vec4 color;    // solid color
 
 layout(location = 0) out vec4 fragColor;
+layout(location = 1) out vec2 texCoord;
 
 layout(binding = 0) uniform UniformData {
     int data[4];
@@ -25,4 +26,5 @@ void main() {
 
     gl_Position = vec4(vertexPos, 0.0, 1.0);
     fragColor = color;
+    texCoord = vertexOffset;
 }

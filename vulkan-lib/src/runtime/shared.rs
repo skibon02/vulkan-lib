@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use ash::vk::{self, FenceCreateInfo, Framebuffer};
 use log::{info, warn};
@@ -10,6 +10,7 @@ use crate::runtime::resources::descriptor_sets::{DescriptorSetDestroyHandle, Des
 use crate::runtime::resources::images::ImageResourceHandle;
 use crate::runtime::resources::pipeline::{GraphicsPipelineDestroyHandle, GraphicsPipelineHandle};
 use crate::runtime::resources::render_pass::RenderPassHandle;
+use crate::runtime::resources::sampler::SamplerHandle;
 use crate::wrappers::device::VkDeviceRef;
 
 #[derive(Default)]
@@ -20,6 +21,7 @@ pub struct ScheduledForDestroy {
     pub render_passes: Vec<(RenderPassHandle, usize)>,
     pub framebuffers: Vec<(Framebuffer, usize)>,
     pub descriptor_sets: Vec<(DescriptorSetDestroyHandle, usize)>,
+    pub samplers: Vec<(SamplerHandle, usize)>,
 }
 
 impl ScheduledForDestroy {
@@ -80,6 +82,15 @@ impl ScheduledForDestroy {
                 i += 1;
             }
         }
+        
+        i = 0;
+        while i < self.samplers.len() {
+            if self.samplers[i].1 <= last_waited_submission {
+                result.samplers.push(self.samplers.swap_remove(i));
+            } else {
+                i += 1;
+            }
+        }
 
         if !result.framebuffers.is_empty() {
             info!("Destroying {} framebuffers", result.framebuffers.len());
@@ -99,6 +110,9 @@ impl ScheduledForDestroy {
         if !result.descriptor_sets.is_empty() {
             info!("Recycling {} descriptor sets", result.descriptor_sets.len());
         }
+        if !result.samplers.is_empty() {
+            info!("Destroying {} samplers", result.samplers.len());
+        }
 
         result
     }
@@ -109,7 +123,8 @@ impl ScheduledForDestroy {
         self.pipelines.is_empty() &&
         self.render_passes.is_empty() &&
         self.framebuffers.is_empty() &&
-        self.descriptor_sets.is_empty()
+        self.descriptor_sets.is_empty() &&
+        self.samplers.is_empty()
     }
 }
 
@@ -222,6 +237,10 @@ impl SharedStateInner {
 
     pub fn schedule_destroy_framebuffer(&mut self, framebuffer: Framebuffer, submission_num: usize) {
         self.scheduled_for_destroy.framebuffers.push((framebuffer, submission_num));
+    }
+    
+    pub fn schedule_destroy_sampler(&mut self, sampler: SamplerHandle, submission_num: usize) {
+        self.scheduled_for_destroy.samplers.push((sampler, submission_num));
     }
 
     pub fn schedule_recycle_descriptor_set(&mut self, handle: DescriptorSetDestroyHandle, submission_num: usize) {
@@ -378,6 +397,11 @@ impl SharedState {
     pub fn schedule_recycle_descriptor_set(&self, handle: DescriptorSetDestroyHandle) {
         let submission_num = self.last_submission_num();
         self.state.lock().schedule_recycle_descriptor_set(handle, submission_num);
+    }
+
+    pub fn schedule_destroy_sampler(&self, handle: SamplerHandle) {
+        let submission_num = self.last_submission_num();
+        self.state.lock().schedule_destroy_sampler(handle, submission_num);
     }
 
     pub fn poll_completed_fences(&self) {

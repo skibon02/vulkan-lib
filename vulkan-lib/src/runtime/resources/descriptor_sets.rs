@@ -6,6 +6,7 @@ use slotmap::DefaultKey;
 use smallvec::SmallVec;
 use crate::runtime::resources::buffers::BufferResourceHandle;
 use crate::runtime::resources::images::ImageResourceHandle;
+use crate::runtime::resources::sampler::SamplerHandle;
 use crate::runtime::SharedState;
 use crate::shaders::DescriptorSetLayoutBindingDesc;
 
@@ -13,9 +14,10 @@ use crate::shaders::DescriptorSetLayoutBindingDesc;
 pub enum BoundResource<'a> {
     Buffer(BufferResourceHandle<'a>),
     Image(ImageResourceHandle),
-    // For combined image sampler, we store image handle
-    // Sampler will be added later when we implement samplers
-    CombinedImageSampler { image: ImageResourceHandle },
+    CombinedImageSampler { 
+        image: ImageResourceHandle,
+        sampler: SamplerHandle
+    },
 }
 
 #[derive(Clone)]
@@ -68,11 +70,21 @@ impl<'a> DescriptorSet<'a> {
 
     pub fn bind_image(&mut self, binding_index: u32, image: ImageResourceHandle) {
         if let Some(binding) = self.handle.bindings.iter_mut().find(|b| b.binding_index == binding_index) {
-            binding.resource = Some(BoundResource::CombinedImageSampler { image });
+            binding.resource = Some(BoundResource::Image(image));
             self.handle.bindings_updated.store(true, Ordering::Relaxed);
         }
         else {
             warn!("Incorrect binding index specified in bind_image!");
+        }
+    }
+    
+    pub fn bind_image_and_sampler(&mut self, binding_index: u32, image: ImageResourceHandle, sampler: SamplerHandle) {
+        if let Some(binding) = self.handle.bindings.iter_mut().find(|b| b.binding_index == binding_index) {
+            binding.resource = Some(BoundResource::CombinedImageSampler { image, sampler });
+            self.handle.bindings_updated.store(true, Ordering::Relaxed);
+        }
+        else {
+            warn!("Incorrect binding index specified in bind_image_and_sampler!");
         }
     }
 }

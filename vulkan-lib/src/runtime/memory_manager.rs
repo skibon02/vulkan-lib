@@ -53,15 +53,15 @@ impl MemoryManager {
         *device_memory_type
     }
 
-    pub fn get_image_memory_requirements(&mut self, format: Format, tiling: ImageTiling, usage: ImageUsageFlags, flags: ImageCreateFlags) -> u32 {
+    pub fn get_image_memory_requirements(&mut self, format: Format, tiling: ImageTiling, orig_usage: ImageUsageFlags, flags: ImageCreateFlags) -> u32 {
         let format = if is_color_format(format) {
-            Format::UNDEFINED
+            Format::R8G8B8A8_UNORM
         }
         else {
             format
         };
 
-        let usage = usage & (ImageUsageFlags::TRANSIENT_ATTACHMENT | ImageUsageFlags::COLOR_ATTACHMENT | ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT | ImageUsageFlags::INPUT_ATTACHMENT);
+        let usage = orig_usage & (ImageUsageFlags::TRANSIENT_ATTACHMENT | ImageUsageFlags::COLOR_ATTACHMENT | ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT | ImageUsageFlags::INPUT_ATTACHMENT);
         let flags = flags & ImageCreateFlags::SPARSE_BINDING;
 
         let device_memory_type = self.image_memory_requirements
@@ -79,7 +79,7 @@ impl MemoryManager {
                     .array_layers(1)
                     .samples(vk::SampleCountFlags::TYPE_1)
                     .tiling(tiling)
-                    .usage(usage)
+                    .usage(orig_usage)
                     .flags(flags)
                     .sharing_mode(vk::SharingMode::EXCLUSIVE)
                     .initial_layout(vk::ImageLayout::UNDEFINED);

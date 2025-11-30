@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 use anyhow::Context;
 use ash::vk;
-use ash::vk::{AccessFlags, BufferCreateFlags, BufferMemoryBarrier, BufferUsageFlags, CommandBufferBeginInfo, DependencyFlags, Extent2D, Format, ImageAspectFlags, ImageLayout, ImageMemoryBarrier, ImageSubresourceRange, ImageUsageFlags, PhysicalDevice, PipelineBindPoint, PipelineStageFlags, Queue, Rect2D, RenderPassBeginInfo, SampleCountFlags, SubpassContents, TimeDomainEXT, Viewport, WHOLE_SIZE};
+use ash::vk::{AccessFlags, BufferCreateFlags, BufferMemoryBarrier, BufferUsageFlags, CommandBufferBeginInfo, DependencyFlags, Extent2D, Format, ImageAspectFlags, ImageLayout, ImageMemoryBarrier, ImageSubresourceRange, ImageUsageFlags, PhysicalDevice, PipelineBindPoint, PipelineStageFlags, Queue, Rect2D, RenderPassBeginInfo, SampleCountFlags, SamplerCreateInfo, SubpassContents, TimeDomainEXT, Viewport, WHOLE_SIZE};
 use log::{info, warn};
 use smallvec::{smallvec, SmallVec};
 use sparkles::external_events::ExternalEventsSource;
@@ -32,6 +32,7 @@ use resources::images::{ImageResource, ImageResourceHandle};
 use crate::extensions::calibrated_timestamps::CalibratedTimestamps;
 use crate::runtime::resources::pipeline::{GraphicsPipeline, GraphicsPipelineDesc};
 use crate::runtime::resources::render_pass::{RenderPassHandle, RenderPassResource};
+use crate::runtime::resources::sampler::{create_sampler, SamplerResource};
 use crate::shaders::DescriptorSetLayoutBindingDesc;
 use crate::swapchain_wrapper::SwapchainWrapper;
 use crate::wrappers::timestamp_pool::TimestampPool;
@@ -160,6 +161,28 @@ impl RuntimeState {
 
     pub fn new_pipeline(&mut self, render_pass: RenderPassHandle, pipeline_desc: GraphicsPipelineDesc) -> GraphicsPipeline {
         self.resource_storage.create_graphics_pipeline(render_pass, pipeline_desc, self.shared_state.clone())
+    }
+
+    pub fn new_sampler(&mut self, f: impl FnOnce(SamplerCreateInfo) -> SamplerCreateInfo) -> SamplerResource {
+        let default_info =
+        SamplerCreateInfo::default()
+            .mag_filter(vk::Filter::LINEAR)
+            .min_filter(vk::Filter::LINEAR)
+            .address_mode_u(vk::SamplerAddressMode::REPEAT)
+            .address_mode_v(vk::SamplerAddressMode::REPEAT)
+            .address_mode_w(vk::SamplerAddressMode::REPEAT)
+            .anisotropy_enable(false)
+            .max_anisotropy(16.0)
+            .border_color(vk::BorderColor::INT_OPAQUE_BLACK)
+            .unnormalized_coordinates(false)
+            .compare_enable(false)
+            .compare_op(vk::CompareOp::ALWAYS)
+            .mipmap_mode(vk::SamplerMipmapMode::LINEAR)
+            .min_lod(0.0)
+            .max_lod(0.0)
+            .mip_lod_bias(0.0);
+        let sampler_info = f(default_info);
+        create_sampler(&self.device, self.shared_state.clone(), &sampler_info)
     }
 
     pub fn destroy_old_resources(&mut self) {

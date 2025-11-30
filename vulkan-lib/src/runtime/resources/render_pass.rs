@@ -1,7 +1,6 @@
 use slotmap::DefaultKey;
 use crate::runtime::shared::SharedState;
 
-#[derive(Clone)]
 pub struct RenderPassResource {
     state_key: DefaultKey,
     shared: SharedState,

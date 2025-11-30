@@ -13,7 +13,7 @@ use log::{error, info, warn};
 use rand::Rng;
 use sparkles::range_event_start;
 use render_macro::define_layout;
-use vulkan_lib::{descriptor_set, use_shader, AttachmentDescription, AttachmentLoadOp, AttachmentStoreOp, BufferCopy, BufferUsageFlags, ClearColorValue, ClearDepthStencilValue, ClearValue, DoubleBuffered, Format, ImageLayout, PipelineStageFlags, SampleCountFlags, VulkanRenderer};
+use vulkan_lib::{descriptor_set, use_shader, AttachmentDescription, AttachmentLoadOp, AttachmentStoreOp, BufferCopy, BufferImageCopy, BufferUsageFlags, ClearColorValue, ClearDepthStencilValue, ClearValue, DoubleBuffered, Extent3D, Filter, Format, ImageLayout, ImageSubresourceLayers, ImageUsageFlags, Offset3D, PipelineStageFlags, SampleCountFlags, SamplerCreateInfo, VulkanRenderer};
 use vulkan_lib::runtime::resources::AttachmentsDescription;
 use vulkan_lib::runtime::resources::images::ImageResourceHandle;
 use vulkan_lib::runtime::resources::pipeline::GraphicsPipelineDesc;
@@ -57,8 +57,8 @@ descriptor_set! {
         0 -> UniformBuffer,
         // #[frag]
         // 1 -> UniformBuffer,
-        // #[frag]
-        // 2 -> CombinedImageSampler,
+        #[frag]
+        2 -> CombinedImageSampler,
     }
 }
 
@@ -94,7 +94,7 @@ impl RenderTask {
         thread::Builder::new().name("Render".into()).spawn(move || {
             info!("Render thread spawned!");
 
-            const NUM_INSTANCES: u32 = 10;
+            const NUM_INSTANCES: u32 = 500_000;
             let bytes_per_instance = SolidAttributes::SIZE as u64;
             let total_bytes = bytes_per_instance * NUM_INSTANCES as u64;
             let mut staging_buffers = DoubleBuffered::new(|| {
@@ -131,6 +131,10 @@ impl RenderTask {
             let mut attachments_desc = AttachmentsDescription::new(swapchain_attachment)
                 .with_depth_attachment(depth_attachment);
 
+            let sampler = self.vulkan_renderer.new_sampler(|i| {
+                i.mag_filter(Filter::NEAREST)
+            });
+
             if need_resolve {
                 // Add resolve attachment
                 let color_attachment = AttachmentDescription::default()
@@ -157,11 +161,46 @@ impl RenderTask {
             let pipeline_desc = GraphicsPipelineDesc::new(use_shader!("solid"), attributes, smallvec![GlobalDescriptorSet::bindings()]);
             let pipeline = self.vulkan_renderer.new_pipeline(render_pass.handle(), pipeline_desc);
 
+            let texture = self.vulkan_renderer.new_image(Format::R8G8B8A8_UNORM, ImageUsageFlags::SAMPLED | ImageUsageFlags::TRANSFER_DST, SampleCountFlags::TYPE_1, 16, 16);
+            // prepare random pixels data
+            let mut pixel_data = vec![0u8; 16 * 16 * 4];
+            let mut rng = rand::rng();
+            for i in 0..(16 * 16) {
+                pixel_data[i * 4 + 0] = (rng.random_range(0..=255) as u8);
+                pixel_data[i * 4 + 1] = (rng.random_range(0..=255) as u8);
+                pixel_data[i * 4 + 2] = (rng.random_range(0..=255) as u8);
+                pixel_data[i * 4 + 3] = 255u8;
+            }
+            // write to staging
+            let mut staging_texture_buffer = self.vulkan_renderer.new_host_buffer((16 * 16 * 4) as u64);
+            staging_texture_buffer.map_update(0..(16 * 16 * 4) as u64, |data| {
+                data[..].copy_from_slice(&pixel_data);
+            });
+            // copy to device local image
+            self.vulkan_renderer.record_device_commands(None, |ctx| {
+                ctx.copy_buffer_to_image(
+                    staging_texture_buffer.handle(),
+                    texture.handle(),
+                    smallvec![
+                        BufferImageCopy::default()
+                            .image_extent(Extent3D::default().width(16).height(16).depth(1))
+                            .image_subresource(
+                                ImageSubresourceLayers::default()
+                                    .aspect_mask(vulkan_lib::ImageAspectFlags::COLOR)
+                                    .mip_level(0)
+                                    .base_array_layer(0)
+                                    .layer_count(1)
+                            )
+                    ],
+                );
+            });
+
             let mut global_ds = self.vulkan_renderer.new_double_buffered_descriptor_sets(
                 GlobalDescriptorSet::bindings(),
                 |ds, renderer| {
                     let buffer = renderer.new_device_buffer(BufferUsageFlags::UNIFORM_BUFFER, 16);
                     ds.bind_buffer(0, buffer.handle_static());
+                    ds.bind_image_and_sampler(2, texture.handle(), sampler.handle());
                     buffer
                 },
             );

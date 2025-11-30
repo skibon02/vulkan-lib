@@ -487,7 +487,7 @@ impl<'a> DeviceCommand<'a> {
                                     ),
                                 })
                             }
-                            BoundResource::Image(img) => {
+                            BoundResource::Image(img) | BoundResource::CombinedImageSampler {image: img, ..} => {
                                 usages.push(SpecificResourceUsage::ImageUsage {
                                     handle: img.clone(),
                                     usage: ResourceUsage::new(
@@ -499,9 +499,7 @@ impl<'a> DeviceCommand<'a> {
                                     image_aspect: ImageAspectFlags::COLOR,
                                 })
                             }
-                            _ => {
-
-                            }
+                            
                         }
                     }
 

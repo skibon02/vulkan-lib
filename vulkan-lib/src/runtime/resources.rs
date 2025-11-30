@@ -25,6 +25,7 @@ pub mod images;
 pub mod render_pass;
 pub mod descriptor_pool;
 pub mod descriptor_sets;
+pub mod sampler;
 
 /// Event of specific resource usage
 #[derive(Copy, Clone, Debug)]
@@ -326,10 +327,6 @@ impl ResourceStorage {
 
         self.descriptor_set_layouts.insert(key, layout);
         layout
-    }
-
-    pub fn memory_manager(&mut self) -> &mut MemoryManager {
-        &mut self.memory_manager
     }
 
     pub fn create_buffer(&mut self, usage: BufferUsageFlags, flags: BufferCreateFlags, size: DeviceSize, algorithm: MemoryTypeAlgorithm, shared: SharedState) -> (BufferResource, DeviceMemory) {
@@ -746,9 +743,14 @@ impl ResourceStorage {
                     }
                     BoundResource::Image(image) => {
                         let image_view = self.image_view(image.state_key);
-                        image_bindings.push((binding.binding_index, image_view))
+                        image_bindings.push((binding.binding_index, image_view, None))
                     }
-                    _ => {}
+                    BoundResource::CombinedImageSampler {
+                        image, sampler
+                    } => {
+                        let image_view = self.image_view(image.state_key);
+                        image_bindings.push((binding.binding_index, image_view, Some(sampler)))
+                    }
                 }
             }
         }
@@ -762,10 +764,15 @@ impl ResourceStorage {
             }).collect();
 
         let image_infos: SmallVec<[_; 4]> = image_bindings.into_iter()
-            .map(|(i, iv)| {
-                (i, DescriptorImageInfo::default()
+            .map(|(i, iv, sampler)| {
+                let mut info = DescriptorImageInfo::default()
                     .image_view(iv)
-                    .image_layout(ImageLayout::SHADER_READ_ONLY_OPTIMAL))
+                    .image_layout(ImageLayout::SHADER_READ_ONLY_OPTIMAL);
+
+                if let Some(sampler) = sampler {
+                    info.sampler = sampler.0;
+                }
+                (i, info)
             }).collect();
 
         let mut descriptor_writes: SmallVec<[_; 4]> = smallvec![];
@@ -779,10 +786,15 @@ impl ResourceStorage {
         }
 
         for (binding, image_info) in image_infos.iter() {
+            let t = if image_info.sampler != vk::Sampler::null() {
+                DescriptorType::COMBINED_IMAGE_SAMPLER
+            } else {
+                DescriptorType::SAMPLED_IMAGE
+            };
             descriptor_writes.push(WriteDescriptorSet::default()
                 .dst_set(descriptor_set)
                 .dst_binding(*binding)
-                .descriptor_type(DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .descriptor_type(t)
                 .image_info(std::slice::from_ref(&image_info))
             );
         }
@@ -828,6 +840,10 @@ impl ResourceStorage {
         unsafe {
             for (framebuffer, _) in scheduled.framebuffers {
                 self.device.destroy_framebuffer(framebuffer, None);
+            }
+
+            for (sampler, _) in scheduled.samplers {
+                self.device.destroy_sampler(sampler.0, None);
             }
         }
     }
