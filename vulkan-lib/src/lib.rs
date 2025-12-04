@@ -1,5 +1,6 @@
 use std::ffi::{c_char, CString};
-use ash::vk;
+use anyhow::bail;
+use ash::{vk, Entry};
 use ash::vk::{make_api_version, ApplicationInfo, BufferCreateInfo, Extent2D};
 use log::{info, warn};
 use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
@@ -47,11 +48,16 @@ pub struct VulkanRenderer {
 
     // runtime state
     runtime_state: RuntimeState,
+    entry: Entry,
 }
 
 impl VulkanRenderer {
     #[track_caller]
     pub fn new_for_window(window_handle: RawWindowHandle, display_handle: RawDisplayHandle, window_size: (u32, u32)) -> anyhow::Result<Self> {
+        let Ok(entry) = (unsafe { Entry::load() }) else {
+            bail!("Failed to load Vulkan entry");
+        };
+
         let g = range_event_start!("[Vulkan] INIT");
         info!(
             "Vulkan init started! Initializing for size: {:?}",
@@ -92,12 +98,12 @@ impl VulkanRenderer {
 
         // caps_checker will check requested layers and extensions and enable only the
         // supported ones, which can be requested later
-        let instance = caps_checker.create_instance(&app_info, &mut instance_layers_refs,
+        let instance = caps_checker.create_instance(&entry, &app_info, &mut instance_layers_refs,
                                                     &mut instance_extensions, &mut debug_report_callback_info)?;
 
-        let surface = VkSurface::new(instance.clone(), display_handle, window_handle)?;
+        let surface = VkSurface::new(&entry, instance.clone(), display_handle, window_handle)?;
 
-        let debug_report = VkDebugReport::new(instance.clone())?;
+        let debug_report = VkDebugReport::new(&entry, instance.clone())?;
         // instance is created. debug report ready
 
         let physical_devices = unsafe { instance.enumerate_physical_devices()? };
@@ -183,7 +189,7 @@ impl VulkanRenderer {
             res
         };
         let calibrated_timestamps = if caps_checker.is_device_extension_enabled(ash::ext::calibrated_timestamps::NAME) {
-            Some(CalibratedTimestamps::new(instance.as_ref(), physical_device, device.as_ref()))
+            Some(CalibratedTimestamps::new(&entry, instance.as_ref(), physical_device, device.as_ref()))
         }
         else {
             warn!("Calibrated timestamps extension is supported");
@@ -229,6 +235,7 @@ impl VulkanRenderer {
         );
 
         let mut res = Self {
+            entry,
             device,
             debug_report,
             surface,

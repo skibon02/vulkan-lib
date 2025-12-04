@@ -41,10 +41,8 @@ unsafe extern "system" fn vulkan_debug_callback(
 
 impl VkDebugReport {
     /// Can be used AFTER instance is created
-    pub fn new(instance: VkInstanceRef) -> anyhow::Result<VkDebugReport> {
-        let entry = Entry::linked();
-
-        let debug_report_h = ash::ext::debug_report::Instance::new(&entry, &instance);
+    pub fn new(entry: &Entry, instance: VkInstanceRef) -> anyhow::Result<VkDebugReport> {
+        let debug_report_h = ash::ext::debug_report::Instance::new(entry, &instance);
 
         let debug_report_callback_h = unsafe {
             debug_report_h.create_debug_report_callback(

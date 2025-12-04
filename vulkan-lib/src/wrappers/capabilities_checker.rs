@@ -29,7 +29,7 @@ impl CapabilitiesChecker {
         }
     }
 
-    pub fn create_instance(&mut self, app_info: &ApplicationInfo,
+    pub fn create_instance(&mut self, entry: &Entry, app_info: &ApplicationInfo,
            required_layers: &mut Vec<*const c_char>, required_extensions: &mut Vec<*const c_char>,
             debug_report_info: &mut DebugReportCallbackCreateInfoEXT) -> anyhow::Result<Arc<VkInstance>> {
 
@@ -39,7 +39,6 @@ impl CapabilitiesChecker {
             .map(|layer| unsafe { CStr::from_ptr(*layer) })
             .collect();
 
-        let entry = Entry::linked();
         let supported_layers = unsafe { entry.enumerate_instance_layer_properties() }?;
 
         let filtered_layers: Vec<_> = requested_layers.iter().filter(|l| {

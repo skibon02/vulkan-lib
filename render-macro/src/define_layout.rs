@@ -26,6 +26,7 @@ pub fn define_layout(input: TokenStream) -> TokenStream {
         let field_type = &field.ty;
         let glsl_type = match quote!(#field_type).to_string().as_str() {
             "vec4 < 0 >" => quote! { GlslTypeVariant::Vec4 },
+            "vec3 < 0 >" => quote! { GlslTypeVariant::Vec3 },
             "vec2 < 0 >" => quote! { GlslTypeVariant::Vec2 },
             "uint < 0 >" => quote! { GlslTypeVariant::Uint },
             "float < 0 >" => quote! { GlslTypeVariant::Float },

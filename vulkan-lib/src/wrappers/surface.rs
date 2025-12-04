@@ -15,9 +15,8 @@ pub struct VkSurface {
 }
 
 impl VkSurface {
-    pub fn new(instance: VkInstanceRef, display_h: RawDisplayHandle, window_h: RawWindowHandle) -> anyhow::Result<VkSurfaceRef> {
-        let entry = Entry::linked();
-        let surface_loader = ash::khr::surface::Instance::new(&entry, &instance);
+    pub fn new(entry: &Entry, instance: VkInstanceRef, display_h: RawDisplayHandle, window_h: RawWindowHandle) -> anyhow::Result<VkSurfaceRef> {
+        let surface_loader = ash::khr::surface::Instance::new(entry, &instance);
         let surface = unsafe { create_surface(&entry, &instance, display_h, window_h, None).context("Surface creation")? };
 
         Ok(Arc::new(VkSurface {

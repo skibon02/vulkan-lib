@@ -137,6 +137,7 @@ dependencies = [
  "ndk-sys",
  "rand",
  "raw-window-handle",
+ "rayon",
  "render-macro",
  "simple_logger",
  "smallvec",

@@ -10,8 +10,7 @@ pub struct CalibratedTimestamps {
 }
 
 impl CalibratedTimestamps {
-    pub fn new(instance: &Instance, physical_device: PhysicalDevice, device: &ash::Device) -> Self {
-        let entry = Entry::linked();
+    pub fn new(entry: &Entry, instance: &Instance, physical_device: PhysicalDevice, device: &ash::Device) -> Self {
         let device = ash::ext::calibrated_timestamps::Device::new(instance, device);
         let instance = ash::ext::calibrated_timestamps::Instance::new(&entry, instance);
         unsafe {

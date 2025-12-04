@@ -1,7 +1,7 @@
 #version 450
 
 // Per-instance attributes (binding 0, per instance)
-layout(location = 0) in vec2 pos;      // top-left corner position
+layout(location = 0) in vec3 pos;      // top-left corner position
 layout(location = 1) in vec2 size;     // width and height
 layout(location = 2) in vec4 color;    // solid color
 
@@ -22,9 +22,9 @@ const vec2 vertices[4] = vec2[4](
 
 void main() {
     vec2 vertexOffset = vertices[gl_VertexIndex];
-    vec2 vertexPos = pos + vertexOffset * size;
+    vec3 vertexPos = pos + vec3(vertexOffset * size, 0.0);
 
-    gl_Position = vec4(vertexPos, 0.0, 1.0);
+    gl_Position = vec4(vertexPos, 1.0);
     fragColor = color;
     texCoord = vertexOffset;
 }

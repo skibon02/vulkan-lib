@@ -11,13 +11,16 @@ use std::thread::JoinHandle;
 use std::time::Instant;
 use log::{error, info, warn};
 use rand::Rng;
+use rand::rngs::SmallRng;
+use rand::SeedableRng;
+use rayon::prelude::*;
 use sparkles::range_event_start;
 use render_macro::define_layout;
 use vulkan_lib::{descriptor_set, use_shader, AttachmentDescription, AttachmentLoadOp, AttachmentStoreOp, BufferCopy, BufferImageCopy, BufferUsageFlags, ClearColorValue, ClearDepthStencilValue, ClearValue, DoubleBuffered, Extent3D, Filter, Format, ImageLayout, ImageSubresourceLayers, ImageUsageFlags, Offset3D, PipelineStageFlags, SampleCountFlags, SamplerCreateInfo, VulkanRenderer};
 use vulkan_lib::runtime::resources::AttachmentsDescription;
 use vulkan_lib::runtime::resources::images::ImageResourceHandle;
 use vulkan_lib::runtime::resources::pipeline::GraphicsPipelineDesc;
-use vulkan_lib::shaders::layout::types::{int, vec2, vec4};
+use vulkan_lib::shaders::layout::types::{int, vec2, vec3, vec4};
 
 pub enum RenderMessage {
     Redraw { bg_color: [f32; 3] },
@@ -37,7 +40,7 @@ pub struct RenderTask {
 
 define_layout! {
     pub struct SolidAttributes {
-        pub pos: vec2<0>,
+        pub pos: vec3<0>,
         pub size: vec2<0>,
         pub color: vec4<0>,
     }
@@ -67,7 +70,7 @@ impl Default for SolidAttributes {
     fn default() -> Self {
         Self {
             color: [1.0, 1.0, 1.0, 1.0].into(),
-            pos: [0.0, 0.0].into(),
+            pos: [0.0, 0.0, 0.0].into(),
             size: [0.5, 0.5].into(),
         }
     }
@@ -233,43 +236,55 @@ impl RenderTask {
                         self.vulkan_renderer.wait_prev_submission(1);
                         drop(g);
 
-                        // update resources
-                        let mut rng = rand::rng();
-                        let mut rects = Vec::with_capacity(NUM_INSTANCES as usize);
+                        let g = range_event_start!("Generate random values");
 
-                        for _ in 0..NUM_INSTANCES {
-                            let x1: f32 = rng.random_range(-1.0..1.0);
-                            let x2: f32 = rng.random_range(-1.0..1.0);
-                            let y1: f32 = rng.random_range(-1.0..1.0);
-                            let y2: f32 = rng.random_range(-1.0..1.0);
+                        let gen_start = Instant::now();
+                        const DISCRETE_STEPS: u32 = 1024;
+                        let inv_steps = 1.0 / DISCRETE_STEPS as f32;
+                        let scale_to_range = 2.0 / DISCRETE_STEPS as f32;
 
-                            let pos_x = x1.min(x2);
-                            let pos_y = y1.min(y2);
-                            let width = (x2 - x1).abs();
-                            let height = (y2 - y1).abs();
-
-                            let r: f32 = rng.random_range(0.0..1.0);
-                            let g: f32 = rng.random_range(0.0..1.0);
-                            let b: f32 = rng.random_range(0.0..1.0);
-
-                            rects.push(SolidAttributes {
-                                pos: [pos_x, pos_y].into(),
-                                size: [width, height].into(),
-                                color: [r, g, b, 1.0].into(),
-                            });
-                        }
-
-                        // info!("Generated {} random rectangles, total bytes: {}", NUM_INSTANCES, total_bytes);
-
-                        let mut offset = 0usize;
                         staging_buffers.current_mut().map_update(0..bytes_per_instance*NUM_INSTANCES as u64, |data| {
-                            for rect in &rects {
-                                let start = offset;
-                                let end = start + bytes_per_instance as usize;
-                                data[start..end].copy_from_slice(rect.as_bytes());
-                                offset += bytes_per_instance as usize;
-                            }
+                            let data_slice = unsafe {
+                                std::slice::from_raw_parts_mut(
+                                    data.as_mut_ptr() as *mut SolidAttributes,
+                                    NUM_INSTANCES as usize
+                                )
+                            };
+
+                            data_slice.par_iter_mut().enumerate().for_each_init(
+                                || SmallRng::seed_from_u64(rand::random()),
+                                |rng, (i, rect)| {
+                                    let x1_i: u32 = rng.random_range(0..DISCRETE_STEPS);
+                                    let x2_i: u32 = rng.random_range(0..DISCRETE_STEPS);
+                                    let y1_i: u32 = rng.random_range(0..DISCRETE_STEPS);
+                                    let y2_i: u32 = rng.random_range(0..DISCRETE_STEPS);
+
+                                    let x1 = x1_i as f32 * scale_to_range - 1.0;
+                                    let x2 = x2_i as f32 * scale_to_range - 1.0;
+                                    let y1 = y1_i as f32 * scale_to_range - 1.0;
+                                    let y2 = y2_i as f32 * scale_to_range - 1.0;
+
+                                    let pos_x = x1.min(x2);
+                                    let pos_y = y1.min(y2);
+                                    let random_depth = i as f32 / NUM_INSTANCES as f32;
+                                    let width = (x2 - x1).abs();
+                                    let height = (y2 - y1).abs();
+
+                                    let r = rng.random_range(0..DISCRETE_STEPS) as f32 * inv_steps;
+                                    let g = rng.random_range(0..DISCRETE_STEPS) as f32 * inv_steps;
+                                    let b = rng.random_range(0..DISCRETE_STEPS) as f32 * inv_steps;
+
+                                    *rect = SolidAttributes {
+                                        pos: [pos_x, pos_y, random_depth].into(),
+                                        size: [width, height].into(),
+                                        color: [r, g, b, 1.0].into(),
+                                    };
+                                }
+                            );
                         });
+                        let gen_elapsed = gen_start.elapsed();
+                        // info!("Generate and write to buffer took: {:.2}ms", gen_elapsed.as_secs_f64() * 1000.0);
+                        drop(g);
 
 
                         // Acquire next swapchain image
