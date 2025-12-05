@@ -163,7 +163,7 @@ impl RenderTask {
 
             let quad_v_buf = self.vulkan_renderer.new_device_buffer(BufferUsageFlags::VERTEX_BUFFER | BufferUsageFlags::TRANSFER_DST, SolidAttributes::SIZE as u64);
             let quad_data = SolidAttributes {
-                pos: [-1.0, -1.0, 0.0].into(),
+                pos: [-1.0, -1.0, 0.5].into(),
                 size: [2.0, 2.0].into(),
                 color: [1.0, 1.0, 1.0, 1.0].into(),
             };
@@ -223,7 +223,6 @@ impl RenderTask {
                 },
             );
 
-            // let mut dev_buffer = self.vulkan_renderer.new_device_buffer(BufferUsageFlags::TRANSFER_DST | BufferUsageFlags::TRANSFER_SRC, 4*swapchain_extent.width as u64 * swapchain_extent.height as u64);
             loop {
                 let msg = self.rx.recv();
                 let Ok(msg) = msg else {
@@ -231,127 +230,124 @@ impl RenderTask {
                     break;
                 };
                 match msg {
-                    RenderMessage::Redraw { bg_color} => 'render: {
+                    RenderMessage::Redraw { bg_color} => {
                         let g = range_event_start!("Render");
 
-                        let bg_clear_color = ClearColorValue {
-                            float32: [bg_color[2], bg_color[1], bg_color[0], 1.0],
-                        };
-                        // let bg_color_u32 = ((bg_color[2].clamp(0.0, 1.0) * 255.0) as u32) |
-                        //     ((bg_color[1].clamp(0.0, 1.0) * 255.0) as u32) << 8 |
-                        //     ((bg_color[0].clamp(0.0, 1.0) * 255.0) as u32) << 16 |
-                        //     (255u32 << 24);
-
-                        let swapchain_extent = self.swapchain_image_handles[0].extent();
-                        if self.swapchain_recreated {
-                            self.swapchain_recreated = false;
-                        }
-
-                        let g = range_event_start!("Wait previous submission");
-                        self.vulkan_renderer.wait_prev_submission(1);
-                        drop(g);
-
-                        let g = range_event_start!("Generate random values");
-
-                        let gen_start = Instant::now();
-                        const DISCRETE_STEPS: u32 = 1024;
-                        let inv_steps = 1.0 / DISCRETE_STEPS as f32;
-                        let scale_to_range = 2.0 / DISCRETE_STEPS as f32;
-
-                        staging_buffers.current_mut().map_update(0..bytes_per_instance*NUM_INSTANCES as u64, |data| {
-                            let data_slice = unsafe {
-                                std::slice::from_raw_parts_mut(
-                                    data.as_mut_ptr() as *mut SolidAttributes,
-                                    NUM_INSTANCES as usize
-                                )
+                        'render: {
+                            let bg_clear_color = ClearColorValue {
+                                float32: [bg_color[2], bg_color[1], bg_color[0], 1.0],
                             };
 
-                            data_slice.par_iter_mut().enumerate().for_each_init(
-                                || SmallRng::seed_from_u64(rand::random()),
-                                |rng, (i, rect)| {
-                                    let x1_i: u32 = rng.random_range(0..DISCRETE_STEPS);
-                                    let x2_i: u32 = rng.random_range(0..DISCRETE_STEPS);
-                                    let y1_i: u32 = rng.random_range(0..DISCRETE_STEPS);
-                                    let y2_i: u32 = rng.random_range(0..DISCRETE_STEPS);
-
-                                    let x1 = x1_i as f32 * scale_to_range - 1.0;
-                                    let x2 = x2_i as f32 * scale_to_range - 1.0;
-                                    let y1 = y1_i as f32 * scale_to_range - 1.0;
-                                    let y2 = y2_i as f32 * scale_to_range - 1.0;
-
-                                    let pos_x = x1.min(x2);
-                                    let pos_y = y1.min(y2);
-                                    let random_depth = i as f32 / NUM_INSTANCES as f32;
-                                    let width = (x2 - x1).abs();
-                                    let height = (y2 - y1).abs();
-
-                                    let r = rng.random_range(0..DISCRETE_STEPS) as f32 * inv_steps;
-                                    let g = rng.random_range(0..DISCRETE_STEPS) as f32 * inv_steps;
-                                    let b = rng.random_range(0..DISCRETE_STEPS) as f32 * inv_steps;
-
-                                    *rect = SolidAttributes {
-                                        pos: [pos_x, pos_y, random_depth].into(),
-                                        size: [width, height].into(),
-                                        color: [r, g, b, 1.0].into(),
-                                    };
-                                }
-                            );
-                        });
-                        let gen_elapsed = gen_start.elapsed();
-                        // info!("Generate and write to buffer took: {:.2}ms", gen_elapsed.as_secs_f64() * 1000.0);
-                        drop(g);
-
-
-                        // Acquire next swapchain image
-                        let g = range_event_start!("Acquire next image");
-                        let (image_index, acquire_wait_ref, is_suboptimal) = match self.vulkan_renderer.acquire_next_image() {
-                            Ok(result) => result,
-                            Err(e) => {
-                                error!("Failed to acquire next image: {:?}", e);
-                                break 'render;
+                            if self.swapchain_recreated {
+                                self.swapchain_recreated = false;
                             }
-                        };
-                        drop(g);
 
-                        if is_suboptimal {
-                            warn!("Swapchain is suboptimal after acquire");
-                        }
+                            let g = range_event_start!("Wait previous submission");
+                            self.vulkan_renderer.wait_prev_submission(1);
+                            drop(g);
 
-                        let clear_values = smallvec![
-                            ClearValue {
-                                color: bg_clear_color,
-                            },
-                            ClearValue {
-                                depth_stencil: ClearDepthStencilValue::default().depth(1.0)
-                            },
-                            ClearValue {
-                                color: bg_clear_color,
-                            },
-                        ];
+                            let g = range_event_start!("Generate random values");
 
-                        let region = BufferCopy::default()
-                            .src_offset(0)
-                            .dst_offset(0)
-                            .size(total_bytes);
+                            let gen_start = Instant::now();
+                            const DISCRETE_STEPS: u32 = 1024;
+                            let inv_steps = 1.0 / DISCRETE_STEPS as f32;
+                            let scale_to_range = 2.0 / DISCRETE_STEPS as f32;
+
+                            staging_buffers.current_mut().map_update(0..bytes_per_instance * NUM_INSTANCES as u64, |data| {
+                                let data_slice = unsafe {
+                                    std::slice::from_raw_parts_mut(
+                                        data.as_mut_ptr() as *mut SolidAttributes,
+                                        NUM_INSTANCES as usize
+                                    )
+                                };
+
+                                data_slice.par_iter_mut().enumerate().for_each_init(
+                                    || SmallRng::seed_from_u64(rand::random()),
+                                    |rng, (i, rect)| {
+                                        let x1_i: u32 = rng.random_range(0..DISCRETE_STEPS);
+                                        let x2_i: u32 = rng.random_range(0..DISCRETE_STEPS);
+                                        let y1_i: u32 = rng.random_range(0..DISCRETE_STEPS);
+                                        let y2_i: u32 = rng.random_range(0..DISCRETE_STEPS);
+
+                                        let x1 = x1_i as f32 * scale_to_range - 1.0;
+                                        let x2 = x2_i as f32 * scale_to_range - 1.0;
+                                        let y1 = y1_i as f32 * scale_to_range - 1.0;
+                                        let y2 = y2_i as f32 * scale_to_range - 1.0;
+
+                                        let pos_x = x1.min(x2);
+                                        let pos_y = y1.min(y2);
+                                        let random_depth = i as f32 / NUM_INSTANCES as f32;
+                                        let width = (x2 - x1).abs();
+                                        let height = (y2 - y1).abs();
+
+                                        let r = rng.random_range(0..DISCRETE_STEPS) as f32 * inv_steps;
+                                        let g = rng.random_range(0..DISCRETE_STEPS) as f32 * inv_steps;
+                                        let b = rng.random_range(0..DISCRETE_STEPS) as f32 * inv_steps;
+
+                                        *rect = SolidAttributes {
+                                            pos: [pos_x, pos_y, random_depth].into(),
+                                            size: [width, height].into(),
+                                            color: [r, g, b, 1.0].into(),
+                                        };
+                                    }
+                                );
+                            });
+                            let gen_elapsed = gen_start.elapsed();
+                            // info!("Generate and write to buffer took: {:.2}ms", gen_elapsed.as_secs_f64() * 1000.0);
+                            drop(g);
 
 
-                        let present_wait_ref = self.vulkan_renderer.record_device_commands_signal(Some(acquire_wait_ref.with_stages(PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)), |ctx| {
-                            ctx.copy_buffer(staging_buffers.current().handle(), vertex_buffer.current().handle_static(), smallvec![region]);
-                            ctx.render_pass(render_pass.handle(), image_index, clear_values, |ctx| {
-                                ctx.bind_pipeline(pipeline.handle());
-                                ctx.bind_descriptor_set(0, global_ds.current().handle());
+                            // Acquire next swapchain image
+                            let g = range_event_start!("Acquire next image");
+                            let (image_index, acquire_wait_ref, is_suboptimal) = match self.vulkan_renderer.acquire_next_image() {
+                                Ok(result) => result,
+                                Err(e) => {
+                                    error!("Failed to acquire next image: {:?}", e);
+                                    break 'render;
+                                }
+                            };
+                            drop(g);
 
-                                ctx.bind_vertex_buffer(quad_v_buf.handle_static());
-                                ctx.draw(4, 1, 0, 0);
+                            if is_suboptimal {
+                                warn!("Swapchain is suboptimal after acquire");
+                            }
 
-                                ctx.bind_vertex_buffer(vertex_buffer.current().handle_static());
-                                ctx.draw(4, NUM_INSTANCES, 0, 0);
-                            })
-                        });
+                            let clear_values = smallvec![
+                                ClearValue {
+                                    color: bg_clear_color,
+                                },
+                                ClearValue {
+                                    depth_stencil: ClearDepthStencilValue::default().depth(1.0)
+                                },
+                                ClearValue {
+                                    color: bg_clear_color,
+                                },
+                            ];
 
-                        let g = range_event_start!("Present");
-                        if let Err(e) = self.vulkan_renderer.queue_present(image_index, present_wait_ref) {
-                            error!("Present error: {:?}", e);
+                            let region = BufferCopy::default()
+                                .src_offset(0)
+                                .dst_offset(0)
+                                .size(total_bytes);
+
+
+                            let present_wait_ref = self.vulkan_renderer.record_device_commands_signal(Some(acquire_wait_ref.with_stages(PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)), |ctx| {
+                                ctx.copy_buffer(staging_buffers.current().handle(), vertex_buffer.current().handle_static(), smallvec![region]);
+                                ctx.render_pass(render_pass.handle(), image_index, clear_values, |ctx| {
+                                    ctx.bind_pipeline(pipeline.handle());
+                                    ctx.bind_descriptor_set(0, global_ds.current().handle());
+
+                                    ctx.bind_vertex_buffer(quad_v_buf.handle_static());
+                                    ctx.draw(4, 1, 0, 0);
+
+                                    ctx.bind_vertex_buffer(vertex_buffer.current().handle_static());
+                                    ctx.draw(4, NUM_INSTANCES, 0, 0);
+                                })
+                            });
+
+                            let g = range_event_start!("Present");
+                            if let Err(e) = self.vulkan_renderer.queue_present(image_index, present_wait_ref) {
+                                error!("Present error: {:?}", e);
+                            }
                         }
 
                         global_ds.next_frame();
