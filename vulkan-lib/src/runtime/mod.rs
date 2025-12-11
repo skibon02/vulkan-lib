@@ -430,6 +430,9 @@ impl RuntimeState {
         let mut slot = None;
         if let Some(timestamp_pool) = &mut self.timestamp_pool {
             slot = Some(timestamp_pool.write_start_timestamp(cmd_buffer, submission_num));
+
+            // reset old queries
+            timestamp_pool.reset_old_slots(cmd_buffer);
         }
 
         // record commands grouped by barriers
@@ -828,8 +831,8 @@ impl RuntimeState {
 
         // handle timestamp queries
         if let Some(timestamp_pool) = &mut self.timestamp_pool {
+            let ev_name = self.sparkles_gpu_channel.map_event_name(static_name!("Command buffer execution"));
             for (submission_num, begin, end) in timestamp_pool.read_timestamps() {
-                let ev_name = self.sparkles_gpu_channel.map_event_name(static_name!("Command buffer execution"));
                 self.sparkles_gpu_channel.push_events(&[begin, end], &[(ev_name, 1), (ev_name, 0x81)])
             }
         }
