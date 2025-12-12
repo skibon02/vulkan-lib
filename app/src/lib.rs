@@ -14,6 +14,7 @@ pub mod render;
 #[cfg(target_os = "android")]
 pub mod android;
 pub mod layout;
+pub mod component;
 
 #[cfg(target_os = "android")]
 fn sparkles_init() -> FinalizeGuard{

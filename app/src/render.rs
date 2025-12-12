@@ -161,16 +161,6 @@ impl RenderTask {
                 buf
             });
 
-            let quad_v_buf = self.vulkan_renderer.new_device_buffer(BufferUsageFlags::VERTEX_BUFFER | BufferUsageFlags::TRANSFER_DST, SolidAttributes::SIZE as u64);
-            let quad_data = SolidAttributes {
-                pos: [-1.0, -1.0, 0.5].into(),
-                size: [2.0, 2.0].into(),
-                color: [1.0, 1.0, 1.0, 1.0].into(),
-            };
-            staging_buffers.current_mut().map_update(0..SolidAttributes::SIZE as u64, |data| {
-                data[..SolidAttributes::SIZE].copy_from_slice(quad_data.as_bytes());
-            });
-
             let pipeline_desc = GraphicsPipelineDesc::new(use_shader!("solid"), attributes, smallvec![GlobalDescriptorSet::bindings()]);
             let pipeline = self.vulkan_renderer.new_pipeline(render_pass.handle(), pipeline_desc);
 
@@ -191,11 +181,6 @@ impl RenderTask {
             });
             // copy to device local image
             self.vulkan_renderer.record_device_commands(None, |ctx| {
-                ctx.copy_buffer(
-                    staging_buffers.current().handle(),
-                    quad_v_buf.handle_static(),
-                    smallvec![BufferCopy::default().size(SolidAttributes::SIZE as u64)]
-                );
                 ctx.copy_buffer_to_image(
                     staging_texture_buffer.handle(),
                     texture.handle(),
@@ -336,8 +321,6 @@ impl RenderTask {
                                     ctx.bind_pipeline(pipeline.handle());
                                     ctx.bind_descriptor_set(0, global_ds.current().handle());
 
-                                    ctx.bind_vertex_buffer(quad_v_buf.handle_static());
-                                    ctx.draw(4, 1, 0, 0);
 
                                     ctx.bind_vertex_buffer(vertex_buffer.current().handle_static());
                                     ctx.draw(4, NUM_INSTANCES, 0, 0);
