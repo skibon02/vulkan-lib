@@ -12,6 +12,8 @@ use winit::keyboard;
 use winit::keyboard::NamedKey;
 use winit::window::{Fullscreen, Window};
 use vulkan_lib::{BufferUsageFlags, VulkanRenderer};
+use crate::component::Component;
+use crate::layout::calculator::LayoutCalculator;
 use crate::render;
 use crate::render::RenderMessage;
 
@@ -22,6 +24,10 @@ pub struct App {
     start_time: Instant,
 
     window: Window,
+
+    // ui
+    component: Component,
+    layout_calculator: LayoutCalculator,
 
     // Rendering thread
     render_tx: mpsc::Sender<RenderMessage>,
@@ -48,11 +54,22 @@ impl App {
         vulkan_renderer.test_buffer_sizes(BufferUsageFlags::UNIFORM_BUFFER);
         let (render_task, render_tx, render_ready, resize_ready) = render::RenderTask::new(vulkan_renderer);
         let render_jh = render_task.spawn();
+        
+        // create UI component
+        let mut component = Component::new();
+        let mut layout_calculator =  LayoutCalculator::new();
+
+        info!("Initializing UI component...");
+        component.init(&mut layout_calculator);
+        info!("Done!");
 
         Self {
             is_collapsed: false,
             app_finished: false,
             start_time: Instant::now(),
+            
+            component,
+            layout_calculator,
 
             window,
 
@@ -123,6 +140,16 @@ impl App {
                     if !self.render_ready.swap(false, Ordering::Acquire) {
                         break 'handling;
                     }
+                    
+                    // poll UI logic
+                    self.component.poll(&mut self.layout_calculator);
+
+                    let size = self.window.inner_size();
+                    self.layout_calculator.calculate_layout(size.width, size.height);
+
+                    // take UI elements to render
+                    let elements = self.layout_calculator.get_elements();
+                    // convert into primitive elements, fill instance buffer (text -> list of symbols, img/box -> rects)
 
                     let _ = self.render_tx.send(RenderMessage::Redraw {
                         bg_color: [0.6, 0.2, 0.8],

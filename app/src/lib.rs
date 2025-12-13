@@ -3,8 +3,8 @@ use log::{error, info};
 use sparkles::config::SparklesConfig;
 use sparkles::{range_event_start, FinalizeGuard};
 use winit::application::ApplicationHandler;
-use winit::event::WindowEvent;
-use winit::event_loop::{ActiveEventLoop, EventLoop};
+use winit::event::{DeviceEvent, DeviceId, WindowEvent};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{WindowAttributes, WindowId};
 use crate::app::App;
 

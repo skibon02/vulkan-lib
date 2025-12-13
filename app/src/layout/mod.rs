@@ -1,3 +1,4 @@
+use smallvec::{SmallVec, smallvec};
 use ui_macro::{AttributeEnum, generate_parsed_attributes};
 
 pub mod calculator;
@@ -28,6 +29,20 @@ impl Element {
     }
 }
 
+impl From<(ElementKind, &ParsedAttributes)> for Element {
+    fn from((element_kind, attributes): (ElementKind, &ParsedAttributes)) -> Self {
+        match element_kind {
+            ElementKind::Dynamic => panic!("Cannot create Element from Dynamic ElementKind"),
+            ElementKind::Col => Element::Col(attributes.col.clone().unwrap_or_default()),
+            ElementKind::Row => Element::Row(attributes.row.clone().unwrap_or_default()),
+            ElementKind::Stack => Element::Stack(attributes.stack.clone().unwrap_or_default()),
+            ElementKind::Img => Element::Img(attributes.img.clone().unwrap_or_default()),
+            ElementKind::Text => Element::Text(attributes.text.clone().unwrap_or_default()),
+            ElementKind::Box => Element::Box(attributes.box_attr.clone().unwrap_or_default()),
+        }
+    }
+}
+
 pub enum ElementKind {
     Col,
     Row,
@@ -47,11 +62,11 @@ impl ElementKind {
 
 pub enum AttributeValue {
     Col(ColValue),
-    ColChild(ColChildValue),
     Row(RowValue),
-    RowChild(RowChildValue),
     Stack(StackValue),
-    StackChild(StackChildValue),
+    ColChild(ColChildValue, bool),
+    RowChild(RowChildValue, bool),
+    StackChild(StackChildValue, bool),
     Img(ImgValue),
     Text(TextValue),
     Box(BoxValue),
@@ -59,18 +74,19 @@ pub enum AttributeValue {
 }
 
 pub struct ElementNode {
-    i: u32,
     parent_i: u32,
+    next_sibling_i: Option<u32>,
     element: Element,
     general_attributes: GeneralAttributes,
-    self_attributes: SelfAttributes
+    self_child_attributes: ChildAttributes
 }
 
-pub type ElementNodeList = Vec<(u32, ElementNodeRepr)>;
+pub type AttributeValues = SmallVec<[AttributeValue; 5]>;
+
 pub struct ElementNodeRepr {
-    parent_i: u32,
-    element: ElementKind,
-    attributes: Vec<AttributeValue>
+    pub parent_i: u32,
+    pub element: ElementKind,
+    pub attributes: AttributeValues
 }
 
 #[derive(Copy, Clone, Debug, Default)]
@@ -177,6 +193,7 @@ pub enum MainGapMode {
     #[default]
     Between,
     Around,
+    Fixed(Lu),
     None
 }
 
@@ -299,10 +316,12 @@ pub struct StackAttributes {
     pub children_default: StackChildAttributes,
 }
 
-pub enum SelfAttributes {
-    Stack(StackChildAttributes),
-    Row(RowChildAttributes),
-    Col(ColChildAttributes),
+
+#[derive(Clone, Debug, Default)]
+struct ChildAttributes {
+    stack: StackChildAttributes,
+    row: RowChildAttributes,
+    col: ColChildAttributes,
 }
 
 #[derive(Clone, Debug, AttributeEnum)]
@@ -407,7 +426,7 @@ mod tests {
     #[test]
     fn test_parsed_attributes() {
         // Test ParsedAttributes generation
-        let attr_values = vec![
+        let attr_values: AttributeValues = smallvec![
             AttributeValue::Text(TextValue::FontSize(20.0)),
             AttributeValue::General(GeneralValue::Opacity(0.9)),
             AttributeValue::Box(BoxValue::Fill(Some(Fill::Solid(Color::SKY)))),
@@ -427,7 +446,7 @@ mod tests {
     #[test]
     fn test_parsed_attributes_multiple_same_type() {
         // Test that multiple attributes of the same type accumulate properly
-        let attr_values = vec![
+        let attr_values: AttributeValues = smallvec![
             AttributeValue::Text(TextValue::FontSize(20.0)),
             AttributeValue::General(GeneralValue::Opacity(0.9)),
             AttributeValue::Text(TextValue::Oneline(true)),
@@ -461,7 +480,7 @@ mod tests {
     #[test]
     fn test_parsed_attributes_duplicate_fields() {
         // Test that last value wins for duplicate fields
-        let attr_values = vec![
+        let attr_values: AttributeValues = smallvec![
             AttributeValue::Text(TextValue::FontSize(20.0)),
             AttributeValue::Text(TextValue::Oneline(false)),
             AttributeValue::Text(TextValue::FontSize(30.0)),  // Should overwrite previous
@@ -483,7 +502,7 @@ mod tests {
     #[test]
     fn test_parsed_attributes_mixed_types() {
         // Test parsing with all different attribute types
-        let attr_values = vec![
+        let attr_values: AttributeValues = smallvec![
             AttributeValue::General(GeneralValue::Opacity(0.7)),
             AttributeValue::Text(TextValue::FontSize(18.0)),
             AttributeValue::Img(ImgValue::Width(Some(100))),
@@ -491,9 +510,10 @@ mod tests {
             AttributeValue::Row(RowValue::MainSizeMode(MainSizeMode::EqualGrow)),
             AttributeValue::Col(ColValue::MainAlign(YAlign::Top)),
             AttributeValue::Stack(StackValue::SelfDepAxis(SelfDepAxis::YStretch)),
-            AttributeValue::RowChild(RowChildValue::CrossStretch(false)),
-            AttributeValue::ColChild(ColChildValue::CrossAlign(XAlign::Left)),
-            AttributeValue::StackChild(StackChildValue::StretchX(false)),
+            // Self attributes (is_parent = false)
+            AttributeValue::RowChild(RowChildValue::CrossStretch(false), false),
+            AttributeValue::ColChild(ColChildValue::CrossAlign(XAlign::Left), false),
+            AttributeValue::StackChild(StackChildValue::StretchX(false), false),
         ];
 
         let parsed: ParsedAttributes = attr_values.into();
@@ -520,13 +540,48 @@ mod tests {
         assert!(parsed.stack.is_some());
         assert!(matches!(parsed.stack.unwrap().self_dep_axis, SelfDepAxis::YStretch));
 
-        assert!(parsed.row_child.is_some());
-        assert_eq!(parsed.row_child.unwrap().cross_stretch, false);
+        // Check self_child attributes
+        assert!(parsed.self_child.is_some());
+        let self_child = parsed.self_child.unwrap();
+        assert_eq!(self_child.row.cross_stretch, false);
+        assert!(matches!(self_child.col.cross_align, XAlign::Left));
+        assert_eq!(self_child.stack.stretch_x, false);
+    }
 
-        assert!(parsed.col_child.is_some());
-        assert!(matches!(parsed.col_child.unwrap().cross_align, XAlign::Left));
+    #[test]
+    fn test_parsed_attributes_parent_vs_self() {
+        // Test that parent flag properly distinguishes parent and self attributes
+        let attr_values: AttributeValues = smallvec![
+            // Parent attributes (is_parent = true) - go to container.children_default
+            AttributeValue::RowChild(RowChildValue::CrossStretch(false), true),
+            AttributeValue::ColChild(ColChildValue::CrossAlign(XAlign::Right), true),
+            AttributeValue::StackChild(StackChildValue::AlignX(XAlign::Left), true),
+            // Self attributes (is_parent = false) - go to self_child field
+            AttributeValue::RowChild(RowChildValue::CrossSize(Some(100)), false),
+            AttributeValue::ColChild(ColChildValue::CrossStretch(false), false),
+            AttributeValue::StackChild(StackChildValue::StretchY(false), false),
+        ];
 
-        assert!(parsed.stack_child.is_some());
-        assert_eq!(parsed.stack_child.unwrap().stretch_x, false);
+        let parsed: ParsedAttributes = attr_values.into();
+
+        // Check parent attributes - should be in container.children_default
+        assert!(parsed.row.is_some());
+        let row = parsed.row.unwrap();
+        assert_eq!(row.children_default.cross_stretch, false);
+
+        assert!(parsed.col.is_some());
+        let col = parsed.col.unwrap();
+        assert!(matches!(col.children_default.cross_align, XAlign::Right));
+
+        assert!(parsed.stack.is_some());
+        let stack = parsed.stack.unwrap();
+        assert!(matches!(stack.children_default.align_x, XAlign::Left));
+
+        // Check self attributes
+        assert!(parsed.self_child.is_some());
+        let self_child = parsed.self_child.unwrap();
+        assert_eq!(self_child.row.cross_size, Some(100));
+        assert_eq!(self_child.col.cross_stretch, false);
+        assert_eq!(self_child.stack.stretch_y, false);
     }
 }

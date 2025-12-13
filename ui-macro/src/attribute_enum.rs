@@ -83,9 +83,7 @@ pub fn derive_attribute_enum_impl(input: TokenStream) -> TokenStream {
     TokenStream::from(expanded)
 }
 
-pub fn generate_parsed_attributes_impl(input: TokenStream) -> TokenStream {
-    // For now, we'll generate this based on a predefined list
-    // In a real implementation, you might want to pass the list as macro input
+pub fn generate_parsed_attributes_impl(_input: TokenStream) -> TokenStream {
     let expanded = quote! {
         #[derive(Default, Debug, Clone)]
         pub struct ParsedAttributes {
@@ -96,13 +94,11 @@ pub fn generate_parsed_attributes_impl(input: TokenStream) -> TokenStream {
             pub row: Option<RowAttributes>,
             pub col: Option<ColAttributes>,
             pub stack: Option<StackAttributes>,
-            pub row_child: Option<RowChildAttributes>,
-            pub col_child: Option<ColChildAttributes>,
-            pub stack_child: Option<StackChildAttributes>,
+            pub self_child: Option<ChildAttributes>,
         }
 
-        impl From<Vec<AttributeValue>> for ParsedAttributes {
-            fn from(values: Vec<AttributeValue>) -> Self {
+        impl<const N: usize> From<smallvec::SmallVec<[AttributeValue; N]>> for ParsedAttributes {
+            fn from(values: smallvec::SmallVec<[AttributeValue; N]>) -> Self {
                 let mut result = Self::default();
 
                 for value in values {
@@ -128,14 +124,26 @@ pub fn generate_parsed_attributes_impl(input: TokenStream) -> TokenStream {
                         AttributeValue::Stack(v) => {
                             result.stack.get_or_insert_with(StackAttributes::default).apply(v);
                         }
-                        AttributeValue::RowChild(v) => {
-                            result.row_child.get_or_insert_with(RowChildAttributes::default).apply(v);
+                        AttributeValue::RowChild(v, is_parent) => {
+                            if is_parent {
+                                result.row.get_or_insert_with(RowAttributes::default).children_default.apply(v);
+                            } else {
+                                result.self_child.get_or_insert_with(ChildAttributes::default).row.apply(v);
+                            }
                         }
-                        AttributeValue::ColChild(v) => {
-                            result.col_child.get_or_insert_with(ColChildAttributes::default).apply(v);
+                        AttributeValue::ColChild(v, is_parent) => {
+                            if is_parent {
+                                result.col.get_or_insert_with(ColAttributes::default).children_default.apply(v);
+                            } else {
+                                result.self_child.get_or_insert_with(ChildAttributes::default).col.apply(v);
+                            }
                         }
-                        AttributeValue::StackChild(v) => {
-                            result.stack_child.get_or_insert_with(StackChildAttributes::default).apply(v);
+                        AttributeValue::StackChild(v, is_parent) => {
+                            if is_parent {
+                                result.stack.get_or_insert_with(StackAttributes::default).children_default.apply(v);
+                            } else {
+                                result.self_child.get_or_insert_with(ChildAttributes::default).stack.apply(v);
+                            }
                         }
                     }
                 }
