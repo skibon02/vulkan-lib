@@ -81,6 +81,50 @@ pub struct ElementNode {
     self_child_attributes: ChildAttributes
 }
 
+impl ElementNode {
+    pub fn apply(&mut self, attr: AttributeValue) {
+        if let AttributeValue::General(general) = &attr {
+            self.general_attributes.apply(general.clone());
+        }
+        if let AttributeValue::ColChild(col, false) = &attr {
+            self.self_child_attributes.col.apply(col.clone());
+        }
+        if let AttributeValue::RowChild(row, false) = &attr {
+            self.self_child_attributes.row.apply(row.clone());
+        }
+        if let AttributeValue::StackChild(stack, false) = &attr {
+            self.self_child_attributes.stack.apply(stack.clone());
+        }
+        if let AttributeValue::ColChild(col, true) = &attr && let Element::Col(el) = &mut self.element{
+            el.children_default.apply(col.clone());
+        }
+        if let AttributeValue::RowChild(row, true) = &attr && let Element::Row(el) = &mut self.element{
+            el.children_default.apply(row.clone());
+        }
+        if let AttributeValue::StackChild(row, true) = &attr && let Element::Stack(el) = &mut self.element{
+            el.children_default.apply(row.clone());
+        }
+        if let AttributeValue::Row(row) = &attr && let Element::Row(el) = &mut self.element{
+            el.apply(row.clone())
+        }
+        if let AttributeValue::Col(row) = &attr && let Element::Col(el) = &mut self.element{
+            el.apply(row.clone())
+        }
+        if let AttributeValue::Stack(row) = &attr && let Element::Stack(el) = &mut self.element{
+            el.apply(row.clone())
+        }
+        if let AttributeValue::Img(row) = &attr && let Element::Img(el) = &mut self.element{
+            el.apply(row.clone())
+        }
+        if let AttributeValue::Text(row) = &attr && let Element::Text(el) = &mut self.element{
+            el.apply(row.clone())
+        }
+        if let AttributeValue::Box(row) = &attr && let Element::Box(el) = &mut self.element{
+            el.apply(row.clone())
+        }
+    }
+}
+
 pub type AttributeValues = SmallVec<[AttributeValue; 5]>;
 
 pub struct ElementNodeRepr {
@@ -217,8 +261,8 @@ pub type Lu = u32;
 
 #[derive(Copy, Clone, Debug, AttributeEnum)]
 pub struct GeneralAttributes {
-    pub min_width: Option<Lu>,
-    pub min_height: Option<Lu>,
+    pub min_width: Lu,
+    pub min_height: Lu,
     pub nostretch_x: bool,
     pub nostretch_y: bool,
     pub margin_x: Lu,
@@ -229,8 +273,8 @@ pub struct GeneralAttributes {
 impl Default for GeneralAttributes {
     fn default() -> Self {
         Self {
-            min_width: None,
-            min_height: None,
+            min_width: 0,
+            min_height: 0,
             nostretch_x: false,
             nostretch_y: false,
             margin_x: 0,
@@ -240,14 +284,22 @@ impl Default for GeneralAttributes {
     }
 }
 
+#[derive(Copy, Clone, PartialEq, Debug)]
+pub enum FontSize {
+    Em(f32),
+    Lu(Lu)
+}
+
 #[derive(Clone, Debug, AttributeEnum)]
 pub struct TextAttributes {
     pub oneline: bool,
     pub hide_overflow: bool,
-    pub font_size: f32,
+    pub font_size: FontSize,
     pub font_weight: u16,
+    pub font: String,
     pub text_align_x: XAlign,
     pub text_align_y: YAlign,
+    pub line_height: Option<Lu>,
     pub symbols_limit: Option<u32>,
     pub text_color: Fill,
 }
@@ -257,8 +309,10 @@ impl Default for TextAttributes {
         Self {
             oneline: false,
             hide_overflow: false,
-            font_size: 16.0,
+            font_size: FontSize::Em(1.0),
             font_weight: 400,
+            font: String::new(),
+            line_height: None,
             text_align_x: XAlign::default(),
             text_align_y: YAlign::default(),
             symbols_limit: None,
@@ -387,17 +441,17 @@ mod tests {
     #[test]
     fn test_attribute_value_generation() {
         // Test that the generated enums exist
-        let _text_val = TextValue::FontSize(16.0);
+        let _text_val = TextValue::FontSize(FontSize::Em(1.0));
         let _general_val = GeneralValue::Opacity(0.5);
         let _box_val = BoxValue::Fill(Some(Fill::Solid(Color::WHITE)));
 
         // Test From<Vec<*Value>> for *Attributes - should apply each value
         let text_attrs: TextAttributes = vec![
-            TextValue::FontSize(24.0),
+            TextValue::FontSize(FontSize::Em(1.0)),
             TextValue::Oneline(true),
             TextValue::FontWeight(700),
         ].into();
-        assert_eq!(text_attrs.font_size, 24.0);
+        assert_eq!(text_attrs.font_size, FontSize::Em(1.0));
         assert_eq!(text_attrs.oneline, true);
         assert_eq!(text_attrs.font_weight, 700);
         // Other fields should be default
@@ -414,12 +468,12 @@ mod tests {
     fn test_attribute_value_last_wins() {
         // Test that last value wins when duplicates exist
         let text_attrs: TextAttributes = vec![
-            TextValue::FontSize(24.0),
-            TextValue::FontSize(32.0),  // This should win
+            TextValue::FontSize(FontSize::Em(1.5)),
+            TextValue::FontSize(FontSize::Em(2.0)),  // This should win
             TextValue::Oneline(false),
             TextValue::Oneline(true),   // This should win
         ].into();
-        assert_eq!(text_attrs.font_size, 32.0);
+        assert_eq!(text_attrs.font_size, FontSize::Em(2.0));
         assert_eq!(text_attrs.oneline, true);
     }
 
@@ -427,7 +481,7 @@ mod tests {
     fn test_parsed_attributes() {
         // Test ParsedAttributes generation
         let attr_values: AttributeValues = smallvec![
-            AttributeValue::Text(TextValue::FontSize(20.0)),
+            AttributeValue::Text(TextValue::FontSize(FontSize::Em(1.0))),
             AttributeValue::General(GeneralValue::Opacity(0.9)),
             AttributeValue::Box(BoxValue::Fill(Some(Fill::Solid(Color::SKY)))),
         ];
@@ -435,7 +489,7 @@ mod tests {
         let parsed: ParsedAttributes = attr_values.into();
 
         assert!(parsed.text.is_some());
-        assert_eq!(parsed.text.unwrap().font_size, 20.0);
+        assert_eq!(parsed.text.unwrap().font_size, FontSize::Em(1.0));
 
         assert!(parsed.general.is_some());
         assert_eq!(parsed.general.unwrap().opacity, 0.9);
@@ -447,7 +501,7 @@ mod tests {
     fn test_parsed_attributes_multiple_same_type() {
         // Test that multiple attributes of the same type accumulate properly
         let attr_values: AttributeValues = smallvec![
-            AttributeValue::Text(TextValue::FontSize(20.0)),
+            AttributeValue::Text(TextValue::FontSize(FontSize::Em(1.0))),
             AttributeValue::General(GeneralValue::Opacity(0.9)),
             AttributeValue::Text(TextValue::Oneline(true)),
             AttributeValue::Text(TextValue::FontWeight(600)),
@@ -460,7 +514,7 @@ mod tests {
         // Text attributes should have all three values applied
         assert!(parsed.text.is_some());
         let text = parsed.text.unwrap();
-        assert_eq!(text.font_size, 20.0);
+        assert_eq!(text.font_size, FontSize::Em(1.0));
         assert_eq!(text.oneline, true);
         assert_eq!(text.font_weight, 600);
         // Unset field should be default
@@ -473,17 +527,17 @@ mod tests {
         assert_eq!(general.margin_x, 10);
         assert_eq!(general.margin_y, 5);
         // Unset fields should be default
-        assert_eq!(general.min_width, None);
-        assert_eq!(general.min_height, None);
+        assert_eq!(general.min_width, 0);
+        assert_eq!(general.min_height, 0);
     }
 
     #[test]
     fn test_parsed_attributes_duplicate_fields() {
         // Test that last value wins for duplicate fields
         let attr_values: AttributeValues = smallvec![
-            AttributeValue::Text(TextValue::FontSize(20.0)),
+            AttributeValue::Text(TextValue::FontSize(FontSize::Em(1.0))),
             AttributeValue::Text(TextValue::Oneline(false)),
-            AttributeValue::Text(TextValue::FontSize(30.0)),  // Should overwrite previous
+            AttributeValue::Text(TextValue::FontSize(FontSize::Em(1.5))),  // Should overwrite previous
             AttributeValue::General(GeneralValue::Opacity(0.5)),
             AttributeValue::Text(TextValue::Oneline(true)),   // Should overwrite previous
             AttributeValue::General(GeneralValue::Opacity(0.8)), // Should overwrite previous
@@ -492,7 +546,7 @@ mod tests {
         let parsed: ParsedAttributes = attr_values.into();
 
         let text = parsed.text.unwrap();
-        assert_eq!(text.font_size, 30.0);  // Last value
+        assert_eq!(text.font_size, FontSize::Em(1.5));  // Last value
         assert_eq!(text.oneline, true);     // Last value
 
         let general = parsed.general.unwrap();
@@ -504,7 +558,7 @@ mod tests {
         // Test parsing with all different attribute types
         let attr_values: AttributeValues = smallvec![
             AttributeValue::General(GeneralValue::Opacity(0.7)),
-            AttributeValue::Text(TextValue::FontSize(18.0)),
+            AttributeValue::Text(TextValue::FontSize(FontSize::Em(1.0))),
             AttributeValue::Img(ImgValue::Width(Some(100))),
             AttributeValue::Box(BoxValue::RoundCorners(Some(5))),
             AttributeValue::Row(RowValue::MainSizeMode(MainSizeMode::EqualGrow)),
@@ -523,7 +577,7 @@ mod tests {
         assert_eq!(parsed.general.unwrap().opacity, 0.7);
 
         assert!(parsed.text.is_some());
-        assert_eq!(parsed.text.unwrap().font_size, 18.0);
+        assert_eq!(parsed.text.unwrap().font_size, FontSize::Em(1.0));
 
         assert!(parsed.img.is_some());
         assert_eq!(parsed.img.unwrap().width, Some(100));
