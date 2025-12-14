@@ -1,30 +1,31 @@
 #version 450
 
 // Per-instance attributes (binding 0, per instance)
-layout(location = 0) in vec3 pos;      // top-left corner position
-layout(location = 1) in vec2 size;     // width and height
-layout(location = 2) in vec4 color;    // solid color
+layout(location = 0) in ivec2 pos;
+layout(location = 1) in ivec2 size;
+layout(location = 2) in float d;
 
-layout(location = 0) out vec4 fragColor;
-layout(location = 1) out vec2 texCoord;
+layout(location = 0) out vec2 texCoord;
 
 layout(binding = 0) uniform UniformData {
-    int data[4];
+    ivec2 aspect;
 } uniformData;
 
 // 4 vertices per instance: top-left, top-right, bottom-left, bottom-right
-const vec2 vertices[4] = vec2[4](
-    vec2(0.0, 0.0),  // top-left
-    vec2(1.0, 0.0),  // top-right
-    vec2(0.0, 1.0),  // bottom-left
-    vec2(1.0, 1.0)   // bottom-right
+const ivec2 vertices[4] = ivec2[4](
+    ivec2(0, 0),  // top-left
+    ivec2(1, 0),  // top-right
+    ivec2(0, 1),  // bottom-left
+    ivec2(1, 1)   // bottom-right
 );
 
 void main() {
-    vec2 vertexOffset = vertices[gl_VertexIndex];
-    vec3 vertexPos = pos + vec3(vertexOffset * size, 0.0);
+    ivec2 vertexOffset = vertices[gl_VertexIndex];
+    ivec2 vertexPos = pos + ivec2(vertexOffset * size);
 
-    gl_Position = vec4(vertexPos, 1.0);
-    fragColor = color;
+    vec2 normalized = vec2(vertexPos) / vec2(uniformData.aspect);
+    vec2 ndc = normalized * 2.0 - 1.0;
+
+    gl_Position = vec4(ndc, d, 1.0);
     texCoord = vertexOffset;
 }

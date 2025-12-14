@@ -14,12 +14,13 @@ use rand::Rng;
 use sparkles::range_event_start;
 use swash::FontRef;
 use swash::scale::{Render, ScaleContext, Source, StrikeWith};
+use swash::zeno::Style;
 use render_macro::define_layout;
 use vulkan_lib::{descriptor_set, use_shader, AttachmentDescription, AttachmentLoadOp, AttachmentStoreOp, BufferCopy, BufferImageCopy, BufferUsageFlags, ClearColorValue, ClearDepthStencilValue, ClearValue, DoubleBuffered, Extent3D, Filter, Format, ImageLayout, ImageSubresourceLayers, ImageUsageFlags, Offset3D, PipelineStageFlags, SampleCountFlags, SamplerCreateInfo, VulkanRenderer};
 use vulkan_lib::runtime::resources::AttachmentsDescription;
 use vulkan_lib::runtime::resources::images::ImageResourceHandle;
 use vulkan_lib::runtime::resources::pipeline::GraphicsPipelineDesc;
-use vulkan_lib::shaders::layout::types::{int, vec2, vec3, vec4};
+use vulkan_lib::shaders::layout::types::{int, vec2, vec3, vec4, ivec2};
 use crate::resources::get_resource;
 
 pub enum RenderMessage {
@@ -36,20 +37,21 @@ pub struct RenderTask {
     swapchain_image_handles: SmallVec<[ImageResourceHandle; 3]>,
     swapchain_recreated: bool,
     last_print: Instant,
+    extent: [i32; 2],
 }
 
 define_layout! {
     pub struct SolidAttributes {
-        pub pos: vec3<0>,
-        pub size: vec2<0>,
-        pub color: vec4<0>,
+        pub pos: ivec2<0>,
+        pub size: ivec2<0>,
+        pub d: float<0>,
     }
 }
 
 // uniforms
 define_layout! {
-    pub struct Color {
-        pub color: vec4<0>,
+    pub struct Global {
+        pub aspect: ivec2<0>,
     }
 }
 
@@ -57,11 +59,9 @@ define_layout! {
 descriptor_set! {
     pub struct GlobalDescriptorSet {
         #[vert]
-        0 -> UniformBuffer,
-        // #[frag]
-        // 1 -> UniformBuffer,
+        0 -> UniformBuffer, // global UB
         #[frag]
-        2 -> CombinedImageSampler,
+        1 -> CombinedImageSampler,
     }
 }
 
@@ -69,9 +69,9 @@ descriptor_set! {
 impl Default for SolidAttributes {
     fn default() -> Self {
         Self {
-            color: [1.0, 1.0, 1.0, 1.0].into(),
-            pos: [0.0, 0.0, 0.0].into(),
-            size: [0.5, 0.5].into(),
+            pos: [0, 0].into(),
+            d: 0.0.into(),
+            size: [0, 0].into(),
         }
     }
 }
@@ -90,6 +90,7 @@ impl RenderTask {
             swapchain_image_handles,
             swapchain_recreated: false,
             last_print: Instant::now(),
+            extent: [1, 1],
         }, tx, render_finished, resize_finished)
     }
 
@@ -172,7 +173,7 @@ impl RenderTask {
 
             let mut context = ScaleContext::new();
             let mut scaler = context.builder(font)
-                .size(90.)
+                .size(10.)
                 .build();
             let mut font_rnd = Render::new(&[
                 // Color outline with the first palette
@@ -183,12 +184,12 @@ impl RenderTask {
                 Source::Outline,
             ]);
             let glyph = font.charmap().map('ы');
-            let img = font_rnd.format(swash::zeno::Format::Subpixel)
+            let img = font_rnd.format(swash::zeno::Format::Alpha)
                 .render(&mut scaler, glyph).unwrap();
 
             info!("img placement: {:?}", img.placement);
 
-            let texture = self.vulkan_renderer.new_image(Format::R8G8B8A8_UNORM, ImageUsageFlags::SAMPLED | ImageUsageFlags::TRANSFER_DST, SampleCountFlags::TYPE_1, img.placement.width, img.placement.height);
+            let texture = self.vulkan_renderer.new_image(Format::R8_UNORM, ImageUsageFlags::SAMPLED | ImageUsageFlags::TRANSFER_DST, SampleCountFlags::TYPE_1, img.placement.width, img.placement.height);
 
             // write to staging
             let mut staging_texture_buffer = self.vulkan_renderer.new_host_buffer(img.data.len() as u64);
@@ -219,10 +220,22 @@ impl RenderTask {
                 |ds, renderer| {
                     let buffer = renderer.new_device_buffer(BufferUsageFlags::UNIFORM_BUFFER, 16);
                     ds.bind_buffer(0, buffer.handle_static());
-                    ds.bind_image_and_sampler(2, texture.handle(), sampler.handle());
+                    ds.bind_image_and_sampler(1, texture.handle(), sampler.handle());
                     buffer
                 },
             );
+            let mut global_staging = self.vulkan_renderer.new_host_buffer(16);
+
+            // fill global ds
+            let mut global = Global {
+                aspect: [800, 600].into(),
+            };
+            global_staging.map_write(0, global.as_bytes());
+            self.vulkan_renderer.record_device_commands(None, |ctx| {
+                ctx.copy_buffer(global_staging.handle(), global_ds.current_data().handle_static(), smallvec![BufferCopy::default().size(16)]);
+                global_ds.next_frame();
+                ctx.copy_buffer(global_staging.handle(), global_ds.current_data().handle_static(), smallvec![BufferCopy::default().size(16)])
+            });
 
             loop {
                 let msg = self.rx.recv();
@@ -239,10 +252,6 @@ impl RenderTask {
                                 float32: [bg_color[2], bg_color[1], bg_color[0], 1.0],
                             };
 
-                            if self.swapchain_recreated {
-                                self.swapchain_recreated = false;
-                            }
-
                             let g = range_event_start!("Wait previous submission");
                             self.vulkan_renderer.wait_prev_submission(1);
                             drop(g);
@@ -253,12 +262,15 @@ impl RenderTask {
                                 };
 
                                 *square = SolidAttributes {
-                                    pos: [-1.0, -1.0, 0.0].into(),
-                                    size: [2.0, 2.0].into(),
-                                    color: [1.0, 1.0, 1.0, 1.0].into(),
+                                    pos: [0, 0].into(),
+                                    size: [img.placement.width as i32, img.placement.height as i32].into(),
+                                    d: 0.5.into(),
                                 };
                             });
-
+                            if self.swapchain_recreated {
+                                global.aspect = self.extent.into();
+                                global_staging.map_write(0, global.as_bytes());
+                            }
 
                             // Acquire next swapchain image
                             let g = range_event_start!("Acquire next image");
@@ -294,6 +306,11 @@ impl RenderTask {
 
 
                             let present_wait_ref = self.vulkan_renderer.record_device_commands_signal(Some(acquire_wait_ref.with_stages(PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)), |ctx| {
+                                if self.swapchain_recreated {
+                                    ctx.copy_buffer(global_staging.handle(), global_ds.current_data().handle_static(), smallvec![BufferCopy::default().size(16)]);
+                                    global_ds.next_frame();
+                                    ctx.copy_buffer(global_staging.handle(), global_ds.current_data().handle_static(), smallvec![BufferCopy::default().size(16)])
+                                }
                                 ctx.copy_buffer(staging_buffers.current().handle(), vertex_buffer.current().handle_static(), smallvec![region]);
                                 ctx.render_pass(render_pass.handle(), image_index, clear_values, |ctx| {
                                     ctx.bind_pipeline(pipeline.handle());
@@ -311,6 +328,11 @@ impl RenderTask {
                             }
                         }
 
+
+                        if self.swapchain_recreated {
+                            self.swapchain_recreated = false;
+                        }
+
                         global_ds.next_frame();
                         vertex_buffer.next_frame();
                         staging_buffers.next_frame();
@@ -322,6 +344,7 @@ impl RenderTask {
                         self.swapchain_image_handles = self.vulkan_renderer.swapchain_images();
                         self.swapchain_recreated = true;
                         self.resize_finished.store(true, Ordering::Release);
+                        self.extent = [width as i32, height as i32];
                     }
                     RenderMessage::Exit => {
                         info!("Render thread exiting");

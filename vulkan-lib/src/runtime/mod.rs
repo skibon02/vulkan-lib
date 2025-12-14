@@ -931,9 +931,15 @@ impl<'a, R> DoubleBufferedDescriptorSets<'a, R> {
     pub fn current(&self) -> &DescriptorSet<'a> {
         &self.sets[self.current]
     }
+    pub fn current_data(&self) -> &R {
+        &self.resources[self.current]
+    }
 
     pub fn next_frame(&mut self) {
         self.current = (self.current + 1) % 2;
+    }
+    pub fn iter(&mut self) -> impl Iterator<Item=&R> {
+        self.resources.iter()
     }
 }
 
