@@ -1,6 +1,7 @@
 use std::cmp::max;
 use std::collections::HashMap;
 use std::sync::Arc;
+use log::{error, warn};
 use crate::layout::{AttributeValue, AttributeValues, Element, ElementKind, ElementNode, ElementNodeRepr, Lu, ParsedAttributes};
 
 #[derive(Default)]
@@ -60,16 +61,9 @@ pub struct FontInfo {
     default_line_height: f32,
 }
 
-#[derive(Copy, Clone)]
-pub struct SymbolInfo {
-    line: usize,
-    
-}
-
 #[derive(Clone)]
 pub struct TextInfo {
     value: Arc<str>,
-    symbols: Vec<SymbolInfo>
 }
 
 impl LayoutCalculator {
@@ -117,6 +111,18 @@ impl LayoutCalculator {
         self.elements[element_id as usize].apply(attr);
     }
 
+    fn calc_text_layout(&self, i: u32) -> (Lu, Lu) {
+        let el = &self.elements[i as usize];
+        if let Element::Text(txt)  = &el.element {
+            let oneline = txt.oneline;
+            let max_symbols = txt.symbols_limit;
+            let font_size = txt.font_size;
+
+        }
+
+        error!("calc_text_layout called on non-text element");
+        (0, 0)
+    }
 
     fn process_child_p1(&mut self, child_i: usize, parents: &[usize]) {
         let el = &self.elements[child_i];
@@ -170,13 +176,23 @@ impl LayoutCalculator {
                 if !oneline && !hide_overflow {
                     calc.self_dep = SelfDepKind::HeightFromWidth;
                 }
-                else if oneline && !hide_overflow {
-                }
                 else if !oneline && hide_overflow {
-
+                    calc.min_width = general_attrs.min_width;
+                    if general_attrs.nostretch_x {
+                        calc.width = Some(calc.min_width);
+                    }
+                    calc.min_height = general_attrs.min_height;
+                    if general_attrs.nostretch_y {
+                        calc.height = Some(calc.min_height);
+                    }
                 }
-                else { // oneline && hide_overflow
+                else { // if oneline
+                    if hide_overflow {
 
+                    }
+                    else {
+                        calc.min_width = general_attrs.min_width;
+                    }
                 }
             }
             _ => {

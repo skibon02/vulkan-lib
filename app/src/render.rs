@@ -20,6 +20,7 @@ use vulkan_lib::runtime::resources::AttachmentsDescription;
 use vulkan_lib::runtime::resources::images::ImageResourceHandle;
 use vulkan_lib::runtime::resources::pipeline::GraphicsPipelineDesc;
 use vulkan_lib::shaders::layout::types::{int, vec2, vec3, vec4};
+use crate::resources::get_resource;
 
 pub enum RenderMessage {
     Redraw { bg_color: [f32; 3] },
@@ -164,7 +165,7 @@ impl RenderTask {
             let pipeline = self.vulkan_renderer.new_pipeline(render_pass.handle(), pipeline_desc);
 
             // load font
-            let font_data = std::fs::read(String::from("Ubuntu-Regular.ttf")).unwrap();
+            let font_data = get_resource("fonts/Ubuntu-Regular.ttf".into()).unwrap();
             let font = FontRef::from_index(&font_data, 0).unwrap();
 
             println!("attributes: {}", font.attributes());

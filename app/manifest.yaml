@@ -9,4 +9,4 @@ android:
   runtime_libs:
     - "android/lib"
   assets:
-    - "resources"
+    - "fonts"
