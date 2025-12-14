@@ -97,8 +97,8 @@ pub fn generate_parsed_attributes_impl(_input: TokenStream) -> TokenStream {
             pub self_child: Option<ChildAttributes>,
         }
 
-        impl<const N: usize> From<smallvec::SmallVec<[AttributeValue; N]>> for ParsedAttributes {
-            fn from(values: smallvec::SmallVec<[AttributeValue; N]>) -> Self {
+        impl<A: smallvec::Array<Item = AttributeValue>> From<smallvec::SmallVec<A>> for ParsedAttributes {
+            fn from(values: smallvec::SmallVec<A>) -> Self {
                 let mut result = Self::default();
 
                 for value in values {
