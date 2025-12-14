@@ -11,10 +11,9 @@ use std::thread::JoinHandle;
 use std::time::Instant;
 use log::{error, info, warn};
 use rand::Rng;
-use rand::rngs::SmallRng;
-use rand::SeedableRng;
-use rayon::prelude::*;
 use sparkles::range_event_start;
+use swash::FontRef;
+use swash::scale::{Render, ScaleContext, Source, StrikeWith};
 use render_macro::define_layout;
 use vulkan_lib::{descriptor_set, use_shader, AttachmentDescription, AttachmentLoadOp, AttachmentStoreOp, BufferCopy, BufferImageCopy, BufferUsageFlags, ClearColorValue, ClearDepthStencilValue, ClearValue, DoubleBuffered, Extent3D, Filter, Format, ImageLayout, ImageSubresourceLayers, ImageUsageFlags, Offset3D, PipelineStageFlags, SampleCountFlags, SamplerCreateInfo, VulkanRenderer};
 use vulkan_lib::runtime::resources::AttachmentsDescription;
@@ -97,7 +96,7 @@ impl RenderTask {
         thread::Builder::new().name("Render".into()).spawn(move || {
             info!("Render thread spawned!");
 
-            const NUM_INSTANCES: u32 = 500_000;
+            const NUM_INSTANCES: u32 = 1;
             let bytes_per_instance = SolidAttributes::SIZE as u64;
             let total_bytes = bytes_per_instance * NUM_INSTANCES as u64;
             let mut staging_buffers = DoubleBuffered::new(|| {
@@ -164,20 +163,36 @@ impl RenderTask {
             let pipeline_desc = GraphicsPipelineDesc::new(use_shader!("solid"), attributes, smallvec![GlobalDescriptorSet::bindings()]);
             let pipeline = self.vulkan_renderer.new_pipeline(render_pass.handle(), pipeline_desc);
 
-            let texture = self.vulkan_renderer.new_image(Format::R8G8B8A8_UNORM, ImageUsageFlags::SAMPLED | ImageUsageFlags::TRANSFER_DST, SampleCountFlags::TYPE_1, 16, 16);
-            // prepare random pixels data
-            let mut pixel_data = vec![0u8; 16 * 16 * 4];
-            let mut rng = rand::rng();
-            for i in 0..(16 * 16) {
-                pixel_data[i * 4 + 0] = (rng.random_range(0..=255) as u8);
-                pixel_data[i * 4 + 1] = (rng.random_range(0..=255) as u8);
-                pixel_data[i * 4 + 2] = (rng.random_range(0..=255) as u8);
-                pixel_data[i * 4 + 3] = 255u8;
-            }
+            // load font
+            let font_data = std::fs::read(String::from("Ubuntu-Regular.ttf")).unwrap();
+            let font = FontRef::from_index(&font_data, 0).unwrap();
+
+            println!("attributes: {}", font.attributes());
+
+            let mut context = ScaleContext::new();
+            let mut scaler = context.builder(font)
+                .size(90.)
+                .build();
+            let mut font_rnd = Render::new(&[
+                // Color outline with the first palette
+                Source::ColorOutline(0),
+                // Color bitmap with best fit selection mode
+                Source::ColorBitmap(StrikeWith::BestFit),
+                // Standard scalable outline
+                Source::Outline,
+            ]);
+            let glyph = font.charmap().map('ы');
+            let img = font_rnd.format(swash::zeno::Format::Subpixel)
+                .render(&mut scaler, glyph).unwrap();
+
+            info!("img placement: {:?}", img.placement);
+
+            let texture = self.vulkan_renderer.new_image(Format::R8G8B8A8_UNORM, ImageUsageFlags::SAMPLED | ImageUsageFlags::TRANSFER_DST, SampleCountFlags::TYPE_1, img.placement.width, img.placement.height);
+
             // write to staging
-            let mut staging_texture_buffer = self.vulkan_renderer.new_host_buffer((16 * 16 * 4) as u64);
-            staging_texture_buffer.map_update(0..(16 * 16 * 4) as u64, |data| {
-                data[..].copy_from_slice(&pixel_data);
+            let mut staging_texture_buffer = self.vulkan_renderer.new_host_buffer(img.data.len() as u64);
+            staging_texture_buffer.map_update(0..img.data.len() as u64, |data| {
+                data[..].copy_from_slice(&img.data);
             });
             // copy to device local image
             self.vulkan_renderer.record_device_commands(None, |ctx| {
@@ -186,7 +201,7 @@ impl RenderTask {
                     texture.handle(),
                     smallvec![
                         BufferImageCopy::default()
-                            .image_extent(Extent3D::default().width(16).height(16).depth(1))
+                            .image_extent(Extent3D::default().width(img.placement.width).height(img.placement.height).depth(1))
                             .image_subresource(
                                 ImageSubresourceLayers::default()
                                     .aspect_mask(vulkan_lib::ImageAspectFlags::COLOR)
@@ -231,55 +246,17 @@ impl RenderTask {
                             self.vulkan_renderer.wait_prev_submission(1);
                             drop(g);
 
-                            let g = range_event_start!("Generate random values");
-
-                            let gen_start = Instant::now();
-                            const DISCRETE_STEPS: u32 = 1024;
-                            let inv_steps = 1.0 / DISCRETE_STEPS as f32;
-                            let scale_to_range = 2.0 / DISCRETE_STEPS as f32;
-
-                            staging_buffers.current_mut().map_update(0..bytes_per_instance * NUM_INSTANCES as u64, |data| {
-                                let data_slice = unsafe {
-                                    std::slice::from_raw_parts_mut(
-                                        data.as_mut_ptr() as *mut SolidAttributes,
-                                        NUM_INSTANCES as usize
-                                    )
+                            staging_buffers.current_mut().map_update(0..bytes_per_instance, |data| {
+                                let square = unsafe {
+                                    &mut *(data.as_mut_ptr() as *mut SolidAttributes)
                                 };
 
-                                data_slice.par_iter_mut().enumerate().for_each_init(
-                                    || SmallRng::seed_from_u64(rand::random()),
-                                    |rng, (i, rect)| {
-                                        let x1_i: u32 = rng.random_range(0..DISCRETE_STEPS);
-                                        let x2_i: u32 = rng.random_range(0..DISCRETE_STEPS);
-                                        let y1_i: u32 = rng.random_range(0..DISCRETE_STEPS);
-                                        let y2_i: u32 = rng.random_range(0..DISCRETE_STEPS);
-
-                                        let x1 = x1_i as f32 * scale_to_range - 1.0;
-                                        let x2 = x2_i as f32 * scale_to_range - 1.0;
-                                        let y1 = y1_i as f32 * scale_to_range - 1.0;
-                                        let y2 = y2_i as f32 * scale_to_range - 1.0;
-
-                                        let pos_x = x1.min(x2);
-                                        let pos_y = y1.min(y2);
-                                        let random_depth = i as f32 / NUM_INSTANCES as f32;
-                                        let width = (x2 - x1).abs();
-                                        let height = (y2 - y1).abs();
-
-                                        let r = rng.random_range(0..DISCRETE_STEPS) as f32 * inv_steps;
-                                        let g = rng.random_range(0..DISCRETE_STEPS) as f32 * inv_steps;
-                                        let b = rng.random_range(0..DISCRETE_STEPS) as f32 * inv_steps;
-
-                                        *rect = SolidAttributes {
-                                            pos: [pos_x, pos_y, random_depth].into(),
-                                            size: [width, height].into(),
-                                            color: [r, g, b, 1.0].into(),
-                                        };
-                                    }
-                                );
+                                *square = SolidAttributes {
+                                    pos: [-1.0, -1.0, 0.0].into(),
+                                    size: [2.0, 2.0].into(),
+                                    color: [1.0, 1.0, 1.0, 1.0].into(),
+                                };
                             });
-                            let gen_elapsed = gen_start.elapsed();
-                            // info!("Generate and write to buffer took: {:.2}ms", gen_elapsed.as_secs_f64() * 1000.0);
-                            drop(g);
 
 
                             // Acquire next swapchain image
