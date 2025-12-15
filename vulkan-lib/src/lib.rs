@@ -27,7 +27,7 @@ pub use vk::ClearColorValue;
 pub use vk::SampleCountFlags;
 pub use vk::AttachmentLoadOp;
 pub use vk::{AttachmentStoreOp, AttachmentDescription, Format, DescriptorType, ShaderStageFlags, ClearValue, ClearDepthStencilValue, SamplerCreateInfo, ImageUsageFlags,
-    Filter};
+    Filter, SamplerMipmapMode};
 pub use crate::runtime::{DoubleBufferedDescriptorSets, DoubleBuffered};
 
 pub mod instance;

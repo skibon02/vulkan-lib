@@ -152,7 +152,7 @@ impl App {
                     // convert into primitive elements, fill instance buffer (text -> list of symbols, img/box -> rects)
 
                     let _ = self.render_tx.send(RenderMessage::Redraw {
-                        bg_color: [0.6, 0.2, 0.8],
+                        bg_color: [0.0, 0.0, 0.0],
                     });
 
                     // handle fps

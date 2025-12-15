@@ -1,3 +1,4 @@
+use std::iter::repeat;
 use vulkan_lib::shaders::layout::types::{float, GlslType};
 use vulkan_lib::shaders::layout::LayoutInfo;
 use vulkan_lib::shaders::layout::MemberMeta;
@@ -6,9 +7,10 @@ use vulkan_lib::shaders::layout::types::GlslTypeVariant;
 use smallvec::{smallvec, SmallVec};
 use std::sync::{mpsc, Arc};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::thread;
+use std::{fs, thread};
 use std::thread::JoinHandle;
 use std::time::Instant;
+use image::{ExtendedColorType, ImageEncoder};
 use log::{error, info, warn};
 use rand::Rng;
 use sparkles::range_event_start;
@@ -16,7 +18,7 @@ use swash::FontRef;
 use swash::scale::{Render, ScaleContext, Source, StrikeWith};
 use swash::zeno::Style;
 use render_macro::define_layout;
-use vulkan_lib::{descriptor_set, use_shader, AttachmentDescription, AttachmentLoadOp, AttachmentStoreOp, BufferCopy, BufferImageCopy, BufferUsageFlags, ClearColorValue, ClearDepthStencilValue, ClearValue, DoubleBuffered, Extent3D, Filter, Format, ImageLayout, ImageSubresourceLayers, ImageUsageFlags, Offset3D, PipelineStageFlags, SampleCountFlags, SamplerCreateInfo, VulkanRenderer};
+use vulkan_lib::{descriptor_set, use_shader, AttachmentDescription, AttachmentLoadOp, AttachmentStoreOp, BufferCopy, BufferImageCopy, BufferUsageFlags, ClearColorValue, ClearDepthStencilValue, ClearValue, DoubleBuffered, Extent3D, Filter, Format, ImageLayout, ImageSubresourceLayers, ImageUsageFlags, PipelineStageFlags, SampleCountFlags, SamplerMipmapMode, VulkanRenderer};
 use vulkan_lib::runtime::resources::AttachmentsDescription;
 use vulkan_lib::runtime::resources::images::ImageResourceHandle;
 use vulkan_lib::runtime::resources::pipeline::GraphicsPipelineDesc;
@@ -136,7 +138,9 @@ impl RenderTask {
                 .with_depth_attachment(depth_attachment);
 
             let sampler = self.vulkan_renderer.new_sampler(|i| {
-                i.mag_filter(Filter::NEAREST)
+                i
+                    .min_filter(Filter::NEAREST)
+                    .mag_filter(Filter::NEAREST)
             });
 
             if need_resolve {
@@ -173,23 +177,43 @@ impl RenderTask {
 
             let mut context = ScaleContext::new();
             let mut scaler = context.builder(font)
-                .size(10.)
+                .size(12.0)
                 .build();
             let mut font_rnd = Render::new(&[
                 // Color outline with the first palette
-                Source::ColorOutline(0),
+                // Source::ColorOutline(0),
                 // Color bitmap with best fit selection mode
                 Source::ColorBitmap(StrikeWith::BestFit),
                 // Standard scalable outline
                 Source::Outline,
             ]);
             let glyph = font.charmap().map('ы');
-            let img = font_rnd.format(swash::zeno::Format::Alpha)
+            let img = font_rnd.format(swash::zeno::Format::Subpixel)
                 .render(&mut scaler, glyph).unwrap();
+
+            // let img_file = fs::File::create("output.png").unwrap();
+            // let encoder = image::codecs::png::PngEncoder::new(img_file);
+            // // prepare bigger image
+            // let mut big_img = Vec::with_capacity(img.data.len() * 9);
+            // for i in img.data.chunks(img.placement.width as usize) {
+            //     for _ in 0..3 {
+            //         for byte in i {
+            //             for _ in 0..9 {
+            //                 big_img.push(*byte);
+            //             }
+            //         }
+            //     }
+            // }
+            // encoder.write_image(
+            //     &big_img,
+            //     img.placement.width * 3,
+            //     img.placement.height * 3,
+            //     ExtendedColorType::Rgb8,
+            // ).unwrap();
 
             info!("img placement: {:?}", img.placement);
 
-            let texture = self.vulkan_renderer.new_image(Format::R8_UNORM, ImageUsageFlags::SAMPLED | ImageUsageFlags::TRANSFER_DST, SampleCountFlags::TYPE_1, img.placement.width, img.placement.height);
+            let texture = self.vulkan_renderer.new_image(Format::R8G8B8A8_UNORM, ImageUsageFlags::SAMPLED | ImageUsageFlags::TRANSFER_DST, SampleCountFlags::TYPE_1, img.placement.width, img.placement.height);
 
             // write to staging
             let mut staging_texture_buffer = self.vulkan_renderer.new_host_buffer(img.data.len() as u64);
@@ -262,7 +286,7 @@ impl RenderTask {
                                 };
 
                                 *square = SolidAttributes {
-                                    pos: [0, 0].into(),
+                                    pos: [100, 100].into(),
                                     size: [img.placement.width as i32, img.placement.height as i32].into(),
                                     d: 0.5.into(),
                                 };

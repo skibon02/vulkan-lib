@@ -7,6 +7,7 @@ layout(location = 0) out vec4 outColor;
 layout(binding = 1) uniform sampler2D tex;
 
 void main() {
-    float v = texture(tex, texCoord).r;
-    outColor = vec4(1.0, 1.0, 1.0, v);
+    vec4 v = texture(tex, texCoord);
+    v.a = 1.0;
+    outColor = v;
 }
