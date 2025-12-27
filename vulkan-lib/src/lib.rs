@@ -10,7 +10,6 @@ use crate::wrappers::capabilities_checker::CapabilitiesChecker;
 use crate::wrappers::debug_report::VkDebugReport;
 use crate::wrappers::device::VkDeviceRef;
 use crate::wrappers::surface::{VkSurface, VkSurfaceRef};
-use crate::runtime::RuntimeState;
 use crate::extensions::calibrated_timestamps::CalibratedTimestamps;
 use crate::wrappers::timestamp_pool::TimestampPool;
 
@@ -29,14 +28,12 @@ pub use vk::AttachmentLoadOp;
 pub use vk::{AttachmentStoreOp, AttachmentDescription, Format, DescriptorType, ShaderStageFlags, ClearValue, ClearDepthStencilValue, SamplerCreateInfo, ImageUsageFlags,
     Filter, SamplerMipmapMode};
 use crate::queue::GraphicsQueue;
-pub use crate::runtime::{DoubleBufferedDescriptorSets, DoubleBuffered};
 
 pub mod instance;
 mod wrappers;
 mod swapchain_wrapper;
 pub mod util;
 pub mod shaders;
-pub mod runtime;
 mod extensions;
 pub mod queue;
 
@@ -226,14 +223,8 @@ impl VulkanInstance {
             None,
         )?;
         
-        // let graphics_queue = GraphicsQueue::new(
-        //     queue,
-        //     queue_family_index,
-        // );
-        //
-        // res.runtime_state.update_swapchain_image_handles();
-
         Ok((res, GraphicsQueue::new(
+            device,
             queue,
             swapchain_wrapper,
         )))

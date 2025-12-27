@@ -49,12 +49,12 @@ impl DescriptorSetResource {
     }
 
     pub fn try_bind_buffer(&mut self, binding_index: u32, buffer: Arc<BufferResource>) {
+        let mut bindings = self.bindings.lock().unwrap();
         if self.updates_locked.load(Ordering::Relaxed) {
             warn!("Attempted to bind buffer to descriptor set while updates are locked!");
             return;
         }
 
-        let mut bindings = self.bindings.lock().unwrap();
         if let Some(binding) = bindings.iter_mut().find(|b| b.binding_index == binding_index) {
             binding.resource = Some(BoundResource::Buffer(buffer));
             binding.resource_updated = true;
@@ -65,12 +65,12 @@ impl DescriptorSetResource {
     }
 
     pub fn try_bind_image(&mut self, binding_index: u32, image: Arc<ImageResource>) {
+        let mut bindings = self.bindings.lock().unwrap();
         if self.updates_locked.load(Ordering::Relaxed) {
             warn!("Attempted to bind buffer to descriptor set while updates are locked!");
             return;
         }
 
-        let mut bindings = self.bindings.lock().unwrap();
         if let Some(binding) = bindings.iter_mut().find(|b| b.binding_index == binding_index) {
             binding.resource = Some(BoundResource::Image(image));
             binding.resource_updated = true;
@@ -81,12 +81,12 @@ impl DescriptorSetResource {
     }
 
     pub fn try_bind_image_sampler(&mut self, binding_index: u32, image: Arc<ImageResource>, sampler: Arc<SamplerResource>) {
+        let mut bindings = self.bindings.lock().unwrap();
         if self.updates_locked.load(Ordering::Relaxed) {
             warn!("Attempted to bind buffer to descriptor set while updates are locked!");
             return;
         }
 
-        let mut bindings = self.bindings.lock().unwrap();
         if let Some(binding) = bindings.iter_mut().find(|b| b.binding_index == binding_index) {
             binding.resource = Some(BoundResource::CombinedImageSampler { image, sampler });
             binding.resource_updated = true;
@@ -108,8 +108,9 @@ impl DescriptorSetResource {
     pub(crate) fn update_descriptor_set(&mut self, device: &VkDeviceRef) {
         let mut buffer_bindings: SmallVec<[_; 4]> = smallvec![];
         let mut image_bindings: SmallVec<[_; 4]> = smallvec![];
-        for binding in self.bindings {
-            if let Some(resource) = binding.resource {
+        let mut bindings = self.bindings.lock().unwrap();
+        for binding in bindings.iter_mut() {
+            if let Some(resource) = &binding.resource {
                 match resource {
                     BoundResource::Buffer(buffer) => {
                         buffer_bindings.push((binding.binding_index, buffer.buffer));
@@ -120,7 +121,7 @@ impl DescriptorSetResource {
                     BoundResource::CombinedImageSampler {
                         image, sampler
                     } => {
-                        image_bindings.push((binding.binding_index, image.image_view, Some(sampler)))
+                        image_bindings.push((binding.binding_index, image.image_view, Some(sampler.clone())))
                     }
                 }
             }

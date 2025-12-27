@@ -5,15 +5,18 @@ use ash::vk::{ColorComponentFlags, CompareOp, CullModeFlags, DescriptorSetLayout
 use log::error;
 use smallvec::SmallVec;
 use sparkles::range_event_start;
+use crate::queue::OptionSeqNumShared;
 use crate::resources::render_pass::RenderPassResource;
 use crate::shaders::DescriptorSetLayoutBindingDesc;
 use crate::shaders::layout::MemberMeta;
 use crate::wrappers::device::VkDeviceRef;
 
 pub struct GraphicsPipelineResource {
-    pipeline: Pipeline, // must not be used in command buffer during destruction (lazy destroy)
-    pipeline_layout: PipelineLayout, // vkCmdBindDescriptorSets must not be recorded to any command buffer during destruction (lazy destroy)
+    pub(crate) pipeline: Pipeline, // must not be used in command buffer during destruction (lazy destroy)
+    pub(crate) pipeline_layout: PipelineLayout, // vkCmdBindDescriptorSets must not be recorded to any command buffer during destruction (lazy destroy)
     pipeline_cache: PipelineCache,
+
+    pub(crate) submission_usage: OptionSeqNumShared,
     
     dropped: bool,
 }
@@ -124,6 +127,7 @@ impl GraphicsPipelineResource {
             pipeline,
             pipeline_layout,
             pipeline_cache,
+            submission_usage: OptionSeqNumShared::default(),
             
             dropped: false,
         }
@@ -209,7 +213,7 @@ impl Drop for GraphicsPipelineResource {
     }
 }
 
-fn destroy_pipeline(device: &VkDeviceRef, mut pipeline: GraphicsPipelineResource) {
+pub(crate) fn destroy_pipeline(device: &VkDeviceRef, mut pipeline: GraphicsPipelineResource) {
     if !pipeline.dropped {
         unsafe {
             device.destroy_pipeline(pipeline.pipeline, None);

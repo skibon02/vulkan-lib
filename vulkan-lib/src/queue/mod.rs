@@ -22,11 +22,11 @@ use strum::IntoDiscriminant;
 use crate::extensions::calibrated_timestamps::CalibratedTimestamps;
 use crate::resources::image::ImageResource;
 use crate::resources::render_pass::RenderPassResource;
-use crate::runtime::{WaitSemaphoreRef, WaitSemaphoreStagesRef};
 use command_buffers::CommandBufferManager;
 use shared::SharedState;
+use crate::queue::queue_local::QueueLocalToken;
 use crate::queue::recording::{DeviceCommand, DrawCommand, RecordContext, SpecificResourceUsage};
-use crate::queue::semaphores::{SemaphoreManager, WaitedOperation};
+use crate::queue::semaphores::{SemaphoreManager, WaitSemaphoreRef, WaitSemaphoreStagesRef, WaitedOperation};
 use crate::resources::{LastResourceUsage, RequiredSync, ResourceUsage};
 use crate::swapchain_wrapper::SwapchainWrapper;
 use crate::wrappers::device::VkDeviceRef;
@@ -40,6 +40,7 @@ pub struct GraphicsQueue {
     surface: VkSurfaceRef,
     swapchain_wrapper: SwapchainWrapper,
     framebuffers: HashMap<vk::RenderPass, (Arc<RenderPassResource>, SmallVec<[(Framebuffer, SmallVec<[ImageResource; 5]>); 5]>)>,
+    token: QueueLocalToken,
 
     shared_state: shared::SharedState,
     semaphore_manager: SemaphoreManager,
@@ -83,6 +84,7 @@ impl GraphicsQueue {
             surface,
             swapchain_wrapper,
             framebuffers: HashMap::new(),
+            token: QueueLocalToken::try_new().unwrap(),
 
             shared_state,
             semaphore_manager: SemaphoreManager::new(device.clone()),
@@ -95,34 +97,6 @@ impl GraphicsQueue {
         }
     }
 
-    pub fn create_render_pass(&mut self, device: VkDeviceRef, shared: SharedState,
-                              swapchain_images: SmallVec<[ImageResourceHandle; 3]>, mut attachments_description: AttachmentsDescription) -> RenderPassResource {
-        // Create images for framebuffer and framebuffers
-        let swapchain_extent = vk::Extent2D {
-            width: swapchain_images[0].width,
-            height: swapchain_images[0].height,
-        };
-
-        // Create images and image views for attachments (except swapchain image)
-        let framebuffers = self.create_framebuffers(
-            device.clone(),
-            &swapchain_images,
-            Extent3D {
-                width: swapchain_extent.width,
-                height: swapchain_extent.height,
-                depth: 1,
-            },
-            shared.clone(),
-        );
-
-        let render_pass_inner = RenderPassInner {
-            render_pass,
-            last_used_in: 0,
-        };
-        let key = self.render_passes.insert(render_pass_inner);
-
-        RenderPassResource::new(key, shared)
-    }
     fn destroy_render_pass_resources(&mut self, render_pass: vk::RenderPass) {
         let framebuffers = self.framebuffers.remove(&render_pass);
         if let Some((rp,framebuffers)) = framebuffers {
@@ -167,22 +141,6 @@ impl GraphicsQueue {
 
 
     // Swapchain methods
-    pub(crate) fn update_swapchain_image_handles(&mut self) {
-        let extent = self.swapchain_wrapper.get_extent();
-        if let Some(old_handles) = self.swapchain_wrapper.try_get_images() {
-            for image in old_handles {
-                self.resource_storage.destroy_image(image);
-            }
-        }
-        let format = self.swapchain_wrapper.get_surface_format();
-        let swapchain_images = self.swapchain_wrapper.swapchain_images.clone();
-        let images = swapchain_images.iter().map(|i| {
-            let image = self.resource_storage.add_image(*i, format, extent.width, extent.height);
-            image
-        }).collect::<Vec<_>>();
-        self.swapchain_wrapper.register_image_handles(&images);
-    }
-
     pub fn recreate_resize(&mut self, new_extent: (u32, u32)) {
         let g = range_event_start!("[Vulkan] Recreate swapchain");
         let new_extent = Extent2D {
@@ -198,36 +156,53 @@ impl GraphicsQueue {
         let active_render_passes = self.resource_storage.render_passes();
         // 1. Destroy swapchain dependent resources (framebuffers)
         for render_pass in &active_render_passes {
-            self.destroy_render_pass_resources(*render_pass, self.shared_state.clone());
+            self.destroy_render_pass_resources(*render_pass);
         }
 
         // 2. Recreate swapchain
         let old_format = self.swapchain_wrapper.get_surface_format();
-        let old_image_handles = self.swapchain_wrapper.get_images();
         unsafe {
             self.swapchain_wrapper
                 .recreate(self.physical_device, new_extent, self.surface.clone())
                 .unwrap()
         };
-        for image_handle in old_image_handles {
-            self.destroy_image(image_handle);
-        }
         let new_format = self.swapchain_wrapper.get_surface_format();
         if new_format != old_format {
             unimplemented!("Swapchain format has changed");
         }
 
-        // 2.1 update image handles
-        self.update_swapchain_image_handles();
-        let new_images = self.swapchain_wrapper.get_images();
 
         // 3. Recreate swapchain_dependent resources (framebuffers)
+        let new_images = self.swapchain_wrapper.get_images();
         let g = range_event_start!("Create framebuffers");
         for render_pass in &active_render_passes {
-            self.resource_storage.recreate_render_pass_resources(*render_pass, self.device.clone(), self.shared_state.clone(), &new_images);
+            self.recreate_render_pass_resources(*render_pass, self.device.clone(), self.shared_state.clone(), &new_images);
         }
     }
 
+    pub fn wait_idle(&mut self) {
+        let g = range_event_start!("[Vulkan] Wait queue idle");
+        unsafe {
+            self.device.queue_wait_idle(self.queue).unwrap();
+        }
+
+        // after wait_idle, all submissions up to last_submission_num are done
+        let last_submitted = self.shared_state.last_submission_num();
+        if last_submitted > 0 {
+            self.shared_state.confirm_all_waited(last_submitted);
+        }
+
+        self.semaphore_manager.on_wait_idle();
+        self.command_buffer_manager.on_wait_idle();
+    }
+
+    pub fn wait_prev_submission(&mut self, prev_sub: usize) -> Option<()> {
+        let last_submission = self.shared_state.last_submission_num();
+        let submission_to_wait = last_submission.checked_sub(prev_sub)?;
+        self.shared_state.wait_submission(submission_to_wait);
+
+        Some(())
+    }
 
     fn handle_add_sync_point(&mut self) {
         if let Some(calibrated_timestamps) = &self.calibrated_timestamps {
@@ -242,15 +217,15 @@ impl GraphicsQueue {
         }
     }
 
-    pub fn record_device_commands<'a, 'b, F>(&'a mut self, wait_ref: Option<WaitSemaphoreStagesRef>, f: F)
+    pub fn record_device_commands<'a, F>(&'a mut self, wait_ref: Option<WaitSemaphoreStagesRef>, f: F)
     where
-        F: FnOnce(&mut RecordContext<'b>) {
+        F: FnOnce(&mut RecordContext) {
         self.record_device_commands_impl(f, wait_ref, None)
     }
 
-    pub fn record_device_commands_signal<'a, 'b, F>(&'a mut self, wait_ref: Option<WaitSemaphoreStagesRef>, f: F) -> WaitSemaphoreRef
+    pub fn record_device_commands_signal<'a, F>(&'a mut self, wait_ref: Option<WaitSemaphoreStagesRef>, f: F) -> WaitSemaphoreRef
     where
-        F: FnOnce(&mut RecordContext<'b>) {
+        F: FnOnce(&mut RecordContext) {
         let (signal_ref, new_wait_ref) = self.semaphore_manager.create_semaphore_pair();
 
         self.record_device_commands_impl(f, wait_ref, Some(signal_ref));
@@ -258,7 +233,7 @@ impl GraphicsQueue {
         new_wait_ref
     }
 
-    fn split_into_barrier_groups<'a>(commands: &'a [DeviceCommand<'a>]) -> Vec<&'a [DeviceCommand<'a>]> {
+    fn split_into_barrier_groups<'a>(commands: &'a [DeviceCommand]) -> Vec<&'a [DeviceCommand]> {
         if commands.is_empty() {
             return vec![];
         }
@@ -317,9 +292,9 @@ impl GraphicsQueue {
         groups
     }
 
-    fn record_device_commands_impl<'a, 'b, F>(&'a mut self, f: F, wait_ref: Option<WaitSemaphoreStagesRef>, signal_ref: Option<semaphores::SignalSemaphoreRef>)
+    fn record_device_commands_impl<'a, F>(&'a mut self, f: F, wait_ref: Option<WaitSemaphoreStagesRef>, signal_ref: Option<semaphores::SignalSemaphoreRef>)
     where
-        F: FnOnce(&mut RecordContext<'b>),
+        F: FnOnce(&mut RecordContext),
     {
         let g = range_event_start!("Record and submit");
         self.handle_add_sync_point();
@@ -343,10 +318,9 @@ impl GraphicsQueue {
             let (sem, sem_waited_operations) = self.semaphore_manager.get_wait_semaphore(wait_sem, Some(submission_num));
 
             for waited_op in &sem_waited_operations {
-                if let WaitedOperation::SwapchainImageAcquired(image_handle) = waited_op {
-                    let image_inner = self.resource_storage.image(image_handle.state_key);
+                if let WaitedOperation::SwapchainImageAcquired(image) = waited_op {
                     // create usage with the same stage flags to create dependency chain with waited semaphore
-                    image_inner.usages = LastResourceUsage::HasWrite {
+                    image.inner.get(&mut self.token).usages = LastResourceUsage::HasWrite {
                         last_write: Some(ResourceUsage::new(None, stage_flags, AccessFlags::empty())),
                         visible_for: AccessFlags::empty(),
                     };
@@ -392,37 +366,34 @@ impl GraphicsQueue {
 
             // 1) accumulate barriers for all commands in the group
             for cmd in group.iter() {
-                for usage in cmd.usages(submission_num, &mut self.resource_storage, self.swapchain_wrapper.get_images()) {
+                for usage in cmd.usages(submission_num, self.swapchain_wrapper.get_images()) {
                     match usage {
                         SpecificResourceUsage::BufferUsage {
                             usage,
-                            handle
+                            handle: buffer
                         } => {
                             // Update host state last_used_in for mappable buffers
-                            if let Some(host_state) = handle.host_state {
+                            if let Some(host_state) = buffer.host_state {
                                 host_state.last_used_in.store(Some(submission_num));
                             }
 
-                            let had_host_writes = handle.host_state.is_some_and(|s| s.has_host_writes.swap(false, Ordering::Relaxed));
-
-                            let buffer_inner = self.resource_storage.buffer(handle.state_key);
+                            let had_host_writes = buffer.host_state.is_some_and(|s| s.has_host_writes.swap(false, Ordering::Relaxed));
 
                             // 1) update state if waited on host
+                            let buffer_inner = buffer.inner.get(&mut self.token);
                             buffer_inner.usages.on_host_waited(last_waited_submission, had_host_writes);
 
                             // 2) Add new usage and get required memory synchronization state
                             let required_sync = buffer_inner.usages.add_usage(usage);
 
-                            let buffer = buffer_inner.buffer;
-
                             // 3) add memory barrier if required
                             if let Some(required_sync) = required_sync {
-                                if buffer_barriers.iter().any(|b| b.buffer == buffer) {
+                                if buffer_barriers.iter().any(|b| b.buffer == buffer.buffer) {
                                     panic!("Missing required pipeline barrier between same buffer usages! Required sync: {:?}", required_sync);
                                 }
 
                                 let barrier = BufferMemoryBarrier::default()
-                                    .buffer(buffer)
+                                    .buffer(buffer.buffer)
                                     .size(WHOLE_SIZE)
                                     .src_access_mask(required_sync.src_access)
                                     .dst_access_mask(required_sync.dst_access);
@@ -435,11 +406,11 @@ impl GraphicsQueue {
                         }
                         SpecificResourceUsage::ImageUsage {
                             usage,
-                            handle,
+                            image,
                             required_layout,
                             image_aspect,
                         } => {
-                            let image_inner = self.resource_storage.image(handle.state_key);
+                            let image_inner = image.inner.get(&mut self.token);
                             let prev_layout = image_inner.layout;
 
                             // 1) update state if waited on host
@@ -449,19 +420,17 @@ impl GraphicsQueue {
                             let need_layout_transition = required_layout.is_some_and(|required_layout| prev_layout == ImageLayout::GENERAL || required_layout != prev_layout);
                             let required_sync = image_inner.usages.add_usage(usage);
 
-                            let image = image_inner.image;
-
                             // 3) add memory barrier if usage changed or layout transition required
                             let need_barrier = required_sync.is_some() || need_layout_transition;
                             if need_barrier {
-                                if image_barriers.iter().any(|b| b.image == image) {
+                                if image_barriers.iter().any(|b| b.image == image.image) {
                                     panic!("Missing required pipeline barrier between same image usages! Usage1: {:?}, Usage2: {:?}", required_sync, usage);
                                 }
 
                                 let required_sync = required_sync.unwrap_or(RequiredSync::default());
 
                                 let mut barrier = ImageMemoryBarrier::default()
-                                    .image(image)
+                                    .image(image.image)
                                     .subresource_range(ImageSubresourceRange::default()
                                         .base_mip_level(0)
                                         .base_array_layer(0)
@@ -502,20 +471,20 @@ impl GraphicsQueue {
                 }
                 if let DeviceCommand::RenderPassEnd {render_pass, framebuffer_index} = cmd {
                     // mark attachments as having a new layout
-                    let attachments_description = self.resource_storage.render_pass(render_pass.0).attachments_description.clone();
+                    let attachments_description = render_pass.attachments_desc();
 
                     let swapchain_image_final_layout = attachments_description.get_swapchain_desc().final_layout;
                     let swapchain_images = self.swapchain_wrapper.get_images();
-                    let swapchain_image_inner = self.resource_storage.image(swapchain_images[*framebuffer_index as usize].state_key);
+                    let swapchain_image_inner = swapchain_images[*framebuffer_index as usize].inner.get(&mut self.token);
                     swapchain_image_inner.layout = swapchain_image_final_layout;
 
                     let mut attachment_i = 0;
                     if let Some(depth_att_desc) = attachments_description.get_depth_attachment_desc() {
                         let depth_image_final_layout = depth_att_desc.final_layout;
 
-                        let image_handle = self.resource_storage.render_pass(render_pass.0).framebuffers[*framebuffer_index as usize].1[attachment_i].handle();
-                        let depth_image = self.resource_storage.image(image_handle.state_key);
-                        depth_image.layout = depth_image_final_layout;
+                        let depth_image = render_pass.attachment(swapchain_images, *framebuffer_index as usize, attachment_i);
+                        let depth_inner = depth_image.inner.get(&mut self.token);
+                        depth_inner.layout = depth_image_final_layout;
 
                         attachment_i += 1;
                     }
@@ -523,15 +492,15 @@ impl GraphicsQueue {
                     if let Some(color_attachment_desc) = attachments_description.get_color_attachment_desc() {
                         let color_attachment_final_layout = color_attachment_desc.final_layout;
 
-                        let image_handle = self.resource_storage.render_pass(render_pass.0).framebuffers[*framebuffer_index as usize].1[attachment_i].handle();
-                        let color_attachment_image = self.resource_storage.image(image_handle.state_key);
-                        color_attachment_image.layout = color_attachment_final_layout;
+                        let color_attachment_image = render_pass.attachment(swapchain_images, *framebuffer_index as usize, attachment_i);
+                        let color_attachment_inner = color_attachment_image.inner.get(&mut self.token);
+                        color_attachment_inner.layout = color_attachment_final_layout;
 
                         attachment_i += 1;
                     }
 
                     // update last_used_in
-                    self.resource_storage.render_pass(render_pass.0).last_used_in = submission_num;
+                    render_pass.submission_usage.store(Some(submission_num));
                 }
             }
 
@@ -568,8 +537,8 @@ impl GraphicsQueue {
                 info!("  Recording command: {:?}", cmd.discriminant());
                 match cmd {
                     DeviceCommand::CopyBuffer { src, dst, regions } => {
-                        let src_buffer = self.resource_storage.buffer(src.state_key).buffer;
-                        let dst_buffer = self.resource_storage.buffer(dst.state_key).buffer;
+                        let src_buffer = src.buffer;
+                        let dst_buffer = dst.buffer;
                         if dst.host_state.is_some() {
                             unimplemented!("Copy buffer to host-accessible buffer is not yet implemented");
                         }
@@ -578,26 +547,24 @@ impl GraphicsQueue {
                         }
                     }
                     DeviceCommand::CopyBufferToImage {src, dst, regions} => {
-                        let src_buffer = self.resource_storage.buffer(src.state_key).buffer;
-                        let dst_image = self.resource_storage.image(dst.state_key);
+                        let src_buffer = src.buffer;
                         unsafe {
-                            self.device.cmd_copy_buffer_to_image(cmd_buffer, src_buffer, dst_image.image, dst_image.layout, &regions);
+                            self.device.cmd_copy_buffer_to_image(cmd_buffer, src_buffer, dst.image, dst.inner.get(&mut self.token).layout, &regions);
                         }
                     }
                     DeviceCommand::FillBuffer {buffer, offset, size, data} => {
-                        let buffer_inner = self.resource_storage.buffer(buffer.state_key);
                         unsafe {
-                            self.device.cmd_fill_buffer(cmd_buffer, buffer_inner.buffer, *offset, *size, *data);
+                            self.device.cmd_fill_buffer(cmd_buffer, buffer.buffer, *offset, *size, *data);
                         }
                     }
                     DeviceCommand::Barrier => {} // not a command in particular
                     DeviceCommand::ImageLayoutTransition {..} => {} // not a command in particular
                     DeviceCommand::ClearColorImage {image, clear_color, image_aspect} => {
-                        let image_inner = self.resource_storage.image(image.state_key);
+                        let image_inner = image.inner.get(&mut self.token);
                         unsafe {
                             self.device.cmd_clear_color_image(
                                 cmd_buffer,
-                                image_inner.image,
+                                image.image,
                                 image_inner.layout,
                                 clear_color,
                                 &[ImageSubresourceRange::default()
@@ -614,7 +581,7 @@ impl GraphicsQueue {
                         depth_value,
                         stencil_value,
                     } => {
-                        let image_inner = self.resource_storage.image(image.state_key);
+                        let image_inner = image.inner.get(&mut self.token);
                         let mut aspect_mask = ImageAspectFlags::empty();
                         if depth_value.is_some() {
                             aspect_mask |= ImageAspectFlags::DEPTH;
@@ -625,7 +592,7 @@ impl GraphicsQueue {
                         unsafe {
                             self.device.cmd_clear_depth_stencil_image(
                                 cmd_buffer,
-                                image_inner.image,
+                                image.image,
                                 image_inner.layout,
                                 &vk::ClearDepthStencilValue {
                                     depth: depth_value.unwrap_or(0.0),
@@ -645,7 +612,6 @@ impl GraphicsQueue {
                         framebuffer_index,
                         clear_values,
                     } => {
-                        let render_pass = self.resource_storage.render_pass(render_pass.0);
                         let info = RenderPassBeginInfo::default()
                             .render_pass(render_pass.render_pass)
                             .framebuffer(render_pass.framebuffers[*framebuffer_index as usize].0)
@@ -670,34 +636,33 @@ impl GraphicsQueue {
                                                    first_vertex,
                                                    first_instance,
                                                    new_vertex_buffer,
-                                                   pipeline_handle,
+                                                   pipeline,
                                                    pipeline_handle_changed,
                                                    new_descriptor_set_bindings,
                                                } ) => {
                         unsafe {
                             if let Some(vert_binding) = new_vertex_buffer {
-                                let buffer = self.resource_storage.buffer(vert_binding.state_key).buffer;
-                                self.device.cmd_bind_vertex_buffers(cmd_buffer, 0, &[buffer], &[0]);
+                                self.device.cmd_bind_vertex_buffers(cmd_buffer, 0, &[vert_binding.buffer], &[0]);
                             }
                             if *pipeline_handle_changed {
-                                let pipeline = self.resource_storage.pipeline(pipeline_handle.key).pipeline;
-                                self.device.cmd_bind_pipeline(cmd_buffer, PipelineBindPoint::GRAPHICS, pipeline);
+                                self.device.cmd_bind_pipeline(cmd_buffer, PipelineBindPoint::GRAPHICS, pipeline.pipeline);
                             }
-                            for (binding, desc_set_handle) in new_descriptor_set_bindings {
+                            for (binding, descriptor_set) in new_descriptor_set_bindings {
                                 // update descriptor set if have new bindings
-                                if desc_set_handle.updates_locked.load(Ordering::Relaxed) {
-                                    self.resource_storage.update_descriptor_set(desc_set_handle.clone());
+                                let mut ds_inner = descriptor_set.bindings.lock().unwrap();
+                                for binding in ds_inner.iter_mut() {
+                                    if binding.resource_updated {
+
+                                    }
                                 }
 
                                 // bind descriptor set
-                                let descriptor_set = self.resource_storage.descriptor_set(desc_set_handle.key);
-                                let pipeline_layout = self.resource_storage.pipeline(pipeline_handle.key).pipeline_layout;
                                 self.device.cmd_bind_descriptor_sets(
                                     cmd_buffer,
                                     PipelineBindPoint::GRAPHICS,
-                                    pipeline_layout,
+                                    pipeline.pipeline_layout,
                                     *binding,
-                                    &[descriptor_set],
+                                    &[descriptor_set.descriptor_set],
                                     &[],
                                 );
                             }
@@ -817,7 +782,7 @@ impl GraphicsQueue {
         let (wait_semaphore, waited_operations) = self.semaphore_manager.get_wait_semaphore(wait_stages_ref, None);
         // ensure swapchain image is prepared and is in PRESENT layout
         let image_handle = self.swapchain_wrapper.get_images()[image_index as usize];
-        let image_inner = self.resource_storage.image(image_handle.state_key);
+        let image_inner = image_handle.inner.get(&mut self.token);
         if image_inner.layout != ImageLayout::GENERAL && image_inner.layout != ImageLayout::PRESENT_SRC_KHR {
             warn!("Image layout for presentable image must be PRESENT or GENERAL!");
         }

@@ -6,9 +6,10 @@ use smallvec::{smallvec, SmallVec};
 use sparkles::range_event_start;
 use crate::queue::OptionSeqNumShared;
 use crate::resources::image::ImageResource;
-use crate::runtime::OptionSeqNumShared;
+use crate::swapchain_wrapper::SwapchainImages;
 use crate::wrappers::device::VkDeviceRef;
 
+#[derive(Clone)]
 pub enum FrameBufferAttachment {
     SwapchainImage(usize),
     Image(Arc<ImageResource>)
@@ -17,7 +18,7 @@ pub struct RenderPassResource {
     pub(crate) render_pass: vk::RenderPass,
     attachments_description: AttachmentsDescription,
     attachments: SmallVec<[SmallVec<[FrameBufferAttachment; 5]>; 5]>,
-    submission_usage: OptionSeqNumShared,
+    pub(crate) submission_usage: OptionSeqNumShared,
 
     dropped: bool,
 }
@@ -99,9 +100,20 @@ impl RenderPassResource {
             dropped: false,
         }
     }
-    
-    pub(crate) fn attachments_description(&self) -> &AttachmentsDescription {
-        &self.attachments_description
+
+    pub fn attachments_desc(&self) -> AttachmentsDescription {
+        self.attachments_description.clone()
+    }
+    pub fn attachments(&self) -> SmallVec<[SmallVec<[FrameBufferAttachment; 5]>; 5]> {
+        self.attachments.clone()
+    }
+    pub(crate) fn attachment(&self, swapchain_images: &SwapchainImages, framebuffer_i: usize, attachment_i: usize) -> Arc<ImageResource> {
+        let image = match self.attachments[framebuffer_i][attachment_i].clone() {
+            FrameBufferAttachment::SwapchainImage(i) => swapchain_images[i].clone(),
+            FrameBufferAttachment::Image(image) => image,
+        };
+
+        image
     }
 }
 #[derive(Clone)]

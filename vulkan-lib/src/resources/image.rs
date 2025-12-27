@@ -4,8 +4,8 @@ use ash::vk::{Extent3D, Format, ImageCreateFlags, ImageCreateInfo, ImageLayout, 
 use slotmap::DefaultKey;
 use crate::queue::queue_local::QueueLocal;
 use crate::queue::memory_manager::{MemoryManager, MemoryTypeAlgorithm};
-use crate::runtime::OptionSeqNumShared;
-use crate::runtime::resources::{ImageInner, ResourceUsage};
+use crate::queue::OptionSeqNumShared;
+use crate::resources::{LastResourceUsage, ResourceUsage};
 use crate::wrappers::device::VkDeviceRef;
 
 pub struct ImageResource {
@@ -14,15 +14,15 @@ pub struct ImageResource {
     pub(crate) image_view: vk::ImageView,
     format: vk::Format,
     extent: vk::Extent2D,
-    submission_usage: OptionSeqNumShared,
-    inner: QueueLocal<ImageResourceInner>,
+    pub(crate) submission_usage: OptionSeqNumShared,
+    pub(crate)inner: QueueLocal<ImageResourceInner>,
 
     dropped: bool,
 }
 
 pub(crate) struct ImageResourceInner {
-    usage: ResourceUsage,
-    layout: vk::ImageLayout,
+    pub usages: LastResourceUsage,
+    pub layout: vk::ImageLayout,
 }
 
 impl ImageResource {
@@ -88,7 +88,40 @@ impl ImageResource {
             extent: vk::Extent2D { width, height },
             submission_usage: OptionSeqNumShared::default(),
             inner: QueueLocal::new(ImageResourceInner {
-                usage: ResourceUsage::default(),
+                usages: LastResourceUsage::None,
+                layout: ImageLayout::UNDEFINED,
+            }),
+
+            dropped: false,
+        }
+    }
+
+    pub(crate) fn from_image(device: &VkDeviceRef, image: vk::Image, format: vk::Format, width: u32, height: u32) -> ImageResource {
+        let image_view_create_info = vk::ImageViewCreateInfo::default()
+            .image(image)
+            .view_type(vk::ImageViewType::TYPE_2D)
+            .format(format)
+            .subresource_range(vk::ImageSubresourceRange::default()
+                .aspect_mask(format_aspect_flags(format))
+                .base_mip_level(0)
+                .level_count(1)
+                .base_array_layer(0)
+                .layer_count(1));
+
+        let image_view = unsafe {
+            device.create_image_view(&image_view_create_info, None).unwrap()
+        };
+
+
+        Self {
+            image,
+            memory: None,
+            image_view,
+            format,
+            extent: vk::Extent2D { width, height },
+            submission_usage: OptionSeqNumShared::default(),
+            inner: QueueLocal::new(ImageResourceInner {
+                usages: LastResourceUsage::None,
                 layout: ImageLayout::UNDEFINED,
             }),
 
@@ -122,7 +155,7 @@ impl Drop for ImageResource {
     }
 }
 
-fn destroy_image_resource(device: &VkDeviceRef, mut image_resource: ImageResource) {
+pub(crate) fn destroy_image_resource(device: &VkDeviceRef, mut image_resource: ImageResource) {
     if !image_resource.dropped {
         unsafe {
             device.destroy_image_view(image_resource.image_view, None);

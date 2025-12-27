@@ -167,6 +167,7 @@ impl DescriptorSetAllocator {
                 descriptor_count: b.descriptor_count,
                 descriptor_type: b.descriptor_type,
                 resource: None,
+                resource_updated: false,
             }
         }).collect();
 

@@ -3,23 +3,23 @@ use ash::vk;
 use ash::vk::{AccessFlags, BufferCreateFlags, BufferCreateInfo, BufferUsageFlags, DeviceSize, MemoryAllocateInfo, PipelineStageFlags};
 use log::{error, warn};
 use crate::queue::queue_local::QueueLocal;
-use crate::resources::ResourceUsage;
+use crate::resources::{LastResourceUsage, ResourceUsage};
 use crate::queue::memory_manager::{MemoryManager, MemoryTypeAlgorithm};
-use crate::runtime::OptionSeqNumShared;
+use crate::queue::OptionSeqNumShared;
 use crate::wrappers::device::VkDeviceRef;
 
 pub struct BufferResource {
     pub(crate) buffer: vk::Buffer,
     pub(crate) memory: vk::DeviceMemory,
     size: usize,
-    submission_usage: OptionSeqNumShared,
-    inner: QueueLocal<BufferResourceInner>,
+    pub(crate) submission_usage: OptionSeqNumShared,
+    pub(crate) inner: QueueLocal<BufferResourceInner>,
 
     dropped: bool,
 }
 
 pub(crate) struct BufferResourceInner {
-    usage: ResourceUsage,
+    pub usages: LastResourceUsage,
 }
 
 impl BufferResource {
@@ -54,7 +54,7 @@ impl BufferResource {
             size: size as usize,
             submission_usage: OptionSeqNumShared::default(),
             inner: QueueLocal::new(BufferResourceInner {
-                usage: ResourceUsage::default(),
+                usages: LastResourceUsage::None,
             }),
 
             dropped: false,
@@ -69,8 +69,7 @@ impl Drop for BufferResource {
         }
     }
 }
-
-fn destroy_buffer_resource(device: &VkDeviceRef, mut buffer_resource: BufferResource) {
+pub(crate) fn destroy_buffer_resource(device: &VkDeviceRef, mut buffer_resource: BufferResource) {
     if !buffer_resource.dropped {
         unsafe {
             device.destroy_buffer(buffer_resource.buffer, None);

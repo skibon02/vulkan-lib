@@ -9,18 +9,19 @@ use crate::resources::buffer::BufferResource;
 use crate::resources::descriptor_set::{BoundResource, DescriptorSetResource};
 use crate::resources::image::ImageResource;
 use crate::resources::pipeline::GraphicsPipelineResource;
-use crate::resources::render_pass::RenderPassResource;
+use crate::resources::render_pass::{FrameBufferAttachment, RenderPassResource};
 use crate::resources::ResourceUsage;
+use crate::swapchain_wrapper::SwapchainImages;
 
-pub struct RecordContext<'a> {
-    commands: Vec<DeviceCommand<'a>>,
+pub struct RecordContext {
+    commands: Vec<DeviceCommand>,
     bound_pipeline: Option<Arc<GraphicsPipelineResource>>,
     pipeline_changed: bool,
     bound_descriptor_sets: HashMap<u32, Arc<DescriptorSetResource>>,
     bound_vertex_buffer: Option<Arc<BufferResource>>
 }
 
-impl<'a> RecordContext<'a> {
+impl RecordContext {
     pub fn new() -> Self {
         Self {
             commands: Vec::new(),
@@ -116,7 +117,7 @@ impl<'a> RecordContext<'a> {
 
     pub fn render_pass<F>(&mut self, render_pass: Arc<RenderPassResource>, framebuffer_index: u32, clear_values: SmallVec<[ClearValue; 3]>, f: F)
     where
-        F: FnOnce(&mut RenderPassContext<'a, '_>)
+        F: FnOnce(&mut RenderPassContext<'_>)
     {
         self.commands.push(DeviceCommand::RenderPassBegin {
             render_pass: render_pass.clone(),
@@ -133,30 +134,30 @@ impl<'a> RecordContext<'a> {
         });
     }
 
-    pub(crate) fn take_commands(self) -> Vec<DeviceCommand<'a>> {
+    pub(crate) fn take_commands(self) -> Vec<DeviceCommand> {
         self.commands
     }
 }
 
-pub struct RenderPassContext<'a, 'b> {
-    base: &'b mut RecordContext<'a>,
+pub struct RenderPassContext<'a> {
+    base: &'a mut RecordContext,
 }
 
-impl<'a, 'b> Deref for RenderPassContext<'a, 'b> {
-    type Target = RecordContext<'a>;
+impl<'a> Deref for RenderPassContext<'a> {
+    type Target = RecordContext;
 
     fn deref(&self) -> &Self::Target {
         self.base
     }
 }
 
-impl<'a, 'b> DerefMut for RenderPassContext<'a, 'b> {
+impl<'a> DerefMut for RenderPassContext<'a> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.base
     }
 }
 
-impl<'a, 'b> RenderPassContext<'a, 'b> {
+impl<'a> RenderPassContext<'a> {
     pub fn barrier(&mut self) {
         panic!("Pipeline barriers are not allowed inside render passes! Barriers must be placed before RenderPassBegin.");
     }
@@ -179,7 +180,7 @@ impl<'a, 'b> RenderPassContext<'a, 'b> {
             first_instance,
             new_vertex_buffer,
             new_descriptor_set_bindings,
-            pipeline_handle,
+            pipeline: pipeline_handle,
             pipeline_handle_changed
         }));
     }
@@ -192,27 +193,27 @@ pub enum DrawCommand {
         first_vertex: u32,
         first_instance: u32,
         new_vertex_buffer: Option<Arc<BufferResource>>,
-        pipeline_handle: Arc<GraphicsPipelineResource>,
+        pipeline: Arc<GraphicsPipelineResource>,
         pipeline_handle_changed: bool,
         new_descriptor_set_bindings: SmallVec<[(u32, Arc<DescriptorSetResource>); 4]>,
     },
 }
 
-pub enum SpecificResourceUsage<'a> {
+pub enum SpecificResourceUsage {
     BufferUsage {
         usage: ResourceUsage,
         handle: Arc<BufferResource>
     },
     ImageUsage {
         usage: ResourceUsage,
-        handle: Arc<ImageResource>,
+        image: Arc<ImageResource>,
         required_layout: Option<ImageLayout>,
         image_aspect: ImageAspectFlags
     }
 }
 
 #[derive(EnumDiscriminants)]
-pub enum DeviceCommand<'a> {
+pub enum DeviceCommand {
     CopyBuffer {
         src: Arc<BufferResource>,
         dst: Arc<BufferResource>,
@@ -257,8 +258,8 @@ pub enum DeviceCommand<'a> {
     },
 }
 
-impl<'a> DeviceCommand<'a> {
-    pub fn usages(&self, submission_num: usize, swapchain_images: SmallVec<[Arc<ImageResource>; 3]>) -> Box<dyn Iterator<Item=SpecificResourceUsage<'a>> + 'a> {
+impl DeviceCommand {
+    pub fn usages(&self, submission_num: usize, swapchain_images: &SwapchainImages) -> Box<dyn Iterator<Item=SpecificResourceUsage>> {
         match self {
             DeviceCommand::CopyBuffer {
                 src,
@@ -273,7 +274,7 @@ impl<'a> DeviceCommand<'a> {
                                 PipelineStageFlags::TRANSFER,
                                 AccessFlags::TRANSFER_READ,
                                 ),
-                            handle: *src
+                            handle: src.clone()
                         },
                         SpecificResourceUsage::BufferUsage {
                             usage: ResourceUsage::new(
@@ -281,7 +282,7 @@ impl<'a> DeviceCommand<'a> {
                                 PipelineStageFlags::TRANSFER,
                                 AccessFlags::TRANSFER_WRITE,
                             ),
-                            handle: *dst
+                            handle: dst.clone()
                         },
                     ].into_iter()
                 )
@@ -302,7 +303,7 @@ impl<'a> DeviceCommand<'a> {
                                 PipelineStageFlags::TRANSFER,
                                 AccessFlags::TRANSFER_READ,
                             ),
-                            handle: *src
+                            handle: src.clone()
                         },
                         SpecificResourceUsage::ImageUsage {
                             usage: ResourceUsage::new(
@@ -310,7 +311,7 @@ impl<'a> DeviceCommand<'a> {
                                 PipelineStageFlags::TRANSFER,
                                 AccessFlags::TRANSFER_WRITE,
                             ),
-                            handle: *dst,
+                            image: dst.clone(),
                             required_layout: Some(ImageLayout::TRANSFER_DST_OPTIMAL),
                             image_aspect: combined_aspect
                         },
@@ -325,7 +326,7 @@ impl<'a> DeviceCommand<'a> {
                             PipelineStageFlags::TRANSFER,
                             AccessFlags::TRANSFER_WRITE,
                         ),
-                        handle: *buffer
+                        handle: buffer.clone()
                     },
                 ))
             }
@@ -337,7 +338,7 @@ impl<'a> DeviceCommand<'a> {
                         PipelineStageFlags::TRANSFER, // keep non-empty stage flag for execution dependency
                         AccessFlags::empty(),
                     ),
-                    handle: *image,
+                    image: image.clone(),
                     required_layout: Some(*new_layout),
                     image_aspect: *image_aspect
                 },
@@ -349,7 +350,7 @@ impl<'a> DeviceCommand<'a> {
                         PipelineStageFlags::TRANSFER,
                         AccessFlags::TRANSFER_WRITE,
                     ),
-                    handle: *image,
+                    image: image.clone(),
                     required_layout: Some(ImageLayout::TRANSFER_DST_OPTIMAL),
                     image_aspect: *image_aspect
                 },
@@ -361,7 +362,7 @@ impl<'a> DeviceCommand<'a> {
                         PipelineStageFlags::TRANSFER,
                         AccessFlags::TRANSFER_WRITE,
                     ),
-                    handle: *image,
+                    image: image.clone(),
                     required_layout: Some(ImageLayout::TRANSFER_DST_OPTIMAL),
                     image_aspect: match (depth_value, stencil_value) {
                         (Some(_), Some(_)) => ImageAspectFlags::DEPTH | ImageAspectFlags::STENCIL,
@@ -373,9 +374,9 @@ impl<'a> DeviceCommand<'a> {
             )),
             DeviceCommand::RenderPassBegin { render_pass, framebuffer_index, .. } => {
                 // usages for attachments
-                let attachments = render_pass.attachments();
+                let attachments = render_pass.attachments_desc();
                 let swapchain_desc = attachments.get_swapchain_desc();
-                let swapchain_image_handle = swapchain_images[*framebuffer_index as usize];
+                let framebuffer_attachment = swapchain_images[*framebuffer_index as usize].clone();
                 let required_layout = if swapchain_desc.initial_layout == ImageLayout::UNDEFINED {
                     None
                 }
@@ -384,7 +385,7 @@ impl<'a> DeviceCommand<'a> {
                 };
                 let mut usages: SmallVec<[_; 4]> = smallvec![
                     SpecificResourceUsage::ImageUsage {
-                        handle: swapchain_image_handle,
+                        image: framebuffer_attachment,
                         usage: ResourceUsage::new(
                             Some(submission_num),
                             PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
@@ -398,7 +399,7 @@ impl<'a> DeviceCommand<'a> {
 
                 let mut next_image_i = 0;
                 if let Some(depth_desc) = attachments.get_depth_attachment_desc() {
-                    let image_handle = resource_storage.render_pass(render_pass.0).framebuffers[*framebuffer_index as usize].1[next_image_i].handle();
+                    let attachment = render_pass.attachment(swapchain_images, *framebuffer_index as usize, next_image_i);
                     let format = depth_desc.format;
                     let contains_stencil = matches!(format, Format::S8_UINT | Format::D16_UNORM_S8_UINT | Format::D24_UNORM_S8_UINT | Format::D32_SFLOAT_S8_UINT);
                     let contains_depth = !matches!(format, Format::S8_UINT);
@@ -416,7 +417,7 @@ impl<'a> DeviceCommand<'a> {
                         Some(depth_desc.initial_layout)
                     };
                     usages.push(SpecificResourceUsage::ImageUsage {
-                        handle: image_handle,
+                        image: attachment,
                         usage: ResourceUsage::new(
                             Some(submission_num),
                             PipelineStageFlags::EARLY_FRAGMENT_TESTS | PipelineStageFlags::LATE_FRAGMENT_TESTS,
@@ -430,7 +431,7 @@ impl<'a> DeviceCommand<'a> {
                 }
 
                 if let Some(color_desc) = attachments.get_color_attachment_desc() {
-                    let image_handle = resource_storage.render_pass(render_pass.0).framebuffers[*framebuffer_index as usize].1[next_image_i].handle();
+                    let attachment = render_pass.attachment(swapchain_images, *framebuffer_index as usize, next_image_i);
                     let required_layout = if color_desc.initial_layout == ImageLayout::UNDEFINED {
                         None
                     }
@@ -438,7 +439,7 @@ impl<'a> DeviceCommand<'a> {
                         Some(color_desc.initial_layout)
                     };
                     usages.push(SpecificResourceUsage::ImageUsage {
-                        handle: image_handle,
+                        image: attachment,
                         usage: ResourceUsage::new(
                             Some(submission_num),
                             PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
@@ -457,7 +458,7 @@ impl<'a> DeviceCommand<'a> {
                 DrawCommand::Draw {
                     new_vertex_buffer,
                     new_descriptor_set_bindings,
-                    pipeline_handle,
+                    pipeline: pipeline_handle,
                     pipeline_handle_changed,
                     ..
                 }
@@ -475,8 +476,8 @@ impl<'a> DeviceCommand<'a> {
                 }
                 for (set_index, descriptor_set_handle) in new_descriptor_set_bindings {
                     // collect usage for bound resources
-                    for binding in &descriptor_set_handle.bindings().lock().unwrap() {
-                        match binding.resource.expect("all descriptor set resources must be bound") {
+                    for binding in descriptor_set_handle.bindings().lock().unwrap().iter() {
+                        match binding.resource.as_ref().expect("all descriptor set resources must be bound") {
                             BoundResource::Buffer(buf) => {
                                 usages.push(SpecificResourceUsage::BufferUsage {
                                     handle: buf.clone(),
@@ -489,7 +490,7 @@ impl<'a> DeviceCommand<'a> {
                             }
                             BoundResource::Image(img) | BoundResource::CombinedImageSampler {image: img, ..} => {
                                 usages.push(SpecificResourceUsage::ImageUsage {
-                                    handle: img.clone(),
+                                    image: img.clone(),
                                     usage: ResourceUsage::new(
                                         Some(submission_num),
                                         PipelineStageFlags::FRAGMENT_SHADER,

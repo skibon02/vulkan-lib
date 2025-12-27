@@ -1,10 +1,11 @@
-use crate::runtime::resources::images::ImageResourceHandle;
 use std::collections::VecDeque;
+use std::sync::Arc;
 use ash::vk;
 use ash::vk::PipelineStageFlags;
 use log::{error, warn};
 use slotmap::{SlotMap, DefaultKey};
 use smallvec::SmallVec;
+use crate::resources::image::ImageResource;
 use crate::wrappers::device::VkDeviceRef;
 
 pub(crate) type WaitedOperations = SmallVec<[WaitedOperation; 3]>;
@@ -12,7 +13,7 @@ pub(crate) type WaitedOperations = SmallVec<[WaitedOperation; 3]>;
 pub(crate) enum WaitedOperation {
     Submission(usize, PipelineStageFlags),
     // swapchain image index
-    SwapchainImageAcquired(ImageResourceHandle),
+    SwapchainImageAcquired(Arc<ImageResource>),
 }
 enum SemaphoreSlot {
     Unallocated,

@@ -5,13 +5,14 @@ use ash::vk::{AccessFlags, BufferCreateFlags, BufferUsageFlags, DescriptorSetLay
 use slotmap::DefaultKey;
 use smallvec::SmallVec;
 use descriptor_pool::DescriptorSetAllocator;
-use crate::resources::buffer::BufferResource;
+use crate::resources::buffer::{destroy_buffer_resource, BufferResource};
 use crate::resources::descriptor_set::DescriptorSetResource;
-use crate::resources::image::ImageResource;
-use crate::resources::pipeline::{GraphicsPipelineDesc, GraphicsPipelineResource};
-use crate::resources::render_pass::RenderPassResource;
+use crate::resources::image::{destroy_image_resource, ImageResource};
+use crate::resources::pipeline::{destroy_pipeline, GraphicsPipelineDesc, GraphicsPipelineResource};
+use crate::resources::render_pass::{destroy_render_pass, RenderPassResource};
 use crate::resources::sampler::SamplerResource;
 use crate::queue::memory_manager::MemoryManager;
+use crate::queue::shared::SharedState;
 use crate::shaders::DescriptorSetLayoutBindingDesc;
 use crate::wrappers::device::VkDeviceRef;
 
@@ -25,6 +26,7 @@ pub mod descriptor_pool;
 
 pub struct VulkanAllocator {
     device: VkDeviceRef,
+    shared_state: SharedState,
     memory_manager: MemoryManager,
     descriptor_set_layouts: HashMap<Vec<DescriptorSetLayoutBindingDesc>, DescriptorSetLayout>,
     descriptor_set_allocator: DescriptorSetAllocator,
@@ -75,7 +77,9 @@ impl VulkanAllocator {
         Arc::new(sampler)
     }
 
-    pub fn new_render_pass(&mut self, )
+    pub fn new_render_pass(&mut self) -> Arc<RenderPassResource> {
+
+    }
     pub fn new_pipeline(&mut self, render_pass: Arc<RenderPassResource>, pipeline_desc: GraphicsPipelineDesc) -> Arc<GraphicsPipelineResource> {
         let descriptor_set_layouts = pipeline_desc.bindings.iter()
             .map(|bindings_desc| self.get_or_create_descriptor_set_layout(bindings_desc))
@@ -120,6 +124,71 @@ impl VulkanAllocator {
         println!("Images: {}", image_count);
         println!("Render passes: {}", render_pass_count);
         println!("Pipelines: {}", pipeline_count);
+    }
+
+    pub fn destroy_old_resources(&mut self) {
+        let last_waited = self.shared_state.last_host_waited_submission();
+
+        let mut i = 0;
+        while i < self.buffers.len() {
+            if self.buffers[i].submission_usage.load().is_none_or(|n| n <= last_waited) && Arc::strong_count(&self.buffers[i]) == 1 {
+                let buffer = Arc::into_inner(self.buffers.swap_remove(i)).unwrap();
+                destroy_buffer_resource(&self.device, buffer);
+            }
+            else {
+                i += 1;
+            }
+        }
+
+
+        let mut i = 0;
+        while i < self.images.len() {
+            if self.images[i].submission_usage.load().is_none_or(|n| n <= last_waited) && Arc::strong_count(&self.images[i]) == 1 {
+                let image = Arc::into_inner(self.images.swap_remove(i)).unwrap();
+                destroy_image_resource(&self.device, image);
+            }
+            else {
+                i += 1;
+            }
+        }
+
+        self.descriptor_set_allocator.on_submission_waited(last_waited);
+
+        let mut i = 0;
+        while i < self.pipelines.len() {
+            if self.pipelines[i].submission_usage.load().is_none_or(|n| n <= last_waited) && Arc::strong_count(&self.pipelines[i]) == 1 {
+                let pipeline = Arc::into_inner(self.pipelines.swap_remove(i)).unwrap();
+                destroy_pipeline(&self.device, pipeline);
+            }
+            else {
+                i += 1;
+            }
+        }
+
+        let mut i = 0;
+        while i < self.render_passes.len() {
+            if self.render_passes[i].submission_usage.load().is_none_or(|n| n <= last_waited) && Arc::strong_count(&self.render_passes[i]) == 1 {
+                let render_pass = Arc::into_inner(self.render_passes.swap_remove(i)).unwrap();
+                destroy_render_pass(&self.device, render_pass);
+            }
+            else {
+                i += 1;
+            }
+        }
+    }
+}
+
+impl Drop for VulkanAllocator {
+    fn drop(&mut self) {
+        self.destroy_old_resources();
+
+        for (_, descriptor_set_layout) in self.descriptor_set_layouts.drain() {
+            unsafe {
+                self.device.destroy_descriptor_set_layout(descriptor_set_layout, None);
+            }
+        }
+
+        // check if something left not allocated
     }
 }
 

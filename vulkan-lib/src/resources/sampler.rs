@@ -1,6 +1,6 @@
 use ash::vk;
 use log::error;
-use crate::runtime::OptionSeqNumShared;
+use crate::queue::OptionSeqNumShared;
 use crate::wrappers::device::VkDeviceRef;
 
 pub struct SamplerResource {
