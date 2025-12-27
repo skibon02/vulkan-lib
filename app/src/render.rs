@@ -18,7 +18,7 @@ use swash::FontRef;
 use swash::scale::{Render, ScaleContext, Source, StrikeWith};
 use swash::zeno::Style;
 use render_macro::define_layout;
-use vulkan_lib::{descriptor_set, use_shader, AttachmentDescription, AttachmentLoadOp, AttachmentStoreOp, BufferCopy, BufferImageCopy, BufferUsageFlags, ClearColorValue, ClearDepthStencilValue, ClearValue, DoubleBuffered, Extent3D, Filter, Format, ImageLayout, ImageSubresourceLayers, ImageUsageFlags, PipelineStageFlags, SampleCountFlags, SamplerMipmapMode, VulkanRenderer};
+use vulkan_lib::{descriptor_set, use_shader, AttachmentDescription, AttachmentLoadOp, AttachmentStoreOp, BufferCopy, BufferImageCopy, BufferUsageFlags, ClearColorValue, ClearDepthStencilValue, ClearValue, DoubleBuffered, Extent3D, Filter, Format, ImageLayout, ImageSubresourceLayers, ImageUsageFlags, PipelineStageFlags, SampleCountFlags, SamplerMipmapMode, VulkanInstance};
 use vulkan_lib::runtime::resources::AttachmentsDescription;
 use vulkan_lib::runtime::resources::images::ImageResourceHandle;
 use vulkan_lib::runtime::resources::pipeline::GraphicsPipelineDesc;
@@ -33,7 +33,7 @@ pub enum RenderMessage {
 
 pub struct RenderTask {
     rx: mpsc::Receiver<RenderMessage>,
-    vulkan_renderer: VulkanRenderer,
+    vulkan_renderer: VulkanInstance,
     render_finished: Arc<AtomicBool>,
     resize_finished: Arc<AtomicBool>,
     swapchain_image_handles: SmallVec<[ImageResourceHandle; 3]>,
@@ -78,7 +78,7 @@ impl Default for SolidAttributes {
     }
 }
 impl RenderTask {
-    pub fn new(vulkan_renderer: VulkanRenderer) -> (Self, mpsc::Sender<RenderMessage>, Arc<AtomicBool>, Arc<AtomicBool>) {
+    pub fn new(vulkan_renderer: VulkanInstance) -> (Self, mpsc::Sender<RenderMessage>, Arc<AtomicBool>, Arc<AtomicBool>) {
         let (tx, rx) = mpsc::channel::<RenderMessage>();
         let render_finished = Arc::new(AtomicBool::new(true));
         let resize_finished = Arc::new(AtomicBool::new(true));

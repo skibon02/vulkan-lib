@@ -1,8 +1,13 @@
 use ash::vk::{DescriptorPool, DescriptorPoolCreateFlags, DescriptorPoolCreateInfo, DescriptorPoolSize, DescriptorSet, DescriptorSetAllocateInfo, DescriptorSetLayout, DescriptorType};
-use slotmap::{DefaultKey, SlotMap};
 use smallvec::SmallVec;
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use std::sync::atomic::AtomicBool;
 use ash::vk;
+use log::warn;
+use crate::queue::OptionSeqNumShared;
+use crate::queue::shared::SharedState;
+use crate::resources::descriptor_set::{DescriptorSetBinding, DescriptorSetResource};
 use crate::shaders::DescriptorSetLayoutBindingDesc;
 use crate::wrappers::device::VkDeviceRef;
 
@@ -12,8 +17,8 @@ const INITIAL_DESCRIPTORS_PER_TYPE: u32 = 8;
 struct DescriptorPoolInfo {
     pool: DescriptorPool,
     max_sets: u32,
-    allocated_sets: u32,
     descriptor_counts: HashMap<DescriptorType, u32>,
+    allocated_sets: u32,
     allocated_descriptor_counts: HashMap<DescriptorType, u32>,
 }
 
@@ -95,30 +100,21 @@ impl DescriptorPoolInfo {
     }
 }
 
-enum DescriptorSetSlot {
-    Unallocated,
-    Allocated {
-        descriptor_set: DescriptorSet,
-        pool_index: usize,
-        layout: DescriptorSetLayout,
-        required_descriptors: HashMap<DescriptorType, u32>,
-        last_used_in: usize,
-        pending_recycle: bool,
-    }
-}
 
 pub(crate) struct DescriptorSetAllocator {
     device: VkDeviceRef,
     pools: Vec<DescriptorPoolInfo>,
-    slots: SlotMap<DefaultKey, DescriptorSetSlot>,
+    sets: Vec<Arc<DescriptorSetResource>>,
+    shared_state: SharedState,
 }
 
 impl DescriptorSetAllocator {
-    pub fn new(device: VkDeviceRef) -> Self {
+    pub fn new(device: VkDeviceRef, shared_state: SharedState) -> Self {
         Self {
             device,
             pools: Vec::new(),
-            slots: SlotMap::new(),
+            sets: Vec::new(),
+            shared_state,
         }
     }
 
@@ -160,85 +156,56 @@ impl DescriptorSetAllocator {
         self.pools.len() - 1
     }
 
-    pub fn allocate_descriptor_set(&mut self, layout: DescriptorSetLayout, bindings: &[DescriptorSetLayoutBindingDesc]) -> DefaultKey {
-        let required_descriptors = Self::calculate_required_descriptors(bindings);
-
-        // Try to reuse an unallocated slot first
-        let reuse_key = self.slots.iter().find_map(|(key, slot)| {
-            if matches!(slot, DescriptorSetSlot::Unallocated) {
-                Some(key)
-            } else {
-                None
-            }
-        });
-
-        if let Some(key) = reuse_key {
-            let pool_index = self.find_or_create_pool(&required_descriptors);
-            let descriptor_set = self.pools[pool_index].allocate(&self.device, layout, &required_descriptors);
-
-            self.slots[key] = DescriptorSetSlot::Allocated {
-                descriptor_set,
-                pool_index,
-                layout,
-                required_descriptors,
-                last_used_in: 0,
-                pending_recycle: false,
-            };
-
-            return key;
-        }
-
-        // No unallocated slot found, create a new one
+    pub fn allocate_descriptor_set(&mut self, layout: DescriptorSetLayout, bindings_desc: &[DescriptorSetLayoutBindingDesc]) -> Arc<DescriptorSetResource> {
+        let required_descriptors = Self::calculate_required_descriptors(bindings_desc);
         let pool_index = self.find_or_create_pool(&required_descriptors);
         let descriptor_set = self.pools[pool_index].allocate(&self.device, layout, &required_descriptors);
 
-        self.slots.insert(DescriptorSetSlot::Allocated {
+        let bindings = bindings_desc.iter().map(|b| {
+            DescriptorSetBinding {
+                binding_index: b.binding,
+                descriptor_count: b.descriptor_count,
+                descriptor_type: b.descriptor_type,
+                resource: None,
+            }
+        }).collect();
+
+        let ds = Arc::new(DescriptorSetResource {
             descriptor_set,
             pool_index,
             layout,
-            required_descriptors,
-            last_used_in: 0,
-            pending_recycle: false,
-        })
-    }
-    
-    pub fn get_descriptor_set(&mut self, key: DefaultKey) -> vk::DescriptorSet {
-        if let Some(slot) = self.slots.get_mut(key) {
-            if let DescriptorSetSlot::Allocated { descriptor_set, .. } = slot {
-                return *descriptor_set
-            }
-        }
-        panic!("Called get_descriptor_set on invalid or unallocated descriptor set slot")
+            bindings: Mutex::new(bindings),
+            submission_usage: OptionSeqNumShared::default(),
+            updates_locked: AtomicBool::new(false),
+            dropped: false,
+        });
+
+        self.sets.push(ds.clone());
+
+        ds
     }
 
-    pub fn update_last_used(&mut self, key: DefaultKey, submission_num: usize) {
-        if let Some(slot) = self.slots.get_mut(key) {
-            if let DescriptorSetSlot::Allocated { last_used_in, .. } = slot {
-                *last_used_in = submission_num;
-            }
-        }
-    }
-
-    pub fn reset_descriptor_set(&mut self, key: DefaultKey) {
-        if let Some(slot) = self.slots.get_mut(key) {
-            if let DescriptorSetSlot::Allocated { pending_recycle, .. } = slot {
-                *pending_recycle = true;
-            }
-        }
-    }
-
+    /// Call this periodically to recycle descriptor sets that are no longer in use by the GPU.
     pub fn on_submission_waited(&mut self, last_waited_submission: usize) {
-        for (_key, slot) in &mut self.slots {
-            if let DescriptorSetSlot::Allocated { pending_recycle, last_used_in, descriptor_set, pool_index, required_descriptors, .. } = slot {
-                // Recycle descriptor sets that are pending and the GPU has finished using them
-                if *pending_recycle && *last_used_in <= last_waited_submission {
-                    let ds = *descriptor_set;
-                    let pool_idx = *pool_index;
-                    let req_desc = required_descriptors.clone();
+        let mut i = 0;
+        while i < self.sets.len() {
+            if self.sets[i].submission_usage.load().is_none_or(|u| u <= last_waited_submission) && Arc::strong_count(&self.sets[i]) == 1 {
+                let ds = Arc::into_inner(self.sets.swap_remove(i)).unwrap();
 
-                    self.pools[pool_idx].free(&self.device, ds, &req_desc);
-                    *slot = DescriptorSetSlot::Unallocated;
-                }
+                let descriptor_set = ds.descriptor_set;
+                let pool_idx = ds.pool_index;
+                let bindings = ds.bindings.lock().unwrap();
+                let req_desc = Self::calculate_required_descriptors(&bindings.iter().map(|b| DescriptorSetLayoutBindingDesc {
+                    binding: b.binding_index,
+                    descriptor_type: b.descriptor_type,
+                    descriptor_count: b.descriptor_count,
+                    stage_flags: vk::ShaderStageFlags::empty(),
+                }).collect::<Vec<_>>());
+
+                self.pools[pool_idx].free(&self.device, descriptor_set, &req_desc);
+            }
+            else {
+                i += 1;
             }
         }
     }
@@ -246,6 +213,41 @@ impl DescriptorSetAllocator {
 
 impl Drop for DescriptorSetAllocator {
     fn drop(&mut self) {
+        let last_waited = self.shared_state.last_host_waited_submission();
+
+        let mut sets_in_use = 0;
+        let mut sets_leaked = 0;
+
+        for set in &self.sets {
+            let strong_count = Arc::strong_count(set);
+            let submission = set.submission_usage.load();
+
+            if strong_count > 1 {
+                sets_leaked += 1;
+                warn!(
+                    "DescriptorSetAllocator dropped with descriptor set still referenced (strong_count: {})",
+                    strong_count
+                );
+            }
+
+            if let Some(submission_num) = submission {
+                if submission_num > last_waited {
+                    sets_in_use += 1;
+                    warn!(
+                        "DescriptorSetAllocator dropped with descriptor set still in use by GPU (submission: {}, last_waited: {})",
+                        submission_num, last_waited
+                    );
+                }
+            }
+        }
+
+        if sets_in_use > 0 || sets_leaked > 0 {
+            warn!(
+                "DescriptorSetAllocator dropped with {} descriptor sets still in use by GPU and {} leaked references",
+                sets_in_use, sets_leaked
+            );
+        }
+
         unsafe {
             for pool in &self.pools {
                 self.device.destroy_descriptor_pool(pool.pool, None);

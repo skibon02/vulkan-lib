@@ -2,22 +2,22 @@ use strum::EnumDiscriminants;
 use std::collections::HashMap;
 use std::iter;
 use std::ops::{Deref, DerefMut};
-use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use smallvec::{smallvec, SmallVec};
-use ash::vk::{AccessFlags, BufferCopy, BufferImageCopy, ClearValue, DescriptorSetLayoutBinding, Format, ImageAspectFlags, ImageLayout, PipelineStageFlags};
-use crate::runtime::resources::buffers::BufferResourceHandle;
-use crate::runtime::resources::descriptor_sets::{BoundResource, DescriptorSetHandle};
-use crate::runtime::resources::images::ImageResourceHandle;
-use crate::runtime::resources::pipeline::GraphicsPipelineHandle;
-use crate::runtime::resources::render_pass::RenderPassHandle;
-use crate::runtime::resources::{ResourceStorage, ResourceUsage};
+use ash::vk::{AccessFlags, BufferCopy, BufferImageCopy, ClearValue, Format, ImageAspectFlags, ImageLayout, PipelineStageFlags};
+use crate::resources::buffer::BufferResource;
+use crate::resources::descriptor_set::{BoundResource, DescriptorSetResource};
+use crate::resources::image::ImageResource;
+use crate::resources::pipeline::GraphicsPipelineResource;
+use crate::resources::render_pass::RenderPassResource;
+use crate::resources::ResourceUsage;
 
 pub struct RecordContext<'a> {
     commands: Vec<DeviceCommand<'a>>,
-    bound_pipeline: Option<GraphicsPipelineHandle>,
+    bound_pipeline: Option<Arc<GraphicsPipelineResource>>,
     pipeline_changed: bool,
-    bound_descriptor_sets: HashMap<u32, DescriptorSetHandle<'static>>,
-    bound_vertex_buffer: Option<BufferResourceHandle<'static>>
+    bound_descriptor_sets: HashMap<u32, Arc<DescriptorSetResource>>,
+    bound_vertex_buffer: Option<Arc<BufferResource>>
 }
 
 impl<'a> RecordContext<'a> {
@@ -31,27 +31,27 @@ impl<'a> RecordContext<'a> {
         }
     }
 
-    pub fn bind_pipeline(&mut self, pipeline: GraphicsPipelineHandle) {
+    pub fn bind_pipeline(&mut self, pipeline: Arc<GraphicsPipelineResource>) {
         self.bound_pipeline = Some(pipeline);
         self.pipeline_changed = true;
     }
 
-    pub fn bind_descriptor_set(&mut self, set: u32, descriptor_set: DescriptorSetHandle<'static>) {
+    pub fn bind_descriptor_set(&mut self, set: u32, descriptor_set: Arc<DescriptorSetResource>) {
         self.bound_descriptor_sets.insert(set, descriptor_set);
     }
 
-    pub fn bind_vertex_buffer(&mut self, buf: BufferResourceHandle<'static>) {
+    pub fn bind_vertex_buffer(&mut self, buf: Arc<BufferResource>) {
         self.bound_vertex_buffer = Some(buf);
     }
 
-    pub fn copy_buffer<'b>(&'b mut self, src: BufferResourceHandle<'a>, dst: BufferResourceHandle<'a>, regions: SmallVec<[BufferCopy; 1]>) {
+    pub fn copy_buffer<'b>(&'b mut self, src: Arc<BufferResource>, dst: Arc<BufferResource>, regions: SmallVec<[BufferCopy; 1]>) {
         self.commands.push(DeviceCommand::CopyBuffer {
             src,
             dst,
             regions
         })
     }
-    pub fn copy_buffer_single<'b>(&'b mut self, src: BufferResourceHandle<'a>, dst: BufferResourceHandle<'a>, region: BufferCopy) {
+    pub fn copy_buffer_single<'b>(&'b mut self, src: Arc<BufferResource>, dst: Arc<BufferResource>, region: BufferCopy) {
         let regions = smallvec![region];
         self.commands.push(DeviceCommand::CopyBuffer {
             src,
@@ -60,7 +60,7 @@ impl<'a> RecordContext<'a> {
         })
     }
 
-    pub fn copy_buffer_to_image<'b>(&'b mut self, src: BufferResourceHandle<'a>, dst: ImageResourceHandle, regions: SmallVec<[BufferImageCopy; 1]>) {
+    pub fn copy_buffer_to_image<'b>(&'b mut self, src: Arc<BufferResource>, dst: Arc<ImageResource>, regions: SmallVec<[BufferImageCopy; 1]>) {
         self.commands.push(DeviceCommand::CopyBufferToImage {
             src,
             dst,
@@ -68,7 +68,7 @@ impl<'a> RecordContext<'a> {
         })
     }
 
-    pub fn copy_buffer_to_image_single<'b>(&'b mut self, src: BufferResourceHandle<'a>, dst: ImageResourceHandle, region: BufferImageCopy) {
+    pub fn copy_buffer_to_image_single<'b>(&'b mut self, src: Arc<BufferResource>, dst: Arc<ImageResource>, region: BufferImageCopy) {
         let regions = smallvec![region];
         self.commands.push(DeviceCommand::CopyBufferToImage {
             src,
@@ -77,7 +77,7 @@ impl<'a> RecordContext<'a> {
         })
     }
     
-    pub fn fill_buffer(&mut self, buffer: BufferResourceHandle<'a>, offset: u64, size: u64, data: u32) {
+    pub fn fill_buffer(&mut self, buffer: Arc<BufferResource>, offset: u64, size: u64, data: u32) {
         self.commands.push(DeviceCommand::FillBuffer {
             buffer,
             offset,
@@ -86,7 +86,7 @@ impl<'a> RecordContext<'a> {
         })
     }
 
-    pub fn transition_image_layout(&mut self, image: ImageResourceHandle, new_layout: ImageLayout, image_aspect: ImageAspectFlags) {
+    pub fn transition_image_layout(&mut self, image: Arc<ImageResource>, new_layout: ImageLayout, image_aspect: ImageAspectFlags) {
         self.commands.push(DeviceCommand::ImageLayoutTransition {
             image,
             new_layout,
@@ -94,7 +94,7 @@ impl<'a> RecordContext<'a> {
         })
     }
     
-    pub fn clear_color_image(&mut self, image: ImageResourceHandle, clear_color: ash::vk::ClearColorValue, image_aspect: ImageAspectFlags) {
+    pub fn clear_color_image(&mut self, image: Arc<ImageResource>, clear_color: ash::vk::ClearColorValue, image_aspect: ImageAspectFlags) {
         self.commands.push(DeviceCommand::ClearColorImage {
             image,
             clear_color,
@@ -102,7 +102,7 @@ impl<'a> RecordContext<'a> {
         })
     }
     
-    pub fn clear_depth_stencil_image(&mut self, image: ImageResourceHandle, depth_value: Option<f32>, stencil_value: Option<u32>) {
+    pub fn clear_depth_stencil_image(&mut self, image: Arc<ImageResource>, depth_value: Option<f32>, stencil_value: Option<u32>) {
         self.commands.push(DeviceCommand::ClearDepthStencilImage {
             image,
             depth_value,
@@ -114,12 +114,12 @@ impl<'a> RecordContext<'a> {
         self.commands.push(DeviceCommand::Barrier)
     }
 
-    pub fn render_pass<F>(&mut self, render_pass: RenderPassHandle, framebuffer_index: u32, clear_values: SmallVec<[ClearValue; 3]>, f: F)
+    pub fn render_pass<F>(&mut self, render_pass: Arc<RenderPassResource>, framebuffer_index: u32, clear_values: SmallVec<[ClearValue; 3]>, f: F)
     where
         F: FnOnce(&mut RenderPassContext<'a, '_>)
     {
         self.commands.push(DeviceCommand::RenderPassBegin {
-            render_pass,
+            render_pass: render_pass.clone(),
             framebuffer_index,
             clear_values
         });
@@ -191,21 +191,21 @@ pub enum DrawCommand {
         instance_count: u32,
         first_vertex: u32,
         first_instance: u32,
-        new_vertex_buffer: Option<BufferResourceHandle<'static>>,
-        pipeline_handle: GraphicsPipelineHandle,
+        new_vertex_buffer: Option<Arc<BufferResource>>,
+        pipeline_handle: Arc<GraphicsPipelineResource>,
         pipeline_handle_changed: bool,
-        new_descriptor_set_bindings: SmallVec<[(u32, DescriptorSetHandle<'static>); 4]>,
+        new_descriptor_set_bindings: SmallVec<[(u32, Arc<DescriptorSetResource>); 4]>,
     },
 }
 
 pub enum SpecificResourceUsage<'a> {
     BufferUsage {
         usage: ResourceUsage,
-        handle: BufferResourceHandle<'a>
+        handle: Arc<BufferResource>
     },
     ImageUsage {
         usage: ResourceUsage,
-        handle: ImageResourceHandle,
+        handle: Arc<ImageResource>,
         required_layout: Option<ImageLayout>,
         image_aspect: ImageAspectFlags
     }
@@ -214,51 +214,51 @@ pub enum SpecificResourceUsage<'a> {
 #[derive(EnumDiscriminants)]
 pub enum DeviceCommand<'a> {
     CopyBuffer {
-        src: BufferResourceHandle<'a>,
-        dst: BufferResourceHandle<'a>,
+        src: Arc<BufferResource>,
+        dst: Arc<BufferResource>,
         regions: SmallVec<[BufferCopy; 1]>,
     },
     CopyBufferToImage {
-        src: BufferResourceHandle<'a>,
-        dst: ImageResourceHandle,
+        src: Arc<BufferResource>,
+        dst: Arc<ImageResource>,
         regions: SmallVec<[BufferImageCopy; 1]>,
     },
     FillBuffer {
-        buffer: BufferResourceHandle<'a>,
+        buffer: Arc<BufferResource>,
         offset: u64,
         size: u64,
         data: u32,
     },
     Barrier,
     ImageLayoutTransition {
-        image: ImageResourceHandle,
+        image: Arc<ImageResource>,
         new_layout: ImageLayout,
         image_aspect: ImageAspectFlags,
     },
     ClearColorImage {
-        image: ImageResourceHandle,
+        image: Arc<ImageResource>,
         clear_color: ash::vk::ClearColorValue,
         image_aspect: ImageAspectFlags,
     },
     ClearDepthStencilImage {
-        image: ImageResourceHandle,
+        image: Arc<ImageResource>,
         depth_value: Option<f32>,
         stencil_value: Option<u32>,
     },
     RenderPassBegin {
-        render_pass: RenderPassHandle,
+        render_pass: Arc<RenderPassResource>,
         framebuffer_index: u32,
         clear_values: SmallVec<[ClearValue; 3]>,
     },
     DrawCommand(DrawCommand),
     RenderPassEnd {
-        render_pass: RenderPassHandle,
+        render_pass: Arc<RenderPassResource>,
         framebuffer_index: u32,
     },
 }
 
 impl<'a> DeviceCommand<'a> {
-    pub fn usages(&self, submission_num: usize, resource_storage: &mut ResourceStorage, swapchain_images: SmallVec<[ImageResourceHandle; 3]>) -> Box<dyn Iterator<Item=SpecificResourceUsage<'a>> + 'a> {
+    pub fn usages(&self, submission_num: usize, swapchain_images: SmallVec<[Arc<ImageResource>; 3]>) -> Box<dyn Iterator<Item=SpecificResourceUsage<'a>> + 'a> {
         match self {
             DeviceCommand::CopyBuffer {
                 src,
@@ -373,7 +373,7 @@ impl<'a> DeviceCommand<'a> {
             )),
             DeviceCommand::RenderPassBegin { render_pass, framebuffer_index, .. } => {
                 // usages for attachments
-                let attachments = resource_storage.render_pass(render_pass.0).attachments_description.clone();
+                let attachments = render_pass.attachments();
                 let swapchain_desc = attachments.get_swapchain_desc();
                 let swapchain_image_handle = swapchain_images[*framebuffer_index as usize];
                 let required_layout = if swapchain_desc.initial_layout == ImageLayout::UNDEFINED {
@@ -475,7 +475,7 @@ impl<'a> DeviceCommand<'a> {
                 }
                 for (set_index, descriptor_set_handle) in new_descriptor_set_bindings {
                     // collect usage for bound resources
-                    for binding in &descriptor_set_handle.bindings {
+                    for binding in &descriptor_set_handle.bindings().lock().unwrap() {
                         match binding.resource.expect("all descriptor set resources must be bound") {
                             BoundResource::Buffer(buf) => {
                                 usages.push(SpecificResourceUsage::BufferUsage {

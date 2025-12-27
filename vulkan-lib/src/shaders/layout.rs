@@ -1,6 +1,6 @@
 use std::ops::Range;
-use crate::runtime::resources::pipeline::VertexInputDesc;
 use types::GlslTypeVariant;
+use crate::resources::pipeline::VertexInputDesc;
 
 pub mod types {
     use std::mem::MaybeUninit;

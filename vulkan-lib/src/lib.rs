@@ -1,7 +1,7 @@
 use std::ffi::{c_char, CString};
 use anyhow::bail;
 use ash::{vk, Entry};
-use ash::vk::{make_api_version, ApplicationInfo, BufferCreateInfo, Extent2D};
+use ash::vk::{make_api_version, ApplicationInfo, BufferCreateInfo, Extent2D, PhysicalDevice};
 use log::{info, warn};
 use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
 use sparkles::range_event_start;
@@ -28,6 +28,7 @@ pub use vk::SampleCountFlags;
 pub use vk::AttachmentLoadOp;
 pub use vk::{AttachmentStoreOp, AttachmentDescription, Format, DescriptorType, ShaderStageFlags, ClearValue, ClearDepthStencilValue, SamplerCreateInfo, ImageUsageFlags,
     Filter, SamplerMipmapMode};
+use crate::queue::GraphicsQueue;
 pub use crate::runtime::{DoubleBufferedDescriptorSets, DoubleBuffered};
 
 pub mod instance;
@@ -37,33 +38,29 @@ pub mod util;
 pub mod shaders;
 pub mod runtime;
 mod extensions;
+pub mod queue;
 
 #[cfg(target_os = "android")]
 pub mod android;
+pub mod resources;
 
-pub struct VulkanRenderer {
+pub struct VulkanInstance {
     debug_report: VkDebugReport,
-    surface: VkSurfaceRef,
+    physical_device: PhysicalDevice,
     device: VkDeviceRef,
 
     // runtime state
-    runtime_state: RuntimeState,
     entry: Entry,
 }
 
-impl VulkanRenderer {
+impl VulkanInstance {
     #[track_caller]
-    pub fn new_for_window(window_handle: RawWindowHandle, display_handle: RawDisplayHandle, window_size: (u32, u32)) -> anyhow::Result<Self> {
+    pub fn new_for_handle(window_handle: RawWindowHandle, display_handle: RawDisplayHandle, initial_size: (u32, u32)) -> anyhow::Result<(Self, GraphicsQueue)> {
         let Ok(entry) = (unsafe { Entry::load() }) else {
             bail!("Failed to load Vulkan entry");
         };
 
         let g = range_event_start!("[Vulkan] INIT");
-        info!(
-            "Vulkan init started! Initializing for size: {:?}",
-            window_size
-        );
-
         let app_name = CString::new("Hello Vulkan")?;
 
         let api_version = vk::API_VERSION_1_0;
@@ -129,7 +126,7 @@ impl VulkanRenderer {
                 })
             })
             .unwrap_or_else(|| {
-                panic!("No avaliable physical device found");
+                panic!("No available physical device found");
             });
 
         //select chosen physical device
@@ -200,17 +197,6 @@ impl VulkanRenderer {
         let queue = unsafe { device.get_device_queue(queue_family_index, 0) };
 
 
-        let extent = Extent2D {
-            width: window_size.0,
-            height: window_size.1,
-        };
-        let swapchain_wrapper = SwapchainWrapper::new(
-            device.clone(),
-            physical_device,
-            extent,
-            surface.clone(),
-            None,
-        )?;
 
         let memory_properties = unsafe {
             device
@@ -220,73 +206,45 @@ impl VulkanRenderer {
 
         let memory_heaps = memory_properties.memory_heaps_as_slice().to_vec();
         let memory_types = memory_properties.memory_types_as_slice().to_vec();
-
-        let runtime_state = RuntimeState::new(
-            device.clone(),
-            queue_family_index,
-            queue,
-            physical_device,
-            memory_types,
-            memory_heaps,
-            swapchain_wrapper,
-            surface.clone(),
-            calibrated_timestamps,
-            timestamp_pool,
-        );
-
+        
         let mut res = Self {
             entry,
-            device,
+            physical_device,
+            device: device.clone(),
             debug_report,
+        };
+
+        let extent = Extent2D {
+            width: initial_size.0,
+            height: initial_size.1,
+        };
+        let swapchain_wrapper = SwapchainWrapper::new(
+            device.clone(),
+            physical_device,
+            extent,
             surface,
-            runtime_state,
-        };
+            None,
+        )?;
+        
+        // let graphics_queue = GraphicsQueue::new(
+        //     queue,
+        //     queue_family_index,
+        // );
+        //
+        // res.runtime_state.update_swapchain_image_handles();
 
-        res.runtime_state.update_swapchain_image_handles();
-
-        Ok(res)
+        Ok((res, GraphicsQueue::new(
+            queue,
+            swapchain_wrapper,
+        )))
     }
 
-    pub fn test_buffer_sizes(&mut self, usage: vk::BufferUsageFlags) {
-        info!("Test buffer sizes for usage {:?}", usage);
-
-        let buffer = unsafe {
-            self.device.create_buffer(&BufferCreateInfo::default()
-                .usage(usage)
-                .size(256), None).unwrap()
-        };
-
-        let memory_requirements = unsafe { self.device.get_buffer_memory_requirements(buffer) };
-
-        let alignment = memory_requirements.alignment;
-        let memory_types = memory_requirements.memory_type_bits;
-
-        // if memory_requirements.size != i {
-        //     info!("{} -> {}", i, memory_requirements.size);
-        // }
-
-        unsafe {
-            self.device.destroy_buffer(buffer, None);
-        }
-        info!("Alignment: {}. Memory types: {:b}", alignment, memory_types);
-    } 
-}
-
-impl std::ops::Deref for VulkanRenderer {
-    type Target = RuntimeState;
-
-    fn deref(&self) -> &Self::Target {
-        &self.runtime_state
+    pub fn wait_idle(&mut self) {
+        unimplemented!()
     }
 }
 
-impl std::ops::DerefMut for VulkanRenderer {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.runtime_state
-    }
-}
-
-impl Drop for VulkanRenderer {
+impl Drop for VulkanInstance {
     fn drop(&mut self) {
         // Called before everything is dropped
         info!("vulkan: drop");
