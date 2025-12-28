@@ -38,7 +38,10 @@ impl RecordContext {
     }
 
     pub fn bind_descriptor_set(&mut self, set: u32, descriptor_set: Arc<DescriptorSetResource>) {
-        self.bound_descriptor_sets.insert(set, descriptor_set);
+        descriptor_set.lock_updates();
+        if let Some(prev) = self.bound_descriptor_sets.insert(set, descriptor_set) {
+            prev.unlock_updates();
+        }
     }
 
     pub fn bind_vertex_buffer(&mut self, buf: Arc<BufferResource>) {
@@ -137,6 +140,11 @@ impl RecordContext {
     pub(crate) fn take_commands(self) -> Vec<DeviceCommand> {
         self.commands
     }
+    pub(crate) fn unlock_descriptor_sets(&self) {
+        for ds in self.bound_descriptor_sets.values() {
+            ds.unlock_updates();
+        }
+    }
 }
 
 pub struct RenderPassContext<'a> {
@@ -169,8 +177,8 @@ impl<'a> RenderPassContext<'a> {
         }
         self.bound_descriptor_sets.clear();
         let new_vertex_buffer = self.bound_vertex_buffer.take();
-        let pipeline_handle = self.bound_pipeline.clone().unwrap();
-        let pipeline_handle_changed = self.pipeline_changed;
+        let pipeline = self.bound_pipeline.clone().expect("You must bind pipeline before draw command");
+        let pipeline_changed = self.pipeline_changed;
         self.pipeline_changed = false;
 
         self.commands.push(DeviceCommand::DrawCommand(DrawCommand::Draw {
@@ -180,8 +188,8 @@ impl<'a> RenderPassContext<'a> {
             first_instance,
             new_vertex_buffer,
             new_descriptor_set_bindings,
-            pipeline: pipeline_handle,
-            pipeline_handle_changed
+            pipeline,
+            pipeline_changed,
         }));
     }
 }
@@ -194,7 +202,7 @@ pub enum DrawCommand {
         first_instance: u32,
         new_vertex_buffer: Option<Arc<BufferResource>>,
         pipeline: Arc<GraphicsPipelineResource>,
-        pipeline_handle_changed: bool,
+        pipeline_changed: bool,
         new_descriptor_set_bindings: SmallVec<[(u32, Arc<DescriptorSetResource>); 4]>,
     },
 }
@@ -202,7 +210,7 @@ pub enum DrawCommand {
 pub enum SpecificResourceUsage {
     BufferUsage {
         usage: ResourceUsage,
-        handle: Arc<BufferResource>
+        buffer: Arc<BufferResource>
     },
     ImageUsage {
         usage: ResourceUsage,
@@ -259,6 +267,7 @@ pub enum DeviceCommand {
 }
 
 impl DeviceCommand {
+    /// Get usages for command, update last_used_in
     pub fn usages(&self, submission_num: usize, swapchain_images: &SwapchainImages) -> Box<dyn Iterator<Item=SpecificResourceUsage>> {
         match self {
             DeviceCommand::CopyBuffer {
@@ -266,6 +275,8 @@ impl DeviceCommand {
                 dst,
                 regions
             } => {
+                src.submission_usage.store(Some(submission_num));
+                dst.submission_usage.store(Some(submission_num));
                 Box::new(
                     [
                         SpecificResourceUsage::BufferUsage {
@@ -274,7 +285,7 @@ impl DeviceCommand {
                                 PipelineStageFlags::TRANSFER,
                                 AccessFlags::TRANSFER_READ,
                                 ),
-                            handle: src.clone()
+                            buffer: src.clone()
                         },
                         SpecificResourceUsage::BufferUsage {
                             usage: ResourceUsage::new(
@@ -282,7 +293,7 @@ impl DeviceCommand {
                                 PipelineStageFlags::TRANSFER,
                                 AccessFlags::TRANSFER_WRITE,
                             ),
-                            handle: dst.clone()
+                            buffer: dst.clone()
                         },
                     ].into_iter()
                 )
@@ -293,6 +304,8 @@ impl DeviceCommand {
                 dst,
                 regions,
             } => {
+                src.submission_usage.store(Some(submission_num));
+                dst.submission_usage.store(Some(submission_num));
                 let combined_aspect = regions.iter()
                     .fold(ImageAspectFlags::empty(), |acc, region| acc | region.image_subresource.aspect_mask);
                 Box::new(
@@ -303,7 +316,7 @@ impl DeviceCommand {
                                 PipelineStageFlags::TRANSFER,
                                 AccessFlags::TRANSFER_READ,
                             ),
-                            handle: src.clone()
+                            buffer: src.clone()
                         },
                         SpecificResourceUsage::ImageUsage {
                             usage: ResourceUsage::new(
@@ -319,6 +332,7 @@ impl DeviceCommand {
                 )
             }
             DeviceCommand::FillBuffer { buffer, .. } => {
+                buffer.submission_usage.store(Some(submission_num));
                 Box::new(iter::once(
                     SpecificResourceUsage::BufferUsage {
                         usage: ResourceUsage::new(
@@ -326,53 +340,63 @@ impl DeviceCommand {
                             PipelineStageFlags::TRANSFER,
                             AccessFlags::TRANSFER_WRITE,
                         ),
-                        handle: buffer.clone()
+                        buffer: buffer.clone()
                     },
                 ))
             }
             DeviceCommand::Barrier => Box::new(iter::empty()),
-            DeviceCommand::ImageLayoutTransition {image, new_layout, image_aspect} => Box::new(iter::once(
-                SpecificResourceUsage::ImageUsage {
-                    usage: ResourceUsage::new(
-                        Some(submission_num),
-                        PipelineStageFlags::TRANSFER, // keep non-empty stage flag for execution dependency
-                        AccessFlags::empty(),
-                    ),
-                    image: image.clone(),
-                    required_layout: Some(*new_layout),
-                    image_aspect: *image_aspect
-                },
-            )),
-            DeviceCommand::ClearColorImage {image, image_aspect, ..} => Box::new(iter::once(
-                SpecificResourceUsage::ImageUsage {
-                    usage: ResourceUsage::new(
-                        Some(submission_num),
-                        PipelineStageFlags::TRANSFER,
-                        AccessFlags::TRANSFER_WRITE,
-                    ),
-                    image: image.clone(),
-                    required_layout: Some(ImageLayout::TRANSFER_DST_OPTIMAL),
-                    image_aspect: *image_aspect
-                },
-            )),
-            DeviceCommand::ClearDepthStencilImage {image, depth_value, stencil_value} => Box::new(iter::once(
-                SpecificResourceUsage::ImageUsage {
-                    usage: ResourceUsage::new(
-                        Some(submission_num),
-                        PipelineStageFlags::TRANSFER,
-                        AccessFlags::TRANSFER_WRITE,
-                    ),
-                    image: image.clone(),
-                    required_layout: Some(ImageLayout::TRANSFER_DST_OPTIMAL),
-                    image_aspect: match (depth_value, stencil_value) {
-                        (Some(_), Some(_)) => ImageAspectFlags::DEPTH | ImageAspectFlags::STENCIL,
-                        (Some(_), None) => ImageAspectFlags::DEPTH,
-                        (None, Some(_)) => ImageAspectFlags::STENCIL,
-                        (None, None) => ImageAspectFlags::empty(),
-                    }
-                },
-            )),
+            DeviceCommand::ImageLayoutTransition {image, new_layout, image_aspect} => {
+                image.submission_usage.store(Some(submission_num));
+                Box::new(iter::once(
+                    SpecificResourceUsage::ImageUsage {
+                        usage: ResourceUsage::new(
+                            Some(submission_num),
+                            PipelineStageFlags::TRANSFER, // keep non-empty stage flag for execution dependency
+                            AccessFlags::empty(),
+                        ),
+                        image: image.clone(),
+                        required_layout: Some(*new_layout),
+                        image_aspect: *image_aspect
+                    },
+                ))
+            },
+            DeviceCommand::ClearColorImage {image, image_aspect, ..} => {
+                image.submission_usage.store(Some(submission_num));
+                Box::new(iter::once(
+                    SpecificResourceUsage::ImageUsage {
+                        usage: ResourceUsage::new(
+                            Some(submission_num),
+                            PipelineStageFlags::TRANSFER,
+                            AccessFlags::TRANSFER_WRITE,
+                        ),
+                        image: image.clone(),
+                        required_layout: Some(ImageLayout::TRANSFER_DST_OPTIMAL),
+                        image_aspect: *image_aspect
+                    },
+                ))
+            },
+            DeviceCommand::ClearDepthStencilImage {image, depth_value, stencil_value} => {
+                image.submission_usage.store(Some(submission_num));
+                Box::new(iter::once(
+                    SpecificResourceUsage::ImageUsage {
+                        usage: ResourceUsage::new(
+                            Some(submission_num),
+                            PipelineStageFlags::TRANSFER,
+                            AccessFlags::TRANSFER_WRITE,
+                        ),
+                        image: image.clone(),
+                        required_layout: Some(ImageLayout::TRANSFER_DST_OPTIMAL),
+                        image_aspect: match (depth_value, stencil_value) {
+                            (Some(_), Some(_)) => ImageAspectFlags::DEPTH | ImageAspectFlags::STENCIL,
+                            (Some(_), None) => ImageAspectFlags::DEPTH,
+                            (None, Some(_)) => ImageAspectFlags::STENCIL,
+                            (None, None) => ImageAspectFlags::empty(),
+                        }
+                    },
+                ))
+            },
             DeviceCommand::RenderPassBegin { render_pass, framebuffer_index, .. } => {
+                render_pass.submission_usage.store(Some(submission_num));
                 // usages for attachments
                 let attachments = render_pass.attachments_desc();
                 let swapchain_desc = attachments.get_swapchain_desc();
@@ -458,29 +482,30 @@ impl DeviceCommand {
                 DrawCommand::Draw {
                     new_vertex_buffer,
                     new_descriptor_set_bindings,
-                    pipeline: pipeline_handle,
-                    pipeline_handle_changed,
+                    pipeline,
+                    pipeline_changed,
                     ..
                 }
             ) => {
                 let mut usages: SmallVec<[_; 10]> = smallvec![];
                 if let Some(v_buf) = new_vertex_buffer {
                     usages.push(SpecificResourceUsage::BufferUsage {
-                        handle: v_buf.clone(),
+                        buffer: v_buf.clone(),
                         usage: ResourceUsage::new(
                             Some(submission_num),
                             PipelineStageFlags::VERTEX_INPUT,
                             AccessFlags::VERTEX_ATTRIBUTE_READ,
                         ),
-                    })
+                    });
+                    v_buf.submission_usage.store(Some(submission_num));
                 }
-                for (set_index, descriptor_set_handle) in new_descriptor_set_bindings {
+                for (set_index, descriptor_set) in new_descriptor_set_bindings {
                     // collect usage for bound resources
-                    for binding in descriptor_set_handle.bindings().lock().unwrap().iter() {
+                    for binding in descriptor_set.bindings().lock().unwrap().iter() {
                         match binding.resource.as_ref().expect("all descriptor set resources must be bound") {
                             BoundResource::Buffer(buf) => {
                                 usages.push(SpecificResourceUsage::BufferUsage {
-                                    handle: buf.clone(),
+                                    buffer: buf.clone(),
                                     usage: ResourceUsage::new(
                                         Some(submission_num),
                                         PipelineStageFlags::VERTEX_SHADER | PipelineStageFlags::FRAGMENT_SHADER,
@@ -504,11 +529,13 @@ impl DeviceCommand {
                         }
                     }
 
-                    // mark descriptor set used
+                    // mark descriptor sets used
+                    descriptor_set.submission_usage.store(Some(submission_num));
                 }
 
-                if *pipeline_handle_changed {
+                if *pipeline_changed {
                     // mark pipeline used
+                    pipeline.submission_usage.store(Some(submission_num))
                 }
                 Box::new(usages.into_iter())
             }

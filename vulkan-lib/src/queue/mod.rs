@@ -6,22 +6,20 @@ pub mod semaphores;
 pub mod shared;
 
 use std::collections::HashMap;
-use std::mem;
+use std::sync;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 use anyhow::Context;
 use ash::vk;
-use ash::vk::{AccessFlags, AttachmentDescription, BufferMemoryBarrier, CommandBufferBeginInfo, DependencyFlags, Extent2D, Extent3D, Framebuffer, ImageAspectFlags, ImageLayout, ImageMemoryBarrier, ImageSubresourceRange, PhysicalDevice, PipelineBindPoint, PipelineStageFlags, Queue, Rect2D, RenderPassBeginInfo, SubpassContents, Viewport, WHOLE_SIZE};
+use ash::vk::{AccessFlags, BufferMemoryBarrier, CommandBufferBeginInfo, DependencyFlags, Extent2D, ImageAspectFlags, ImageLayout, ImageMemoryBarrier, ImageSubresourceRange, ImageView, PhysicalDevice, PipelineBindPoint, PipelineStageFlags, Queue, Rect2D, RenderPassBeginInfo, SubpassContents, Viewport, WHOLE_SIZE};
 use log::{info, warn};
 use smallvec::{smallvec, SmallVec};
 use sparkles::monotonic::get_perf_frequency;
 use sparkles::{range_event_start, static_name};
 use sparkles::external_events::ExternalEventsSource;
-use strum::IntoDiscriminant;
 use crate::extensions::calibrated_timestamps::CalibratedTimestamps;
-use crate::resources::image::ImageResource;
-use crate::resources::render_pass::RenderPassResource;
+use crate::resources::render_pass::{FrameBufferAttachment, RenderPassResource};
 use command_buffers::CommandBufferManager;
 use shared::SharedState;
 use crate::queue::queue_local::QueueLocalToken;
@@ -39,7 +37,8 @@ pub struct GraphicsQueue {
     queue: vk::Queue,
     surface: VkSurfaceRef,
     swapchain_wrapper: SwapchainWrapper,
-    framebuffers: HashMap<vk::RenderPass, (Arc<RenderPassResource>, SmallVec<[(Framebuffer, SmallVec<[ImageResource; 5]>); 5]>)>,
+    framebuffers: HashMap<vk::RenderPass, (sync::Weak<RenderPassResource>, SmallVec<[vk::Framebuffer; 4]>)>,
+    recycled_framebuffers: HashMap<usize, SmallVec<[vk::Framebuffer; 4]>>,
     token: QueueLocalToken,
 
     shared_state: shared::SharedState,
@@ -84,6 +83,7 @@ impl GraphicsQueue {
             surface,
             swapchain_wrapper,
             framebuffers: HashMap::new(),
+            recycled_framebuffers: HashMap::new(),
             token: QueueLocalToken::try_new().unwrap(),
 
             shared_state,
@@ -97,48 +97,66 @@ impl GraphicsQueue {
         }
     }
 
-    fn destroy_render_pass_resources(&mut self, render_pass: vk::RenderPass) {
-        let framebuffers = self.framebuffers.remove(&render_pass);
-        if let Some((rp,framebuffers)) = framebuffers {
+    fn get_or_create_framebuffers(&mut self, render_pass: &Arc<RenderPassResource>) -> SmallVec<[vk::Framebuffer; 4]> {
+        let framebuffer = self.framebuffers
+            .entry(render_pass.render_pass)
+            .or_insert_with(|| {
+                let mut framebuffers = smallvec![];
+                let swapchain_images = self.swapchain_wrapper.get_images();
+                for attachments in render_pass.attachments() {
+                    let mut views: SmallVec<[ImageView; 5]> = smallvec![];
+                    for attachment in attachments {
+                        let image_view = match attachment {
+                            FrameBufferAttachment::SwapchainImage(i) => swapchain_images[i].image_view,
+                            FrameBufferAttachment::Image(image) => image.image_view,
+                        };
+                        views.push(image_view);
+                    }
+                    let swapchain_extent = self.swapchain_wrapper.get_extent();
+                    let framebuffer_create_info = vk::FramebufferCreateInfo::default()
+                        .render_pass(render_pass.render_pass)
+                        .attachments(&views)
+                        .width(swapchain_extent.width)
+                        .height(swapchain_extent.height)
+                        .layers(1);
+                    let framebuffer = unsafe {
+                        self.device.create_framebuffer(&framebuffer_create_info, None).unwrap()
+                    };
 
-        }
-    }
-    pub fn recreate_render_pass_resources(&mut self, render_pass_handle: RenderPassHandle, device: VkDeviceRef, shared: SharedState,
-                                          swapchain_images: &SmallVec<[ImageResourceHandle; 3]>) {
-        let render_pass_inner = self.render_passes.get_mut(render_pass_handle.0).unwrap();
-        assert!(render_pass_inner.framebuffers.is_empty(), "Render pass resources must be destroyed using `destroy_render_pass_resources` before recreation");
+                    framebuffers.push(framebuffer);
+                }
 
-        let render_pass = render_pass_inner.render_pass;
-        let attachments_description = &render_pass_inner.attachments_description;
-        let mut attachments = SmallVec::<[AttachmentDescription; 5]>::new();
-        attachments.push(attachments_description.swapchain_attachment_desc);
-        if let Some(depth_attachment) = &attachments_description.depth_attachment_desc {
-            attachments.push(*depth_attachment);
-        }
-        if let Some(resolve_attachment) = &attachments_description.color_attachement_desc {
-            attachments.push(*resolve_attachment);
-        }
-        let swapchain_format = self.image(swapchain_images[0].state_key).format;
-
-        let framebuffers = self.create_framebuffers(
-            device.clone(),
-            render_pass,
-            swapchain_images,
-            Extent3D {
-                width: swapchain_images[0].width,
-                height: swapchain_images[0].height,
-                depth: 1,
-            },
-            &attachments,
-            swapchain_format,
-            shared.clone(),
-        );
-
-        let render_pass_inner = self.render_passes.get_mut(render_pass_handle.0).unwrap();
-        render_pass_inner.framebuffers = framebuffers;
+                let render_pass = Arc::downgrade(render_pass);
+                (render_pass, framebuffers)
+            });
+        framebuffer.1.clone()
     }
 
 
+    pub fn recycle_old_resources(&mut self) {
+        // destroy framebuffers if their render pass was destroyed
+        let keys = self.framebuffers.keys().cloned().collect::<SmallVec<[_; 5]>>();
+        for key in keys {
+            if sync::Weak::upgrade(&self.framebuffers.get(&key).unwrap().0).is_none() {
+                let (render_pass, framebuffers) =self.framebuffers.remove(&key).unwrap();
+                for framebuffer in framebuffers {
+                    unsafe {
+                        self.device.destroy_framebuffer(framebuffer, None);
+                    }
+                }
+            }
+        }
+
+        // destroy pending for recycle framebuffers
+        let last_waited_num = self.shared_state.last_host_waited_submission();
+        for (_, framebuffers) in self.recycled_framebuffers.extract_if(|s, _| *s <= last_waited_num) {
+            for framebuffer in framebuffers {
+                unsafe {
+                    self.device.destroy_framebuffer(framebuffer, None);
+                }
+            }
+        }
+    }
 
     // Swapchain methods
     pub fn recreate_resize(&mut self, new_extent: (u32, u32)) {
@@ -147,16 +165,31 @@ impl GraphicsQueue {
             width: new_extent.0,
             height: new_extent.1,
         };
-        // Submit all commands and wait for idle
-        // TODO: we can schedule destruction for old swapchain :)
-        let g = range_event_start!("Wait idle");
-        self.wait_idle();
-        drop(g);
 
-        let active_render_passes = self.resource_storage.render_passes();
-        // 1. Destroy swapchain dependent resources (framebuffers)
-        for render_pass in &active_render_passes {
-            self.destroy_render_pass_resources(*render_pass);
+        // 1. Move old framebuffers to recycled
+        for (_, (render_pass, framebuffers)) in self.framebuffers.drain() {
+            if let Some(render_pass) = sync::Weak::upgrade(&render_pass) {
+                let last_used = render_pass.submission_usage.load();
+                // keep for lazy destruction
+                if let Some(seq_num) = last_used {
+                    self.recycled_framebuffers.entry(seq_num).or_default()
+                        .extend_from_slice(&framebuffers);
+                }
+                else {
+                    for framebuffer in framebuffers {
+                        unsafe {
+                            self.device.destroy_framebuffer(framebuffer, None);
+                        }
+                    }
+                }
+            }
+            else {
+                for framebuffer in framebuffers {
+                    unsafe {
+                        self.device.destroy_framebuffer(framebuffer, None);
+                    }
+                }
+            }
         }
 
         // 2. Recreate swapchain
@@ -169,14 +202,6 @@ impl GraphicsQueue {
         let new_format = self.swapchain_wrapper.get_surface_format();
         if new_format != old_format {
             unimplemented!("Swapchain format has changed");
-        }
-
-
-        // 3. Recreate swapchain_dependent resources (framebuffers)
-        let new_images = self.swapchain_wrapper.get_images();
-        let g = range_event_start!("Create framebuffers");
-        for render_pass in &active_render_passes {
-            self.recreate_render_pass_resources(*render_pass, self.device.clone(), self.shared_state.clone(), &new_images);
         }
     }
 
@@ -302,8 +327,7 @@ impl GraphicsQueue {
         let mut record_context = RecordContext::new(); // lives for 'c
         f(&mut record_context);
 
-        self.destroy_old_resources();
-
+        self.recycle_old_resources();
         let submission_num = self.shared_state.increment_and_get_submission_num();
 
         self.shared_state.poll_completed_fences(); // fast check if any of previous submissions are finished
@@ -370,13 +394,8 @@ impl GraphicsQueue {
                     match usage {
                         SpecificResourceUsage::BufferUsage {
                             usage,
-                            handle: buffer
+                            buffer,
                         } => {
-                            // Update host state last_used_in for mappable buffers
-                            if let Some(host_state) = buffer.host_state {
-                                host_state.last_used_in.store(Some(submission_num));
-                            }
-
                             let had_host_writes = buffer.host_state.is_some_and(|s| s.has_host_writes.swap(false, Ordering::Relaxed));
 
                             // 1) update state if waited on host
@@ -498,9 +517,6 @@ impl GraphicsQueue {
 
                         attachment_i += 1;
                     }
-
-                    // update last_used_in
-                    render_pass.submission_usage.store(Some(submission_num));
                 }
             }
 
@@ -612,9 +628,10 @@ impl GraphicsQueue {
                         framebuffer_index,
                         clear_values,
                     } => {
+                        let framebuffers = self.get_or_create_framebuffers(render_pass);
                         let info = RenderPassBeginInfo::default()
                             .render_pass(render_pass.render_pass)
-                            .framebuffer(render_pass.framebuffers[*framebuffer_index as usize].0)
+                            .framebuffer(framebuffers[*framebuffer_index as usize])
                             .clear_values(clear_values)
                             .render_area(Rect2D::default().extent(self.swapchain_wrapper.swapchain_extent));
                         unsafe {
@@ -637,7 +654,7 @@ impl GraphicsQueue {
                                                    first_instance,
                                                    new_vertex_buffer,
                                                    pipeline,
-                                                   pipeline_handle_changed,
+                                                   pipeline_changed: pipeline_handle_changed,
                                                    new_descriptor_set_bindings,
                                                } ) => {
                         unsafe {
@@ -649,12 +666,7 @@ impl GraphicsQueue {
                             }
                             for (binding, descriptor_set) in new_descriptor_set_bindings {
                                 // update descriptor set if have new bindings
-                                let mut ds_inner = descriptor_set.bindings.lock().unwrap();
-                                for binding in ds_inner.iter_mut() {
-                                    if binding.resource_updated {
-
-                                    }
-                                }
+                                descriptor_set.update_descriptor_set(&self.device);
 
                                 // bind descriptor set
                                 self.device.cmd_bind_descriptor_sets(
@@ -682,6 +694,7 @@ impl GraphicsQueue {
             #[cfg(feature = "recording-logs")]
             info!("}}");
         }
+        record_context.unlock_descriptor_sets();
 
         // write end timestamp
         if let Some(slot) = slot {
@@ -763,12 +776,12 @@ impl GraphicsQueue {
                 )
                 .context("acquire_next_image")?
         };
-        let image_handle = self.swapchain_wrapper.get_images()[index as usize];
+        let image = self.swapchain_wrapper.get_images()[index as usize].clone();
 
         #[cfg(feature = "recording-logs")]
         info!("Recording command AcquireNextImage (image_index = {})", index);
 
-        self.semaphore_manager.modify_waited_operations(&wait_ref, smallvec![WaitedOperation::SwapchainImageAcquired(image_handle)]);
+        self.semaphore_manager.modify_waited_operations(&wait_ref, smallvec![WaitedOperation::SwapchainImageAcquired(image)]);
 
         Ok((index, wait_ref, is_suboptimal))
     }
@@ -781,8 +794,8 @@ impl GraphicsQueue {
         // Present operations don't have fence tracking, use None for untracked semaphore
         let (wait_semaphore, waited_operations) = self.semaphore_manager.get_wait_semaphore(wait_stages_ref, None);
         // ensure swapchain image is prepared and is in PRESENT layout
-        let image_handle = self.swapchain_wrapper.get_images()[image_index as usize];
-        let image_inner = image_handle.inner.get(&mut self.token);
+        let image = self.swapchain_wrapper.get_images()[image_index as usize].clone();
+        let image_inner = image.inner.get(&mut self.token);
         if image_inner.layout != ImageLayout::GENERAL && image_inner.layout != ImageLayout::PRESENT_SRC_KHR {
             warn!("Image layout for presentable image must be PRESENT or GENERAL!");
         }

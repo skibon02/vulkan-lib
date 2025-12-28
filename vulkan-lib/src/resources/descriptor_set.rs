@@ -105,11 +105,18 @@ impl DescriptorSetResource {
     }
 
     /// SAFETY: Must ensure descriptor set is not currently used in any command buffers.
-    pub(crate) fn update_descriptor_set(&mut self, device: &VkDeviceRef) {
+    pub(crate) fn update_descriptor_set(&self, device: &VkDeviceRef) {
         let mut buffer_bindings: SmallVec<[_; 4]> = smallvec![];
         let mut image_bindings: SmallVec<[_; 4]> = smallvec![];
         let mut bindings = self.bindings.lock().unwrap();
         for binding in bindings.iter_mut() {
+            if binding.resource.is_none() {
+                error!("Descriptor set binding {}:{:?} is not set during draw command!", binding.binding_index, binding.descriptor_type);
+            }
+
+            if !binding.resource_updated {
+                continue;
+            }
             if let Some(resource) = &binding.resource {
                 match resource {
                     BoundResource::Buffer(buffer) => {
@@ -182,12 +189,5 @@ impl Drop for DescriptorSetResource {
         if !self.dropped {
             error!("DescriptorSetResource dropped without proper destruction!");
         }
-    }
-}
-
-pub(crate) fn destroy_descriptor_set(device: &VkDeviceRef, mut descriptor_set: DescriptorSetResource) {
-    if !descriptor_set.dropped {
-
-        descriptor_set.dropped = true;
     }
 }

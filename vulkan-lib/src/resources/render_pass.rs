@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use ash::vk;
 use ash::vk::{AccessFlags, AttachmentDescription, AttachmentLoadOp, AttachmentStoreOp, Format, ImageLayout, PipelineBindPoint, PipelineStageFlags};
 use log::error;
@@ -19,6 +20,7 @@ pub struct RenderPassResource {
     attachments_description: AttachmentsDescription,
     attachments: SmallVec<[SmallVec<[FrameBufferAttachment; 5]>; 5]>,
     pub(crate) submission_usage: OptionSeqNumShared,
+    framebuffer_registered: AtomicBool,
 
     dropped: bool,
 }
@@ -96,9 +98,14 @@ impl RenderPassResource {
                 }
             }).collect()],
             submission_usage: OptionSeqNumShared::default(),
+            framebuffer_registered: AtomicBool::new(false),
 
             dropped: false,
         }
+    }
+
+    pub(crate) fn should_register_framebuffers(&self) -> bool {
+        !self.framebuffer_registered.swap(true, Ordering::Relaxed)
     }
 
     pub fn attachments_desc(&self) -> AttachmentsDescription {
