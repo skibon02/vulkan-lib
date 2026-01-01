@@ -7,23 +7,26 @@ use parking_lot::Mutex;
 use sparkles::range_event_start;
 use crate::wrappers::device::VkDeviceRef;
 
+#[derive(Copy, Clone)]
+pub struct HostWaitedNum(usize);
+
+impl HostWaitedNum {
+    pub fn num(&self) -> usize {
+        self.0
+    }
+}
+
 struct SharedStateInner {
     device: VkDeviceRef,
-    host_waited_submission: usize,
     active_fences: Vec<(usize, vk::Fence)>,
     free_fences: Vec<vk::Fence>,
-
-    last_submission_num: Arc<AtomicUsize>,
 }
 impl SharedStateInner {
-    fn new(device: VkDeviceRef, last_submission_num: Arc<AtomicUsize>) -> Self {
+    fn new(device: VkDeviceRef) -> Self {
         Self {
-            host_waited_submission: 0,
             active_fences: Vec::new(),
             free_fences: Vec::new(),
             device,
-
-            last_submission_num,
         }
     }
 }
@@ -42,8 +45,8 @@ impl SharedStateInner {
         self.free_fences.push(fence);
     }
 
-    pub fn take_fence_to_wait(&mut self, submission_num: usize) -> Option<(usize, vk::Fence)> {
-        if self.host_waited_submission >= submission_num {
+    pub fn take_fence_to_wait(&mut self, submission_num: usize, host_waited: &AtomicUsize) -> Option<(usize, vk::Fence)> {
+        if host_waited.load(Ordering::Relaxed) >= submission_num {
             return None;
         }
 
@@ -70,13 +73,13 @@ impl SharedStateInner {
                 Some((num, fence))
             } else {
                 warn!("Unexpected situation! Cannot find fence to wait on host for submission {} (host waited for {})",
-                    submission_num, self.host_waited_submission);
+                    submission_num, host_waited.load(Ordering::Relaxed));
                 None
             }
         }
     }
-    pub fn confirm_wait_fence(&mut self, submission_num: usize) {
-        self.host_waited_submission = submission_num;
+    pub fn confirm_wait_fence(&mut self, submission_num: usize, host_waited: &AtomicUsize) {
+        host_waited.store(submission_num, Ordering::Release);
         if cfg!(feature="recording-logs") {
             info!("Host waited for submission {}", submission_num);
         }
@@ -95,7 +98,7 @@ impl SharedStateInner {
 
     /// Check fences from oldest to newest, updating host_waited_submission
     /// without blocking. Stops at first unsignaled fence.
-    pub fn poll_completed_fences(&mut self) {
+    pub fn poll_completed_fences(&mut self, host_waited: &AtomicUsize) {
         if self.active_fences.is_empty() {
             return;
         }
@@ -103,7 +106,7 @@ impl SharedStateInner {
         // sort by submission number to check oldest first
         self.active_fences.sort_by_key(|(num, _)| *num);
 
-        let mut last_signaled_submission = self.host_waited_submission;
+        let mut last_signaled_submission = host_waited.load(Ordering::Relaxed);
         let mut completed_count = 0;
 
         for i in 0..self.active_fences.len() {
@@ -129,7 +132,7 @@ impl SharedStateInner {
 
         if completed_count > 0 {
             // update host_waited_submission
-            self.host_waited_submission = last_signaled_submission;
+            host_waited.store(last_signaled_submission, Ordering::Release);
 
             // remove and recycle completed fences
             let completed_fences: Vec<_> = self.active_fences.drain(0..completed_count).collect();
@@ -159,18 +162,22 @@ pub struct SharedState {
     device: VkDeviceRef,
     state: Arc<Mutex<SharedStateInner>>,
     last_submission_num: Arc<AtomicUsize>,
+    last_host_waited_submission: Arc<AtomicUsize>,
 }
 
 impl SharedState {
     pub fn new(device: VkDeviceRef) -> Self {
         let last_submission_num = Arc::new(AtomicUsize::new(0));
+        let last_host_waited_submission = Arc::new(AtomicUsize::new(0));
         Self {
             device: device.clone(),
-            state: Arc::new(Mutex::new(SharedStateInner::new(device, last_submission_num.clone()))),
+            state: Arc::new(Mutex::new(SharedStateInner::new(device))),
             last_submission_num,
+            last_host_waited_submission,
         }
     }
 
+    /// Submission number of last recorded and submitted commands
     pub fn last_submission_num(&self) -> usize {
         self.last_submission_num.load(Ordering::Relaxed)
     }
@@ -179,8 +186,15 @@ impl SharedState {
         self.last_submission_num.fetch_add(1, Ordering::Relaxed) + 1
     }
 
-    pub fn last_host_waited_submission(&self) -> usize {
-        self.state.lock().host_waited_submission
+    /// Returns cached value of last host-waited submission without polling fences
+    pub fn last_host_waited_cached(&self) -> HostWaitedNum {
+        HostWaitedNum(self.last_host_waited_submission.load(Ordering::Acquire))
+    }
+
+    /// Polls fences to update and return the actual last host-waited submission
+    pub fn last_host_waited_submission(&self) -> HostWaitedNum {
+        self.poll_completed_fences();
+        HostWaitedNum(self.last_host_waited_submission.load(Ordering::Acquire))
     }
 
 
@@ -192,9 +206,11 @@ impl SharedState {
         self.state.lock().submitted_fence(submission_num, fence);
     }
 
-    pub(crate) fn wait_submission(&self, submission_num: usize) {
+    pub fn wait_submission(&self, rel_sub_num: usize) -> HostWaitedNum {
+        let last_submitted_num = self.last_submission_num.load(Ordering::Relaxed);
+        let submission_num = last_submitted_num.saturating_sub(rel_sub_num);
         let g = range_event_start!("[Vulkan] Wait for fence");
-        let fence_to_wait = self.state.lock().take_fence_to_wait(submission_num);
+        let fence_to_wait = self.state.lock().take_fence_to_wait(submission_num, &self.last_host_waited_submission);
         if let Some((num, fence)) = fence_to_wait {
             let g = range_event_start!("Actual wait");
             unsafe {
@@ -202,17 +218,19 @@ impl SharedState {
             }
             drop(g);
             let mut guard = self.state.lock();
-            guard.confirm_wait_fence(num);
+            guard.confirm_wait_fence(num, &self.last_host_waited_submission);
             guard.return_free_fence(fence);
         }
+
+        HostWaitedNum(submission_num)
     }
 
     pub fn confirm_all_waited(&self, submission_num: usize) {
-        self.state.lock().confirm_wait_fence(submission_num);
+        self.state.lock().confirm_wait_fence(submission_num, &self.last_host_waited_submission);
     }
 
     pub fn poll_completed_fences(&self) {
-        self.state.lock().poll_completed_fences();
+        self.state.lock().poll_completed_fences(&self.last_host_waited_submission);
     }
 
     pub fn device(&mut self) -> VkDeviceRef {

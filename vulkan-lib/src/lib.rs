@@ -1,6 +1,6 @@
 use std::ffi::{c_char, CString};
 use anyhow::bail;
-use ash::{vk, Entry};
+use ash::Entry;
 use ash::vk::{make_api_version, ApplicationInfo, BufferCreateInfo, Extent2D, PhysicalDevice};
 use log::{info, warn};
 use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
@@ -13,21 +13,9 @@ use crate::wrappers::surface::{VkSurface, VkSurfaceRef};
 use crate::extensions::calibrated_timestamps::CalibratedTimestamps;
 use crate::wrappers::timestamp_pool::TimestampPool;
 
-pub use vk::BufferUsageFlags;
-pub use vk::PipelineStageFlags;
-pub use vk::BufferCopy;
-pub use vk::BufferImageCopy;
-pub use vk::Extent3D;
-pub use vk::Offset3D;
-pub use vk::ImageLayout;
-pub use vk::ImageAspectFlags;
-pub use vk::ImageSubresourceLayers;
-pub use vk::ClearColorValue;
-pub use vk::SampleCountFlags;
-pub use vk::AttachmentLoadOp;
-pub use vk::{AttachmentStoreOp, AttachmentDescription, Format, DescriptorType, ShaderStageFlags, ClearValue, ClearDepthStencilValue, SamplerCreateInfo, ImageUsageFlags,
-    Filter, SamplerMipmapMode};
 use crate::queue::GraphicsQueue;
+pub use ash::vk;
+pub use vk::{DescriptorType, ShaderStageFlags};
 
 pub mod instance;
 mod wrappers;
@@ -222,23 +210,17 @@ impl VulkanInstance {
             surface,
             None,
         )?;
-        
+
         Ok((res, GraphicsQueue::new(
             device,
+            queue_family_index,
             queue,
+            physical_device,
             swapchain_wrapper,
+            calibrated_timestamps,
+            timestamp_pool,
+            memory_types,
+            memory_heaps,
         )))
-    }
-
-    pub fn wait_idle(&mut self) {
-        unimplemented!()
-    }
-}
-
-impl Drop for VulkanInstance {
-    fn drop(&mut self) {
-        // Called before everything is dropped
-        info!("vulkan: drop");
-        self.wait_idle();
     }
 }

@@ -25,6 +25,10 @@ pub struct SwapchainWrapper {
 pub type SwapchainImages = SmallVec<[Arc<ImageResource>; 4]>;
 
 impl SwapchainWrapper {
+    pub(crate) fn surface(&self) -> VkSurfaceRef {
+        self.surface.clone()
+    }
+
     pub fn new(device: VkDeviceRef, physical_device: PhysicalDevice,
                extent: Extent2D, surface_ref: VkSurfaceRef, old_swapchain: Option<SwapchainKHR>) -> anyhow::Result<SwapchainWrapper> {
         let g = range_event_start!("[Vulkan] Init swapchain");

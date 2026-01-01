@@ -214,7 +214,7 @@ impl DescriptorSetAllocator {
 
 impl Drop for DescriptorSetAllocator {
     fn drop(&mut self) {
-        let last_waited = self.shared_state.last_host_waited_submission();
+        let last_waited = self.shared_state.last_host_waited_submission().num();
 
         let mut sets_in_use = 0;
         let mut sets_leaked = 0;

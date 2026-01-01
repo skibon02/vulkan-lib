@@ -11,7 +11,7 @@ use winit::event_loop::ActiveEventLoop;
 use winit::keyboard;
 use winit::keyboard::NamedKey;
 use winit::window::{Fullscreen, Window};
-use vulkan_lib::{BufferUsageFlags, VulkanInstance};
+use vulkan_lib::{VulkanInstance};
 use crate::component::Component;
 use crate::layout::calculator::LayoutCalculator;
 use crate::render;
@@ -30,6 +30,7 @@ pub struct App {
     layout_calculator: LayoutCalculator,
 
     // Rendering thread
+    instance: VulkanInstance,
     render_tx: mpsc::Sender<RenderMessage>,
     render_thread: Option<JoinHandle<()>>,
     render_ready: Arc<AtomicBool>,
@@ -47,11 +48,7 @@ impl App {
         let raw_display_handle = window.raw_display_handle().unwrap();
         let inner_size = window.inner_size();
 
-        let mut vulkan_renderer = VulkanInstance::new_for_window(raw_window_handle, raw_display_handle, (inner_size.width, inner_size.height)).unwrap();
-        vulkan_renderer.test_buffer_sizes(BufferUsageFlags::TRANSFER_DST);
-        vulkan_renderer.test_buffer_sizes(BufferUsageFlags::TRANSFER_SRC);
-        vulkan_renderer.test_buffer_sizes(BufferUsageFlags::VERTEX_BUFFER);
-        vulkan_renderer.test_buffer_sizes(BufferUsageFlags::UNIFORM_BUFFER);
+        let (instance, mut vulkan_renderer) = VulkanInstance::new_for_handle(raw_window_handle, raw_display_handle, (inner_size.width, inner_size.height)).unwrap();
         let (render_task, render_tx, render_ready, resize_ready) = render::RenderTask::new(vulkan_renderer);
         let render_jh = render_task.spawn();
         
@@ -77,6 +74,7 @@ impl App {
             render_ready,
             resize_ready,
             render_thread: Some(render_jh),
+            instance,
 
             frame_cnt: 0,
             last_sec: Instant::now(),

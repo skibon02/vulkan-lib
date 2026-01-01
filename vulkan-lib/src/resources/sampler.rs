@@ -5,7 +5,7 @@ use crate::wrappers::device::VkDeviceRef;
 
 pub struct SamplerResource {
     pub(crate) sampler: vk::Sampler,
-    submission_usage: OptionSeqNumShared,
+    pub(crate) submission_usage: OptionSeqNumShared,
 
     dropped: bool,
 }

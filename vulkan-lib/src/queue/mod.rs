@@ -12,17 +12,20 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 use anyhow::Context;
 use ash::vk;
-use ash::vk::{AccessFlags, BufferMemoryBarrier, CommandBufferBeginInfo, DependencyFlags, Extent2D, ImageAspectFlags, ImageLayout, ImageMemoryBarrier, ImageSubresourceRange, ImageView, PhysicalDevice, PipelineBindPoint, PipelineStageFlags, Queue, Rect2D, RenderPassBeginInfo, SubpassContents, Viewport, WHOLE_SIZE};
+use ash::vk::{AccessFlags, BufferMemoryBarrier, CommandBufferBeginInfo, DependencyFlags, Extent2D, ImageAspectFlags, ImageLayout, ImageMemoryBarrier, ImageSubresourceRange, ImageView, MemoryHeap, MemoryType, PhysicalDevice, PipelineBindPoint, PipelineStageFlags, Queue, Rect2D, RenderPassBeginInfo, SubpassContents, Viewport, WHOLE_SIZE};
 use log::{info, warn};
 use smallvec::{smallvec, SmallVec};
 use sparkles::monotonic::get_perf_frequency;
 use sparkles::{range_event_start, static_name};
 use sparkles::external_events::ExternalEventsSource;
+use strum::IntoDiscriminant;
 use crate::extensions::calibrated_timestamps::CalibratedTimestamps;
 use crate::resources::render_pass::{FrameBufferAttachment, RenderPassResource};
+use crate::resources::VulkanAllocator;
 use command_buffers::CommandBufferManager;
-use shared::SharedState;
+use shared::{HostWaitedNum, SharedState};
 use crate::queue::queue_local::QueueLocalToken;
+use crate::queue::memory_manager::MemoryManager;
 use crate::queue::recording::{DeviceCommand, DrawCommand, RecordContext, SpecificResourceUsage};
 use crate::queue::semaphores::{SemaphoreManager, WaitSemaphoreRef, WaitSemaphoreStagesRef, WaitedOperation};
 use crate::resources::{LastResourceUsage, RequiredSync, ResourceUsage};
@@ -45,6 +48,8 @@ pub struct GraphicsQueue {
     semaphore_manager: SemaphoreManager,
     command_buffer_manager: CommandBufferManager,
 
+    memory_types: Vec<MemoryType>,
+    memory_heaps: Vec<MemoryHeap>,
 
     last_time_sync_tm: Option<Instant>,
     sparkles_gpu_channel: ExternalEventsSource,
@@ -63,11 +68,13 @@ impl GraphicsQueue {
         queue: Queue,
         physical_device: PhysicalDevice,
         swapchain_wrapper: SwapchainWrapper,
-        surface: VkSurfaceRef,
         calibrated_timestamps: Option<CalibratedTimestamps>,
         timestamp_pool: Option<TimestampPool>,
+        memory_types: Vec<MemoryType>,
+        memory_heaps: Vec<MemoryHeap>,
     ) -> Self {
         let shared_state = SharedState::new(device.clone());
+        let surface = swapchain_wrapper.surface();
 
         let mut sparkles_gpu_channel = ExternalEventsSource::new("Vulkan GPU".to_string());
         if let Some(calibrated_timestamps) = &calibrated_timestamps {
@@ -90,11 +97,23 @@ impl GraphicsQueue {
             semaphore_manager: SemaphoreManager::new(device.clone()),
             command_buffer_manager: CommandBufferManager::new(device.clone(), queue_family_index),
 
+            memory_types,
+            memory_heaps,
+
             last_time_sync_tm: None,
             sparkles_gpu_channel,
             timestamp_pool,
             calibrated_timestamps,
         }
+    }
+
+    pub fn new_allocator(&self) -> VulkanAllocator {
+        VulkanAllocator::new(
+            self.device.clone(),
+            self.shared_state.clone(),
+            self.memory_types.clone(),
+            self.memory_heaps.clone(),
+        )
     }
 
     fn get_or_create_framebuffers(&mut self, render_pass: &Arc<RenderPassResource>) -> SmallVec<[vk::Framebuffer; 4]> {
@@ -103,7 +122,12 @@ impl GraphicsQueue {
             .or_insert_with(|| {
                 let mut framebuffers = smallvec![];
                 let swapchain_images = self.swapchain_wrapper.get_images();
-                for attachments in render_pass.attachments() {
+                let swapchain_image_count = swapchain_images.len();
+
+                // Build framebuffer attachments dynamically based on current swapchain image count
+                let framebuffer_attachments = render_pass.build_framebuffer_attachments(swapchain_image_count);
+
+                for attachments in framebuffer_attachments {
                     let mut views: SmallVec<[ImageView; 5]> = smallvec![];
                     for attachment in attachments {
                         let image_view = match attachment {
@@ -148,7 +172,7 @@ impl GraphicsQueue {
         }
 
         // destroy pending for recycle framebuffers
-        let last_waited_num = self.shared_state.last_host_waited_submission();
+        let last_waited_num = self.shared_state.last_host_waited_submission().num();
         for (_, framebuffers) in self.recycled_framebuffers.extract_if(|s, _| *s <= last_waited_num) {
             for framebuffer in framebuffers {
                 unsafe {
@@ -221,12 +245,20 @@ impl GraphicsQueue {
         self.command_buffer_manager.on_wait_idle();
     }
 
-    pub fn wait_prev_submission(&mut self, prev_sub: usize) -> Option<()> {
-        let last_submission = self.shared_state.last_submission_num();
-        let submission_to_wait = last_submission.checked_sub(prev_sub)?;
-        self.shared_state.wait_submission(submission_to_wait);
+    pub fn wait_prev_submission(&mut self, rel_sub_num: usize) -> HostWaitedNum {
+        self.shared_state.wait_submission(rel_sub_num)
+    }
 
-        Some(())
+    pub fn swapchain_image_count(&self) -> usize {
+        self.swapchain_wrapper.get_images().len()
+    }
+
+    pub fn swapchain_format(&self) -> vk::Format {
+        self.swapchain_wrapper.get_surface_format()
+    }
+
+    pub fn swapchain_extent(&self) -> vk::Extent2D {
+        self.swapchain_wrapper.get_extent()
     }
 
     fn handle_add_sync_point(&mut self) {
@@ -396,10 +428,10 @@ impl GraphicsQueue {
                             usage,
                             buffer,
                         } => {
-                            let had_host_writes = buffer.host_state.is_some_and(|s| s.has_host_writes.swap(false, Ordering::Relaxed));
+                            let had_host_writes = buffer.has_host_writes();
 
                             // 1) update state if waited on host
-                            let buffer_inner = buffer.inner.get(&mut self.token);
+                            let buffer_inner = buffer.buffer_inner().get(&mut self.token);
                             buffer_inner.usages.on_host_waited(last_waited_submission, had_host_writes);
 
                             // 2) Add new usage and get required memory synchronization state
@@ -407,12 +439,12 @@ impl GraphicsQueue {
 
                             // 3) add memory barrier if required
                             if let Some(required_sync) = required_sync {
-                                if buffer_barriers.iter().any(|b| b.buffer == buffer.buffer) {
+                                if buffer_barriers.iter().any(|b| b.buffer == buffer.buffer()) {
                                     panic!("Missing required pipeline barrier between same buffer usages! Required sync: {:?}", required_sync);
                                 }
 
                                 let barrier = BufferMemoryBarrier::default()
-                                    .buffer(buffer.buffer)
+                                    .buffer(buffer.buffer())
                                     .size(WHOLE_SIZE)
                                     .src_access_mask(required_sync.src_access)
                                     .dst_access_mask(required_sync.dst_access);
@@ -553,19 +585,15 @@ impl GraphicsQueue {
                 info!("  Recording command: {:?}", cmd.discriminant());
                 match cmd {
                     DeviceCommand::CopyBuffer { src, dst, regions } => {
-                        let src_buffer = src.buffer;
+                        let src_buffer = src.buffer();
                         let dst_buffer = dst.buffer;
-                        if dst.host_state.is_some() {
-                            unimplemented!("Copy buffer to host-accessible buffer is not yet implemented");
-                        }
                         unsafe {
                             self.device.cmd_copy_buffer(cmd_buffer, src_buffer, dst_buffer, &regions);
                         }
                     }
                     DeviceCommand::CopyBufferToImage {src, dst, regions} => {
-                        let src_buffer = src.buffer;
                         unsafe {
-                            self.device.cmd_copy_buffer_to_image(cmd_buffer, src_buffer, dst.image, dst.inner.get(&mut self.token).layout, &regions);
+                            self.device.cmd_copy_buffer_to_image(cmd_buffer, src.buffer(), dst.image, dst.inner.get(&mut self.token).layout, &regions);
                         }
                     }
                     DeviceCommand::FillBuffer {buffer, offset, size, data} => {
@@ -659,7 +687,8 @@ impl GraphicsQueue {
                                                } ) => {
                         unsafe {
                             if let Some(vert_binding) = new_vertex_buffer {
-                                self.device.cmd_bind_vertex_buffers(cmd_buffer, 0, &[vert_binding.buffer], &[0]);
+                                let offset = vert_binding.custom_range.as_ref().map(|r| r.start).unwrap_or(0) as u64;
+                                self.device.cmd_bind_vertex_buffers(cmd_buffer, 0, &[vert_binding.buffer.buffer], &[offset]);
                             }
                             if *pipeline_handle_changed {
                                 self.device.cmd_bind_pipeline(cmd_buffer, PipelineBindPoint::GRAPHICS, pipeline.pipeline);

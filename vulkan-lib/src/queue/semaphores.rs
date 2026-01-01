@@ -5,6 +5,7 @@ use ash::vk::PipelineStageFlags;
 use log::{error, warn};
 use slotmap::{SlotMap, DefaultKey};
 use smallvec::SmallVec;
+use crate::queue::shared::HostWaitedNum;
 use crate::resources::image::ImageResource;
 use crate::wrappers::device::VkDeviceRef;
 
@@ -154,7 +155,8 @@ impl SemaphoreManager {
         }
     }
 
-    pub fn on_last_waited_submission(&mut self, last_waited_submission: usize) {
+    pub fn on_last_waited_submission(&mut self, last_waited_submission: HostWaitedNum) {
+        let last_waited_submission = last_waited_submission.num();
         if self.last_waited_submission >= last_waited_submission {
             return;
         }

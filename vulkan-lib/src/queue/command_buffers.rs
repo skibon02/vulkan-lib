@@ -1,5 +1,6 @@
 use ash::vk;
 use ash::vk::{CommandPoolCreateFlags, CommandPoolCreateInfo};
+use crate::queue::shared::HostWaitedNum;
 use crate::wrappers::device::VkDeviceRef;
 
 struct PendingCommandBuffer {
@@ -50,7 +51,8 @@ impl CommandBufferManager {
     }
 
     /// Free command buffers that were used in submissions <= last_waited_submission
-    pub fn on_last_waited_submission(&mut self, last_waited_submission: usize) {
+    pub fn on_last_waited_submission(&mut self, last_waited_submission: HostWaitedNum) {
+        let last_waited_submission = last_waited_submission.num();
         if self.last_waited_submission >= last_waited_submission {
             return;
         }

@@ -10,6 +10,7 @@ use crate::app::App;
 
 mod app;
 pub mod render;
+pub mod util;
 
 #[cfg(target_os = "android")]
 pub mod android;

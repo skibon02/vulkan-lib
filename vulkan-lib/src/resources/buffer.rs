@@ -1,11 +1,13 @@
+use std::ops::Range;
 use std::sync::Arc;
 use ash::vk;
-use ash::vk::{AccessFlags, BufferCreateFlags, BufferCreateInfo, BufferUsageFlags, DeviceSize, MemoryAllocateInfo, PipelineStageFlags};
+use ash::vk::{BufferCreateFlags, BufferCreateInfo, BufferUsageFlags, DeviceSize, MemoryAllocateInfo};
 use log::{error, warn};
 use crate::queue::queue_local::QueueLocal;
-use crate::resources::{LastResourceUsage, ResourceUsage};
+use crate::resources::LastResourceUsage;
 use crate::queue::memory_manager::{MemoryManager, MemoryTypeAlgorithm};
 use crate::queue::OptionSeqNumShared;
+use crate::queue::recording::BufferRange;
 use crate::wrappers::device::VkDeviceRef;
 
 pub struct BufferResource {
@@ -58,6 +60,34 @@ impl BufferResource {
             }),
 
             dropped: false,
+        }
+    }
+    
+    pub fn size(&self) -> usize {
+        self.size
+    }
+    
+    pub fn full(self: &Arc<Self>) -> BufferRange {
+        BufferRange {
+            buffer: self.clone(),
+            custom_range: None,
+        }
+    }
+
+    pub fn range(self: &Arc<Self>, range: Range<usize>) -> BufferRange {
+        let custom_range = if range.end > self.size || range.start > range.end {
+            warn!(
+                "Buffer range [{}, {}) is out of bounds (buffer size: {}). Using full buffer instead.",
+                range.start, range.end, self.size
+            );
+            None
+        } else {
+            Some(range)
+        };
+
+        BufferRange {
+            buffer: self.clone(),
+            custom_range,
         }
     }
 }

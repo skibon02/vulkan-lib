@@ -1,24 +1,131 @@
 use strum::EnumDiscriminants;
 use std::collections::HashMap;
-use std::iter;
-use std::ops::{Deref, DerefMut};
+use std::{iter, mem};
+use std::ops::{Deref, DerefMut, Range};
 use std::sync::Arc;
 use smallvec::{smallvec, SmallVec};
-use ash::vk::{AccessFlags, BufferCopy, BufferImageCopy, ClearValue, Format, ImageAspectFlags, ImageLayout, PipelineStageFlags};
-use crate::resources::buffer::BufferResource;
+use ash::vk::{self, AccessFlags, BufferCopy, BufferImageCopy, ClearValue, DeviceSize, Format, ImageAspectFlags, ImageLayout, PipelineStageFlags};
+use log::{error, warn};
+use crate::queue::OptionSeqNumShared;
+use crate::queue::queue_local::QueueLocal;
+use crate::resources::buffer::{BufferResource, BufferResourceInner};
 use crate::resources::descriptor_set::{BoundResource, DescriptorSetResource};
 use crate::resources::image::ImageResource;
 use crate::resources::pipeline::GraphicsPipelineResource;
-use crate::resources::render_pass::{FrameBufferAttachment, RenderPassResource};
+use crate::resources::render_pass::RenderPassResource;
 use crate::resources::ResourceUsage;
+use crate::resources::staging_buffer::{StagingBuffer, StagingBufferRange};
 use crate::swapchain_wrapper::SwapchainImages;
+
+pub(crate) enum AnyBufferRange {
+    Staging(StagingBufferRange),
+    Device(BufferRange),
+}
+
+impl From<StagingBufferRange> for AnyBufferRange {
+    fn from(range: StagingBufferRange) -> Self {
+        AnyBufferRange::Staging(range)
+    }
+}
+
+impl From<BufferRange> for AnyBufferRange {
+    fn from(range: BufferRange) -> Self {
+        AnyBufferRange::Device(range)
+    }
+}
+
+impl AnyBufferRange {
+    pub fn buffer(&self) -> vk::Buffer {
+        match self {
+            AnyBufferRange::Staging(s) => s.buffer.buffer,
+            AnyBufferRange::Device(d) => d.buffer.buffer,
+        }
+    }
+
+    pub fn buffer_size(&self) -> u64 {
+        match self {
+            AnyBufferRange::Staging(s) => s.buffer.size() as u64,
+            AnyBufferRange::Device(s) => s.buffer.size() as u64,
+        }
+    }
+
+    pub fn offset(&self) -> u64 {
+        match self {
+            AnyBufferRange::Staging(s) => s.range.start,
+            AnyBufferRange::Device(d) => d.custom_range.as_ref()
+                .map(|r| r.start as u64)
+                .unwrap_or(0),
+        }
+    }
+
+    pub fn size(&self) -> u64 {
+        match self {
+            AnyBufferRange::Staging(s) => s.range.end - s.range.start,
+            AnyBufferRange::Device(d) => d.custom_range.as_ref()
+                .map(|r| (r.end - r.start) as u64)
+                .unwrap_or(d.buffer.size() as u64),
+        }
+    }
+    
+    pub fn has_host_writes(&self) -> bool {
+        matches!(self, AnyBufferRange::Staging(_))
+    }
+    
+    pub fn submission_usage(&self) -> &OptionSeqNumShared {
+        match self {
+            AnyBufferRange::Staging(s) => &s.buffer.submission_usage,
+            AnyBufferRange::Device(d) => &d.buffer.submission_usage,
+        }
+    }
+
+    pub(crate) fn into_any_buffer(self) -> AnyBuffer {
+        match self {
+            AnyBufferRange::Staging(s) => AnyBuffer::Staging(s.buffer),
+            AnyBufferRange::Device(d) => AnyBuffer::Device(d.buffer),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct BufferRange {
+    pub(crate) buffer: Arc<BufferResource>,
+    pub(crate) custom_range: Option<Range<usize>>
+}
+
+fn prepare_buffer_copy(src: &AnyBufferRange, dst: &BufferRange) -> BufferCopy {
+    let src_offset = src.offset();
+
+    let dst_offset = dst.custom_range.as_ref()
+        .map(|r| r.start)
+        .unwrap_or(0) as DeviceSize;
+
+    let src_size = src.size();
+
+    let dst_size = dst.custom_range.as_ref()
+        .map(|r| r.end - r.start)
+        .unwrap_or(dst.buffer.size()) as DeviceSize;
+
+    let size = src_size.min(dst_size);
+
+    if src.buffer_size() != src.size() && dst.custom_range.is_some() && src_size != dst_size {
+        warn!(
+            "BufferCopy: custom ranges for both buffers, but sizes differ ({} vs {}). Using smallest: {}",
+            src_size, dst_size, size
+        );
+    }
+
+    BufferCopy::default()
+        .src_offset(src_offset)
+        .dst_offset(dst_offset)
+        .size(size)
+}
 
 pub struct RecordContext {
     commands: Vec<DeviceCommand>,
     bound_pipeline: Option<Arc<GraphicsPipelineResource>>,
     pipeline_changed: bool,
     bound_descriptor_sets: HashMap<u32, Arc<DescriptorSetResource>>,
-    bound_vertex_buffer: Option<Arc<BufferResource>>
+    bound_vertex_buffer: Option<BufferRange>
 }
 
 impl RecordContext {
@@ -44,27 +151,53 @@ impl RecordContext {
         }
     }
 
-    pub fn bind_vertex_buffer(&mut self, buf: Arc<BufferResource>) {
+    pub fn bind_vertex_buffer(&mut self, buf: BufferRange) {
         self.bound_vertex_buffer = Some(buf);
     }
 
-    pub fn copy_buffer<'b>(&'b mut self, src: Arc<BufferResource>, dst: Arc<BufferResource>, regions: SmallVec<[BufferCopy; 1]>) {
-        self.commands.push(DeviceCommand::CopyBuffer {
-            src,
-            dst,
-            regions
-        })
-    }
-    pub fn copy_buffer_single<'b>(&'b mut self, src: Arc<BufferResource>, dst: Arc<BufferResource>, region: BufferCopy) {
+    pub fn copy_buffer(&mut self, src: impl Into<AnyBufferRange>, dst: BufferRange) {
+        let src = src.into();
+        let region = prepare_buffer_copy(&src, &dst);
         let regions = smallvec![region];
         self.commands.push(DeviceCommand::CopyBuffer {
             src,
-            dst,
+            dst: dst.buffer,
             regions
         })
     }
 
-    pub fn copy_buffer_to_image<'b>(&'b mut self, src: Arc<BufferResource>, dst: Arc<ImageResource>, regions: SmallVec<[BufferImageCopy; 1]>) {
+    /// Copy data from buffer range to full contents of the image.
+    /// Safety:
+    /// - bytes per texel must correctly represent texel block size in bytes.
+    /// - Texel block size of image format must be 1x1
+    pub fn copy_buffer_to_image_full(&mut self, src: impl Into<AnyBufferRange>, dst: Arc<ImageResource>, bytes_per_texel: usize) {
+        let src = src.into();
+        let buffer_offset = src.offset();
+
+        let extent = dst.extent();
+        let image_size_bytes = (extent.width * extent.height) as usize * bytes_per_texel;
+
+        let buffer_size = src.size();
+
+        if buffer_size < image_size_bytes as u64 {
+            error!(
+                "Buffer range size ({} bytes) is too small for image ({}x{} with {} bytes/texel = {} bytes). Copy may fail!",
+                buffer_size, extent.width, extent.height, bytes_per_texel, image_size_bytes
+            );
+        }
+
+        let region = BufferImageCopy::default()
+            .buffer_offset(buffer_offset)
+            .image_subresource(vk::ImageSubresourceLayers::default()
+                .aspect_mask(dst.get_aspect_flags())
+                .layer_count(1))
+            .image_extent(vk::Extent3D {
+                width: extent.width,
+                height: extent.height,
+                depth: 1
+            });
+
+        let regions = smallvec![region];
         self.commands.push(DeviceCommand::CopyBufferToImage {
             src,
             dst,
@@ -72,20 +205,17 @@ impl RecordContext {
         })
     }
 
-    pub fn copy_buffer_to_image_single<'b>(&'b mut self, src: Arc<BufferResource>, dst: Arc<ImageResource>, region: BufferImageCopy) {
-        let regions = smallvec![region];
-        self.commands.push(DeviceCommand::CopyBufferToImage {
-            src,
-            dst,
-            regions
-        })
-    }
-    
-    pub fn fill_buffer(&mut self, buffer: Arc<BufferResource>, offset: u64, size: u64, data: u32) {
+    pub fn fill_buffer(&mut self, buffer: BufferRange, data: u32) {
+        let (offset, size) = if let Some(range) = buffer.custom_range {
+            (range.start, range.end - range.start)
+        }
+        else {
+            (0, buffer.buffer.size())
+        };
         self.commands.push(DeviceCommand::FillBuffer {
-            buffer,
-            offset,
-            size,
+            buffer: buffer.buffer,
+            offset: offset as u64,
+            size: size as u64,
             data,
         })
     }
@@ -137,8 +267,8 @@ impl RecordContext {
         });
     }
 
-    pub(crate) fn take_commands(self) -> Vec<DeviceCommand> {
-        self.commands
+    pub(crate) fn take_commands(&mut self) -> Vec<DeviceCommand> {
+        mem::take(&mut self.commands)
     }
     pub(crate) fn unlock_descriptor_sets(&self) {
         for ds in self.bound_descriptor_sets.values() {
@@ -200,17 +330,49 @@ pub enum DrawCommand {
         instance_count: u32,
         first_vertex: u32,
         first_instance: u32,
-        new_vertex_buffer: Option<Arc<BufferResource>>,
+        new_vertex_buffer: Option<BufferRange>,
         pipeline: Arc<GraphicsPipelineResource>,
         pipeline_changed: bool,
         new_descriptor_set_bindings: SmallVec<[(u32, Arc<DescriptorSetResource>); 4]>,
     },
 }
 
-pub enum SpecificResourceUsage {
+pub(crate) enum AnyBuffer {
+    Device(Arc<BufferResource>),
+    Staging(Arc<StagingBuffer>),
+}
+
+impl AnyBuffer {
+    pub fn buffer(&self) -> vk::Buffer {
+        match self {
+            AnyBuffer::Device(b) => b.buffer,
+            AnyBuffer::Staging(s) => s.buffer,
+        }
+    }
+
+    pub fn buffer_inner(&self) -> &QueueLocal<BufferResourceInner> {
+        match self {
+            AnyBuffer::Device(b) => &b.inner,
+            AnyBuffer::Staging(s) => &s.inner,
+        }
+    }
+
+    pub fn submission_usage(&self) -> &OptionSeqNumShared {
+        match self {
+            AnyBuffer::Device(b) => &b.submission_usage,
+            AnyBuffer::Staging(s) => &s.submission_usage,
+        }
+    }
+
+    pub fn has_host_writes(&self) -> bool {
+        matches!(self, AnyBuffer::Staging(_))
+    }
+}
+
+pub(crate) enum SpecificResourceUsage {
     BufferUsage {
         usage: ResourceUsage,
-        buffer: Arc<BufferResource>
+        buffer: AnyBuffer
     },
     ImageUsage {
         usage: ResourceUsage,
@@ -223,12 +385,12 @@ pub enum SpecificResourceUsage {
 #[derive(EnumDiscriminants)]
 pub enum DeviceCommand {
     CopyBuffer {
-        src: Arc<BufferResource>,
+        src: AnyBufferRange,
         dst: Arc<BufferResource>,
         regions: SmallVec<[BufferCopy; 1]>,
     },
     CopyBufferToImage {
-        src: Arc<BufferResource>,
+        src: AnyBufferRange,
         dst: Arc<ImageResource>,
         regions: SmallVec<[BufferImageCopy; 1]>,
     },
@@ -275,7 +437,7 @@ impl DeviceCommand {
                 dst,
                 regions
             } => {
-                src.submission_usage.store(Some(submission_num));
+                src.submission_usage().store(Some(submission_num));
                 dst.submission_usage.store(Some(submission_num));
                 Box::new(
                     [
@@ -285,7 +447,10 @@ impl DeviceCommand {
                                 PipelineStageFlags::TRANSFER,
                                 AccessFlags::TRANSFER_READ,
                                 ),
-                            buffer: src.clone()
+                            buffer: match src {
+                                AnyBufferRange::Staging(s) => AnyBuffer::Staging(s.buffer.clone()),
+                                AnyBufferRange::Device(d) => AnyBuffer::Device(d.buffer.clone()),
+                            },
                         },
                         SpecificResourceUsage::BufferUsage {
                             usage: ResourceUsage::new(
@@ -293,7 +458,7 @@ impl DeviceCommand {
                                 PipelineStageFlags::TRANSFER,
                                 AccessFlags::TRANSFER_WRITE,
                             ),
-                            buffer: dst.clone()
+                            buffer: AnyBuffer::Device(dst.clone()),
                         },
                     ].into_iter()
                 )
@@ -304,7 +469,7 @@ impl DeviceCommand {
                 dst,
                 regions,
             } => {
-                src.submission_usage.store(Some(submission_num));
+                src.submission_usage().store(Some(submission_num));
                 dst.submission_usage.store(Some(submission_num));
                 let combined_aspect = regions.iter()
                     .fold(ImageAspectFlags::empty(), |acc, region| acc | region.image_subresource.aspect_mask);
@@ -316,7 +481,10 @@ impl DeviceCommand {
                                 PipelineStageFlags::TRANSFER,
                                 AccessFlags::TRANSFER_READ,
                             ),
-                            buffer: src.clone()
+                            buffer: match src {
+                                AnyBufferRange::Staging(s) => AnyBuffer::Staging(s.buffer.clone()),
+                                AnyBufferRange::Device(d) => AnyBuffer::Device(d.buffer.clone()),
+                            },
                         },
                         SpecificResourceUsage::ImageUsage {
                             usage: ResourceUsage::new(
@@ -340,7 +508,7 @@ impl DeviceCommand {
                             PipelineStageFlags::TRANSFER,
                             AccessFlags::TRANSFER_WRITE,
                         ),
-                        buffer: buffer.clone()
+                        buffer: AnyBuffer::Device(buffer.clone()),
                     },
                 ))
             }
@@ -421,59 +589,59 @@ impl DeviceCommand {
                     // render pass declared single subpass with some attachments
                 ];
 
-                let mut next_image_i = 0;
-                if let Some(depth_desc) = attachments.get_depth_attachment_desc() {
-                    let attachment = render_pass.attachment(swapchain_images, *framebuffer_index as usize, next_image_i);
-                    let format = depth_desc.format;
-                    let contains_stencil = matches!(format, Format::S8_UINT | Format::D16_UNORM_S8_UINT | Format::D24_UNORM_S8_UINT | Format::D32_SFLOAT_S8_UINT);
-                    let contains_depth = !matches!(format, Format::S8_UINT);
-                    let mut aspect_mask = ImageAspectFlags::empty();
-                    if contains_depth {
-                        aspect_mask |= ImageAspectFlags::DEPTH
-                    }
-                    if contains_stencil {
-                        aspect_mask |= ImageAspectFlags::STENCIL
-                    }
-                    let required_layout = if depth_desc.initial_layout == ImageLayout::UNDEFINED {
-                        None
-                    }
-                    else {
-                        Some(depth_desc.initial_layout)
-                    };
-                    usages.push(SpecificResourceUsage::ImageUsage {
-                        image: attachment,
-                        usage: ResourceUsage::new(
-                            Some(submission_num),
-                            PipelineStageFlags::EARLY_FRAGMENT_TESTS | PipelineStageFlags::LATE_FRAGMENT_TESTS,
-                            AccessFlags::DEPTH_STENCIL_ATTACHMENT_READ | AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
-                        ),
-                        required_layout,
-                        image_aspect: aspect_mask,
-                    });
+                // Use iterator for non-swapchain attachments
+                for (attachment_index, slot, desc) in attachments.iter_non_swapchain_attachments() {
+                    let attachment = render_pass.attachment(swapchain_images, *framebuffer_index as usize, attachment_index);
 
-                    next_image_i += 1;
-                }
-
-                if let Some(color_desc) = attachments.get_color_attachment_desc() {
-                    let attachment = render_pass.attachment(swapchain_images, *framebuffer_index as usize, next_image_i);
-                    let required_layout = if color_desc.initial_layout == ImageLayout::UNDEFINED {
-                        None
+                    match slot {
+                        crate::resources::render_pass::AttachmentSlot::Depth => {
+                            let format = desc.format;
+                            let contains_stencil = matches!(format, Format::S8_UINT | Format::D16_UNORM_S8_UINT | Format::D24_UNORM_S8_UINT | Format::D32_SFLOAT_S8_UINT);
+                            let contains_depth = !matches!(format, Format::S8_UINT);
+                            let mut aspect_mask = ImageAspectFlags::empty();
+                            if contains_depth {
+                                aspect_mask |= ImageAspectFlags::DEPTH
+                            }
+                            if contains_stencil {
+                                aspect_mask |= ImageAspectFlags::STENCIL
+                            }
+                            let required_layout = if desc.initial_layout == ImageLayout::UNDEFINED {
+                                None
+                            }
+                            else {
+                                Some(desc.initial_layout)
+                            };
+                            usages.push(SpecificResourceUsage::ImageUsage {
+                                image: attachment,
+                                usage: ResourceUsage::new(
+                                    Some(submission_num),
+                                    PipelineStageFlags::EARLY_FRAGMENT_TESTS | PipelineStageFlags::LATE_FRAGMENT_TESTS,
+                                    AccessFlags::DEPTH_STENCIL_ATTACHMENT_READ | AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
+                                ),
+                                required_layout,
+                                image_aspect: aspect_mask,
+                            });
+                        },
+                        crate::resources::render_pass::AttachmentSlot::ColorMSAA => {
+                            let required_layout = if desc.initial_layout == ImageLayout::UNDEFINED {
+                                None
+                            }
+                            else {
+                                Some(desc.initial_layout)
+                            };
+                            usages.push(SpecificResourceUsage::ImageUsage {
+                                image: attachment,
+                                usage: ResourceUsage::new(
+                                    Some(submission_num),
+                                    PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                                    AccessFlags::COLOR_ATTACHMENT_READ | AccessFlags::COLOR_ATTACHMENT_WRITE,
+                                ),
+                                required_layout,
+                                image_aspect: ImageAspectFlags::COLOR,
+                            });
+                        },
+                        crate::resources::render_pass::AttachmentSlot::Swapchain => unreachable!("Swapchain should not be in non-swapchain iterator"),
                     }
-                    else {
-                        Some(color_desc.initial_layout)
-                    };
-                    usages.push(SpecificResourceUsage::ImageUsage {
-                        image: attachment,
-                        usage: ResourceUsage::new(
-                            Some(submission_num),
-                            PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
-                            AccessFlags::COLOR_ATTACHMENT_READ | AccessFlags::COLOR_ATTACHMENT_WRITE,
-                        ),
-                        required_layout,
-                        image_aspect: ImageAspectFlags::COLOR,
-                    });
-
-                    next_image_i += 1;
                 }
 
                 Box::new(usages.into_iter())
@@ -490,22 +658,23 @@ impl DeviceCommand {
                 let mut usages: SmallVec<[_; 10]> = smallvec![];
                 if let Some(v_buf) = new_vertex_buffer {
                     usages.push(SpecificResourceUsage::BufferUsage {
-                        buffer: v_buf.clone(),
+                        buffer: AnyBuffer::Device(v_buf.buffer.clone()),
                         usage: ResourceUsage::new(
                             Some(submission_num),
                             PipelineStageFlags::VERTEX_INPUT,
                             AccessFlags::VERTEX_ATTRIBUTE_READ,
                         ),
                     });
-                    v_buf.submission_usage.store(Some(submission_num));
+                    v_buf.buffer.submission_usage.store(Some(submission_num));
                 }
                 for (set_index, descriptor_set) in new_descriptor_set_bindings {
                     // collect usage for bound resources
                     for binding in descriptor_set.bindings().lock().unwrap().iter() {
                         match binding.resource.as_ref().expect("all descriptor set resources must be bound") {
                             BoundResource::Buffer(buf) => {
+                                buf.submission_usage.store(Some(submission_num));
                                 usages.push(SpecificResourceUsage::BufferUsage {
-                                    buffer: buf.clone(),
+                                    buffer: AnyBuffer::Device(buf.clone()),
                                     usage: ResourceUsage::new(
                                         Some(submission_num),
                                         PipelineStageFlags::VERTEX_SHADER | PipelineStageFlags::FRAGMENT_SHADER,
@@ -513,9 +682,25 @@ impl DeviceCommand {
                                     ),
                                 })
                             }
-                            BoundResource::Image(img) | BoundResource::CombinedImageSampler {image: img, ..} => {
+                            BoundResource::CombinedImageSampler {image, sampler} => {
+                                image.submission_usage.store(Some(submission_num));
+                                sampler.submission_usage.store(Some(submission_num));
                                 usages.push(SpecificResourceUsage::ImageUsage {
-                                    image: img.clone(),
+                                    image: image.clone(),
+                                    usage: ResourceUsage::new(
+                                        Some(submission_num),
+                                        PipelineStageFlags::FRAGMENT_SHADER,
+                                        AccessFlags::SHADER_READ,
+                                    ),
+                                    required_layout: Some(ImageLayout::SHADER_READ_ONLY_OPTIMAL),
+                                    image_aspect: ImageAspectFlags::COLOR,
+                                });
+                                
+                            }
+                            BoundResource::Image(image) => {
+                                image.submission_usage.store(Some(submission_num));
+                                usages.push(SpecificResourceUsage::ImageUsage {
+                                    image: image.clone(),
                                     usage: ResourceUsage::new(
                                         Some(submission_num),
                                         PipelineStageFlags::FRAGMENT_SHADER,

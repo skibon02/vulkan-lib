@@ -1,14 +1,22 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use ash::vk;
-use ash::vk::{AccessFlags, AttachmentDescription, AttachmentLoadOp, AttachmentStoreOp, Format, ImageLayout, PipelineBindPoint, PipelineStageFlags};
-use log::error;
+use ash::vk::{AccessFlags, AttachmentDescription, AttachmentLoadOp, AttachmentStoreOp, Format, ImageLayout, PipelineBindPoint, PipelineStageFlags, ImageUsageFlags, ImageCreateFlags, SampleCountFlags};
+use log::{error, warn};
 use smallvec::{smallvec, SmallVec};
 use sparkles::range_event_start;
 use crate::queue::OptionSeqNumShared;
+use crate::queue::memory_manager::MemoryManager;
 use crate::resources::image::ImageResource;
 use crate::swapchain_wrapper::SwapchainImages;
 use crate::wrappers::device::VkDeviceRef;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AttachmentSlot {
+    Swapchain,
+    Depth,
+    ColorMSAA,
+}
 
 #[derive(Clone)]
 pub enum FrameBufferAttachment {
@@ -18,7 +26,8 @@ pub enum FrameBufferAttachment {
 pub struct RenderPassResource {
     pub(crate) render_pass: vk::RenderPass,
     attachments_description: AttachmentsDescription,
-    attachments: SmallVec<[SmallVec<[FrameBufferAttachment; 5]>; 5]>,
+    depth_image: Option<Arc<ImageResource>>,
+    color_image: Option<Arc<ImageResource>>,
     pub(crate) submission_usage: OptionSeqNumShared,
     framebuffer_registered: AtomicBool,
 
@@ -26,32 +35,72 @@ pub struct RenderPassResource {
 }
 
 impl RenderPassResource {
-    pub(crate) fn new(device: &VkDeviceRef, swapchain_images: SmallVec<[Arc<FrameBufferAttachment>; 3]>, mut attachments_description: AttachmentsDescription, swapchain_format: vk::Format) -> Self {
+    pub(crate) fn new(
+        device: &VkDeviceRef,
+        memory_manager: &mut MemoryManager,
+        mut attachments_description: AttachmentsDescription,
+        swapchain_format: vk::Format,
+        swapchain_extent: vk::Extent2D,
+    ) -> Self {
         let g = range_event_start!("Create render pass");
 
-        let swapchain_format = swapchain_format;
-
         attachments_description.fill_defaults(swapchain_format);
-        let mut attachments: SmallVec<[AttachmentDescription; 5]> = smallvec![attachments_description.swapchain_attachment_desc];
-        let mut attachment_i = 1;
+
+        // Create depth/MSAA images internally
+        let depth_image = if let Some(depth_desc) = attachments_description.depth_attachment_desc {
+            let image = Arc::new(ImageResource::new(
+                device,
+                memory_manager,
+                ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
+                ImageCreateFlags::empty(),
+                swapchain_extent.width,
+                swapchain_extent.height,
+                depth_desc.format,
+                depth_desc.samples,
+            ));
+            Some(image)
+        } else {
+            None
+        };
+
+        let color_image = if let Some(color_desc) = attachments_description.color_attachement_desc {
+            let image = Arc::new(ImageResource::new(
+                device,
+                memory_manager,
+                ImageUsageFlags::COLOR_ATTACHMENT,
+                ImageCreateFlags::empty(),
+                swapchain_extent.width,
+                swapchain_extent.height,
+                color_desc.format,
+                color_desc.samples,
+            ));
+            Some(image)
+        } else {
+            None
+        };
+
+        // Build Vulkan attachment descriptions for render pass
+        let mut vk_attachments: SmallVec<[AttachmentDescription; 5]> = smallvec![attachments_description.swapchain_attachment_desc];
+        let mut vk_attachment_i = 1;
         let mut subpass = vk::SubpassDescription::default()
             .pipeline_bind_point(PipelineBindPoint::GRAPHICS);
 
         let depth_attachment_ref;
         if let Some(attachment) = attachments_description.depth_attachment_desc {
-            attachments.push(attachment);
+            vk_attachments.push(attachment);
             depth_attachment_ref = vk::AttachmentReference::default()
-                .attachment(attachment_i)
+                .attachment(vk_attachment_i)
                 .layout(ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
             subpass = subpass.depth_stencil_attachment(&depth_attachment_ref);
-            attachment_i += 1;
+            vk_attachment_i += 1;
         }
+
         let color_attachment_refs;
         let resolve_attachment_refs;
         if let Some(attachment) = attachments_description.color_attachement_desc {
-            attachments.push(attachment);
+            vk_attachments.push(attachment);
             color_attachment_refs = [vk::AttachmentReference::default()
-                .attachment(attachment_i)
+                .attachment(vk_attachment_i)
                 .layout(ImageLayout::COLOR_ATTACHMENT_OPTIMAL)];
 
             // attachment 0 is treated as resolve attachment
@@ -61,7 +110,6 @@ impl RenderPassResource {
 
             subpass = subpass.resolve_attachments(&resolve_attachment_refs);
             subpass = subpass.color_attachments(&color_attachment_refs);
-            attachment_i += 1;
         }
         else {
             // attachment 0 is treated as color attachment
@@ -84,24 +132,49 @@ impl RenderPassResource {
         let render_pass_create_info =
             vk::RenderPassCreateInfo::default()
                 .subpasses(&subpasses)
-                .dependencies(&dependencies);
-        let render_pass_create_info = render_pass_create_info.attachments(&attachments);
+                .dependencies(&dependencies)
+                .attachments(&vk_attachments);
         let render_pass = unsafe { device.create_render_pass(&render_pass_create_info, None).unwrap() };
 
         Self {
             render_pass,
             attachments_description,
-            attachments: smallvec![swapchain_images.into_iter().map(|img| {
-                match &*img {
-                    FrameBufferAttachment::SwapchainImage(i) => FrameBufferAttachment::SwapchainImage(*i),
-                    FrameBufferAttachment::Image(image) => FrameBufferAttachment::Image(image.clone()),
-                }
-            }).collect()],
+            depth_image,
+            color_image,
             submission_usage: OptionSeqNumShared::default(),
             framebuffer_registered: AtomicBool::new(false),
-
             dropped: false,
         }
+    }
+
+    /// Build framebuffer attachments dynamically based on current swapchain image count
+    /// This allows handling swapchain recreation with different image counts
+    pub(crate) fn build_framebuffer_attachments(&self, swapchain_image_count: usize) -> SmallVec<[SmallVec<[FrameBufferAttachment; 5]>; 5]> {
+        let mut attachments: SmallVec<[SmallVec<[FrameBufferAttachment; 5]>; 5]> = smallvec![];
+
+        for framebuffer_index in 0..swapchain_image_count {
+            let mut fb_attachments: SmallVec<[FrameBufferAttachment; 5]> = smallvec![];
+
+            // Attachment 0: swapchain image
+            fb_attachments.push(FrameBufferAttachment::SwapchainImage(framebuffer_index));
+
+            // Use iterator for remaining attachments
+            for (_, slot, _) in self.attachments_description.iter_non_swapchain_attachments() {
+                match slot {
+                    AttachmentSlot::Depth => {
+                        fb_attachments.push(FrameBufferAttachment::Image(self.depth_image.clone().unwrap()));
+                    },
+                    AttachmentSlot::ColorMSAA => {
+                        fb_attachments.push(FrameBufferAttachment::Image(self.color_image.clone().unwrap()));
+                    },
+                    AttachmentSlot::Swapchain => unreachable!("Swapchain should not be in non-swapchain iterator"),
+                }
+            }
+
+            attachments.push(fb_attachments);
+        }
+
+        attachments
     }
 
     pub(crate) fn should_register_framebuffers(&self) -> bool {
@@ -111,16 +184,21 @@ impl RenderPassResource {
     pub fn attachments_desc(&self) -> AttachmentsDescription {
         self.attachments_description.clone()
     }
-    pub fn attachments(&self) -> SmallVec<[SmallVec<[FrameBufferAttachment; 5]>; 5]> {
-        self.attachments.clone()
-    }
-    pub(crate) fn attachment(&self, swapchain_images: &SwapchainImages, framebuffer_i: usize, attachment_i: usize) -> Arc<ImageResource> {
-        let image = match self.attachments[framebuffer_i][attachment_i].clone() {
-            FrameBufferAttachment::SwapchainImage(i) => swapchain_images[i].clone(),
-            FrameBufferAttachment::Image(image) => image,
-        };
 
-        image
+    /// Get a specific non-swapchain attachment by index (0=depth, 1=color)
+    /// This maps the attachment_index from the iterator to the actual image resource
+    pub(crate) fn attachment(&self, _swapchain_images: &SwapchainImages, _framebuffer_i: usize, attachment_i: usize) -> Arc<ImageResource> {
+        // Use the same iteration logic to find the attachment at attachment_i
+        for (index, slot, _) in self.attachments_description.iter_non_swapchain_attachments() {
+            if index == attachment_i {
+                return match slot {
+                    AttachmentSlot::Depth => self.depth_image.clone().unwrap(),
+                    AttachmentSlot::ColorMSAA => self.color_image.clone().unwrap(),
+                    AttachmentSlot::Swapchain => unreachable!("Swapchain should not be in non-swapchain iterator"),
+                };
+            }
+        }
+        panic!("Attachment index {} not found", attachment_i);
     }
 }
 #[derive(Clone)]
@@ -178,6 +256,35 @@ impl AttachmentsDescription {
             // resolve_attachment.store_op = AttachmentStoreOp::STORE;
         }
     }
+    
+    pub fn len(&self) -> usize {
+        let mut res = 1;
+        if self.depth_attachment_desc.is_some() {
+            res += 1;
+        }
+        if self.color_attachement_desc.is_some() {
+            res += 1;
+        }
+        res
+    }
+
+    /// Iterator over non-swapchain attachments in order, yielding (attachment_index, slot, description)
+    /// attachment_index starts at 0 for the first non-swapchain attachment
+    pub fn iter_non_swapchain_attachments(&self) -> impl Iterator<Item = (usize, AttachmentSlot, AttachmentDescription)> {
+        let mut attachments = SmallVec::<[(usize, AttachmentSlot, AttachmentDescription); 2]>::new();
+        let mut index = 0;
+
+        if let Some(depth_desc) = self.depth_attachment_desc {
+            attachments.push((index, AttachmentSlot::Depth, depth_desc));
+            index += 1;
+        }
+
+        if let Some(color_desc) = self.color_attachement_desc {
+            attachments.push((index, AttachmentSlot::ColorMSAA, color_desc));
+        }
+
+        attachments.into_iter()
+    }
 }
 
 impl Drop for RenderPassResource {
@@ -192,6 +299,19 @@ pub(crate) fn destroy_render_pass(device: &VkDeviceRef, mut render_pass: RenderP
         unsafe {
             device.destroy_render_pass(render_pass.render_pass, None)
         }
+
+        // Destroy depth and color images if they exist
+        if let Some(depth_image) = render_pass.depth_image.take() {
+            if let Ok(image) = Arc::try_unwrap(depth_image) {
+                crate::resources::image::destroy_image_resource(device, image);
+            }
+        }
+        if let Some(color_image) = render_pass.color_image.take() {
+            if let Ok(image) = Arc::try_unwrap(color_image) {
+                crate::resources::image::destroy_image_resource(device, image);
+            }
+        }
+
         render_pass.dropped = true;
     }
 }

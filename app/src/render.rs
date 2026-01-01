@@ -1,4 +1,7 @@
-use std::iter::repeat;
+use vulkan_lib::vk::DescriptorType;
+use vulkan_lib::vk::{BufferCopy, ClearColorValue, ClearDepthStencilValue, ClearValue, Filter, ImageUsageFlags, PipelineStageFlags};
+use vulkan_lib::vk::{AttachmentDescription, AttachmentLoadOp, AttachmentStoreOp, BufferUsageFlags, Format, ImageLayout, SampleCountFlags};
+use vulkan_lib::vk::ShaderStageFlags;
 use vulkan_lib::shaders::layout::types::{float, GlslType};
 use vulkan_lib::shaders::layout::LayoutInfo;
 use vulkan_lib::shaders::layout::MemberMeta;
@@ -7,23 +10,22 @@ use vulkan_lib::shaders::layout::types::GlslTypeVariant;
 use smallvec::{smallvec, SmallVec};
 use std::sync::{mpsc, Arc};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::{fs, thread};
+use std::thread;
 use std::thread::JoinHandle;
 use std::time::Instant;
-use image::{ExtendedColorType, ImageEncoder};
 use log::{error, info, warn};
-use rand::Rng;
 use sparkles::range_event_start;
 use swash::FontRef;
 use swash::scale::{Render, ScaleContext, Source, StrikeWith};
-use swash::zeno::Style;
 use render_macro::define_layout;
-use vulkan_lib::{descriptor_set, use_shader, AttachmentDescription, AttachmentLoadOp, AttachmentStoreOp, BufferCopy, BufferImageCopy, BufferUsageFlags, ClearColorValue, ClearDepthStencilValue, ClearValue, DoubleBuffered, Extent3D, Filter, Format, ImageLayout, ImageSubresourceLayers, ImageUsageFlags, PipelineStageFlags, SampleCountFlags, SamplerMipmapMode, VulkanInstance};
-use vulkan_lib::runtime::resources::AttachmentsDescription;
-use vulkan_lib::runtime::resources::images::ImageResourceHandle;
-use vulkan_lib::runtime::resources::pipeline::GraphicsPipelineDesc;
-use vulkan_lib::shaders::layout::types::{int, vec2, vec3, vec4, ivec2};
+use vulkan_lib::{descriptor_set, use_shader};
+use vulkan_lib::vk::{BufferCreateFlags, ImageCreateFlags};
+use vulkan_lib::queue::GraphicsQueue;
+use vulkan_lib::resources::pipeline::GraphicsPipelineDesc;
+use vulkan_lib::resources::render_pass::{AttachmentsDescription, FrameBufferAttachment};
+use vulkan_lib::shaders::layout::types::{vec2, vec3, vec4, ivec2};
 use crate::resources::get_resource;
+use crate::util::DoubleBuffered;
 
 pub enum RenderMessage {
     Redraw { bg_color: [f32; 3] },
@@ -33,10 +35,9 @@ pub enum RenderMessage {
 
 pub struct RenderTask {
     rx: mpsc::Receiver<RenderMessage>,
-    vulkan_renderer: VulkanInstance,
+    vulkan_renderer: GraphicsQueue,
     render_finished: Arc<AtomicBool>,
     resize_finished: Arc<AtomicBool>,
-    swapchain_image_handles: SmallVec<[ImageResourceHandle; 3]>,
     swapchain_recreated: bool,
     last_print: Instant,
     extent: [i32; 2],
@@ -78,18 +79,17 @@ impl Default for SolidAttributes {
     }
 }
 impl RenderTask {
-    pub fn new(vulkan_renderer: VulkanInstance) -> (Self, mpsc::Sender<RenderMessage>, Arc<AtomicBool>, Arc<AtomicBool>) {
+    pub fn new(vulkan_renderer: GraphicsQueue) -> (Self, mpsc::Sender<RenderMessage>, Arc<AtomicBool>, Arc<AtomicBool>) {
         let (tx, rx) = mpsc::channel::<RenderMessage>();
         let render_finished = Arc::new(AtomicBool::new(true));
         let resize_finished = Arc::new(AtomicBool::new(true));
-        let swapchain_image_handles = vulkan_renderer.swapchain_images();
 
+        // Create depth image for render pass
         (Self  {
             rx,
             vulkan_renderer,
             render_finished: render_finished.clone(),
             resize_finished: resize_finished.clone(),
-            swapchain_image_handles,
             swapchain_recreated: false,
             last_print: Instant::now(),
             extent: [1, 1],
@@ -100,12 +100,20 @@ impl RenderTask {
         thread::Builder::new().name("Render".into()).spawn(move || {
             info!("Render thread spawned!");
 
+            // Create allocator
+            let mut allocator = self.vulkan_renderer.new_allocator();
+
             const NUM_INSTANCES: u32 = 1;
             let bytes_per_instance = SolidAttributes::SIZE as u64;
             let total_bytes = bytes_per_instance * NUM_INSTANCES as u64;
-            let mut staging_buffers = DoubleBuffered::new(|| {
-                self.vulkan_renderer.new_host_buffer(total_bytes)
-            });
+
+            // Create double-buffered staging buffers
+            let staging_a = allocator.new_staging_buffer(
+                total_bytes,
+            );
+            let staging_b = allocator.new_staging_buffer(
+                total_bytes,
+            );
 
             // Create render pass
             let msaa_samples = SampleCountFlags::TYPE_1;
@@ -137,7 +145,7 @@ impl RenderTask {
             let mut attachments_desc = AttachmentsDescription::new(swapchain_attachment)
                 .with_depth_attachment(depth_attachment);
 
-            let sampler = self.vulkan_renderer.new_sampler(|i| {
+            let sampler = allocator.new_sampler(|i| {
                 i
                     .min_filter(Filter::NEAREST)
                     .mag_filter(Filter::NEAREST)
@@ -155,19 +163,29 @@ impl RenderTask {
                 attachments_desc = attachments_desc.with_color_attachment(color_attachment);
             }
 
-            let render_pass = self.vulkan_renderer.new_render_pass(attachments_desc);
+            // Framebuffer attachments are now built dynamically during framebuffer creation
+            // This allows handling swapchain recreation with different image counts
+            let swapchain_format = self.vulkan_renderer.swapchain_format();
+            let swapchain_extent = self.vulkan_renderer.swapchain_extent();
+            let render_pass = allocator.new_render_pass(
+                attachments_desc.clone(),
+                swapchain_format,
+                swapchain_extent,
+            );
+
             let attributes = SolidAttributes::get_attributes_configuration();
 
+            // Create double-buffered vertex buffers
             let mut vertex_buffer = DoubleBuffered::new(|| {
-                let buf = self.vulkan_renderer.new_device_buffer(
+                allocator.new_buffer(
                     BufferUsageFlags::VERTEX_BUFFER | BufferUsageFlags::TRANSFER_DST,
-                    total_bytes
-                );
-                buf
+                    BufferCreateFlags::empty(),
+                    total_bytes,
+                )
             });
 
             let pipeline_desc = GraphicsPipelineDesc::new(use_shader!("solid"), attributes, smallvec![GlobalDescriptorSet::bindings()]);
-            let pipeline = self.vulkan_renderer.new_pipeline(render_pass.handle(), pipeline_desc);
+            let pipeline = allocator.new_pipeline(render_pass.clone(), pipeline_desc);
 
             // load font
             let font_data = get_resource("fonts/Ubuntu-Regular.ttf".into()).unwrap();
@@ -213,53 +231,80 @@ impl RenderTask {
 
             info!("img placement: {:?}", img.placement);
 
-            let texture = self.vulkan_renderer.new_image(Format::R8G8B8A8_UNORM, ImageUsageFlags::SAMPLED | ImageUsageFlags::TRANSFER_DST, SampleCountFlags::TYPE_1, img.placement.width, img.placement.height);
+            // Create texture
+            let texture = allocator.new_image(
+                ImageUsageFlags::SAMPLED | ImageUsageFlags::TRANSFER_DST,
+                ImageCreateFlags::empty(),
+                img.placement.width,
+                img.placement.height,
+                Format::R8G8B8A8_UNORM,
+                SampleCountFlags::TYPE_1,
+            );
 
-            // write to staging
-            let mut staging_texture_buffer = self.vulkan_renderer.new_host_buffer(img.data.len() as u64);
-            staging_texture_buffer.map_update(0..img.data.len() as u64, |data| {
-                data[..].copy_from_slice(&img.data);
+            // Upload texture using staging buffer
+            let staging_texture = allocator.new_staging_buffer(
+                img.data.len() as u64,
+            );
+
+            let mut tex_range = staging_texture.try_freeze(img.data.len()).expect("Should be empty");
+            tex_range.update(|data| {
+                data.copy_from_slice(&img.data);
             });
-            // copy to device local image
+
             self.vulkan_renderer.record_device_commands(None, |ctx| {
-                ctx.copy_buffer_to_image(
-                    staging_texture_buffer.handle(),
-                    texture.handle(),
-                    smallvec![
-                        BufferImageCopy::default()
-                            .image_extent(Extent3D::default().width(img.placement.width).height(img.placement.height).depth(1))
-                            .image_subresource(
-                                ImageSubresourceLayers::default()
-                                    .aspect_mask(vulkan_lib::ImageAspectFlags::COLOR)
-                                    .mip_level(0)
-                                    .base_array_layer(0)
-                                    .layer_count(1)
-                            )
-                    ],
+                ctx.copy_buffer_to_image_full(
+                    tex_range,
+                    texture.clone(),
+                    4, // bytes_per_texel for RGBA8
                 );
             });
 
-            let mut global_ds = self.vulkan_renderer.new_double_buffered_descriptor_sets(
-                GlobalDescriptorSet::bindings(),
-                |ds, renderer| {
-                    let buffer = renderer.new_device_buffer(BufferUsageFlags::UNIFORM_BUFFER, 16);
-                    ds.bind_buffer(0, buffer.handle_static());
-                    ds.bind_image_and_sampler(1, texture.handle(), sampler.handle());
-                    buffer
-                },
-            );
-            let mut global_staging = self.vulkan_renderer.new_host_buffer(16);
+            // Create descriptor sets
+            let ds_a = allocator.allocate_descriptor_set(GlobalDescriptorSet::bindings());
+            let ds_b = allocator.allocate_descriptor_set(GlobalDescriptorSet::bindings());
 
-            // fill global ds
+            // Create uniform buffers
+            let buffer_a = allocator.new_buffer(
+                BufferUsageFlags::UNIFORM_BUFFER | BufferUsageFlags::TRANSFER_DST,
+                BufferCreateFlags::empty(),
+                16,
+            );
+            let buffer_b = allocator.new_buffer(
+                BufferUsageFlags::UNIFORM_BUFFER | BufferUsageFlags::TRANSFER_DST,
+                BufferCreateFlags::empty(),
+                16,
+            );
+
+            // Bind resources
+            ds_a.try_bind_buffer(0, buffer_a.clone());
+            ds_a.try_bind_image_sampler(1, texture.clone(), sampler.clone());
+            ds_b.try_bind_buffer(0, buffer_b.clone());
+            ds_b.try_bind_image_sampler(1, texture.clone(), sampler.clone());
+
+            let mut global_ds = DoubleBuffered::new_with_values(ds_a, ds_b);
+            let mut global_ds_buffers = DoubleBuffered::new_with_values(buffer_a, buffer_b);
+
+            // Upload initial uniform data
+            let global_staging = allocator.new_staging_buffer(
+                32, // 16 bytes per copy, 2 copies
+            );
+
             let mut global = Global {
                 aspect: [800, 600].into(),
             };
-            global_staging.map_write(0, global.as_bytes());
+
+            let mut range1 = global_staging.try_freeze(16).unwrap();
+            range1.update(|data| data.copy_from_slice(global.as_bytes()));
+
+            let mut range2 = global_staging.try_freeze(16).unwrap();
+            range2.update(|data| data.copy_from_slice(global.as_bytes()));
+
             self.vulkan_renderer.record_device_commands(None, |ctx| {
-                ctx.copy_buffer(global_staging.handle(), global_ds.current_data().handle_static(), smallvec![BufferCopy::default().size(16)]);
-                global_ds.next_frame();
-                ctx.copy_buffer(global_staging.handle(), global_ds.current_data().handle_static(), smallvec![BufferCopy::default().size(16)])
+                ctx.copy_buffer(range1, global_ds_buffers.buffers[0].full());
+                ctx.copy_buffer(range2, global_ds_buffers.buffers[1].full());
             });
+            let sub_num = self.vulkan_renderer.wait_prev_submission(0);
+            global_staging.try_unfreeze(sub_num).unwrap();
 
             loop {
                 let msg = self.rx.recv();
@@ -277,10 +322,24 @@ impl RenderTask {
                             };
 
                             let g = range_event_start!("Wait previous submission");
-                            self.vulkan_renderer.wait_prev_submission(1);
+                            let waited = self.vulkan_renderer.wait_prev_submission(1);
                             drop(g);
 
-                            staging_buffers.current_mut().map_update(0..bytes_per_instance, |data| {
+                            // Freeze a range from current staging buffer for vertex data
+
+                            let vertex_staging = if staging_a.try_unfreeze(waited).is_some() {
+                                &staging_a
+                            }
+                            else if staging_b.try_unfreeze(waited).is_some() {
+                                &staging_b
+                            } else {
+                                panic!("Both stagings were frozen!");
+                            };
+                            let mut vertex_staging_range = vertex_staging
+                                .try_freeze(bytes_per_instance as usize)
+                                .expect("Staging buffer should be unfrozen by now");
+
+                            vertex_staging_range.update(|data| {
                                 let square = unsafe {
                                     &mut *(data.as_mut_ptr() as *mut SolidAttributes)
                                 };
@@ -291,10 +350,18 @@ impl RenderTask {
                                     d: 0.5.into(),
                                 };
                             });
-                            if self.swapchain_recreated {
+
+                            // Handle global uniform update on resize
+                            let global_range = if self.swapchain_recreated {
                                 global.aspect = self.extent.into();
-                                global_staging.map_write(0, global.as_bytes());
-                            }
+                                let sub_num = self.vulkan_renderer.wait_prev_submission(0);
+                                global_staging.try_unfreeze(sub_num).unwrap();
+                                let mut range = global_staging.try_freeze(16).expect("Global staging should have space");
+                                range.update(|data| data.copy_from_slice(global.as_bytes()));
+                                Some(range)
+                            } else {
+                                None
+                            };
 
                             // Acquire next swapchain image
                             let g = range_event_start!("Acquire next image");
@@ -330,18 +397,16 @@ impl RenderTask {
 
 
                             let present_wait_ref = self.vulkan_renderer.record_device_commands_signal(Some(acquire_wait_ref.with_stages(PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)), |ctx| {
-                                if self.swapchain_recreated {
-                                    ctx.copy_buffer(global_staging.handle(), global_ds.current_data().handle_static(), smallvec![BufferCopy::default().size(16)]);
+                                if let Some(range) = global_range {
+                                    ctx.copy_buffer(range, global_ds_buffers.current().full());
                                     global_ds.next_frame();
-                                    ctx.copy_buffer(global_staging.handle(), global_ds.current_data().handle_static(), smallvec![BufferCopy::default().size(16)])
                                 }
-                                ctx.copy_buffer(staging_buffers.current().handle(), vertex_buffer.current().handle_static(), smallvec![region]);
-                                ctx.render_pass(render_pass.handle(), image_index, clear_values, |ctx| {
-                                    ctx.bind_pipeline(pipeline.handle());
-                                    ctx.bind_descriptor_set(0, global_ds.current().handle());
 
-
-                                    ctx.bind_vertex_buffer(vertex_buffer.current().handle_static());
+                                ctx.copy_buffer(vertex_staging_range, vertex_buffer.current().full());
+                                ctx.render_pass(render_pass.clone(), image_index, clear_values, |ctx| {
+                                    ctx.bind_pipeline(pipeline.clone());
+                                    ctx.bind_descriptor_set(0, global_ds.current().clone());
+                                    ctx.bind_vertex_buffer(vertex_buffer.current().full());
                                     ctx.draw(4, NUM_INSTANCES, 0, 0);
                                 })
                             });
@@ -359,13 +424,11 @@ impl RenderTask {
 
                         global_ds.next_frame();
                         vertex_buffer.next_frame();
-                        staging_buffers.next_frame();
                         self.render_finished.store(true, Ordering::Release);
                     }
                     RenderMessage::Resize { width, height } => {
                         let g = range_event_start!("Recreate Resize");
                         self.vulkan_renderer.recreate_resize((width, height));
-                        self.swapchain_image_handles = self.vulkan_renderer.swapchain_images();
                         self.swapchain_recreated = true;
                         self.resize_finished.store(true, Ordering::Release);
                         self.extent = [width as i32, height as i32];
@@ -377,7 +440,7 @@ impl RenderTask {
                 }
 
                 if self.last_print.elapsed().as_secs() >= 3 {
-                    self.vulkan_renderer.dump_resource_usage();
+                    allocator.dump_resource_usage();
                     self.last_print = Instant::now();
                 }
             }

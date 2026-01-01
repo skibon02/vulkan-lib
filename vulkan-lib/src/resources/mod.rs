@@ -9,10 +9,11 @@ use crate::resources::buffer::{destroy_buffer_resource, BufferResource};
 use crate::resources::descriptor_set::DescriptorSetResource;
 use crate::resources::image::{destroy_image_resource, ImageResource};
 use crate::resources::pipeline::{destroy_pipeline, GraphicsPipelineDesc, GraphicsPipelineResource};
-use crate::resources::render_pass::{destroy_render_pass, RenderPassResource};
+use crate::resources::render_pass::{destroy_render_pass, AttachmentsDescription, FrameBufferAttachment, RenderPassResource};
 use crate::resources::sampler::SamplerResource;
 use crate::queue::memory_manager::MemoryManager;
-use crate::queue::shared::SharedState;
+use crate::queue::shared::{HostWaitedNum, SharedState};
+use crate::resources::staging_buffer::{destroy_staging_buffer_resource, StagingBuffer, StagingBufferResource};
 use crate::shaders::DescriptorSetLayoutBindingDesc;
 use crate::wrappers::device::VkDeviceRef;
 
@@ -23,6 +24,7 @@ pub mod pipeline;
 pub mod descriptor_set;
 pub mod sampler;
 pub mod descriptor_pool;
+pub mod staging_buffer;
 
 pub struct VulkanAllocator {
     device: VkDeviceRef,
@@ -31,6 +33,7 @@ pub struct VulkanAllocator {
     descriptor_set_layouts: HashMap<Vec<DescriptorSetLayoutBindingDesc>, DescriptorSetLayout>,
     descriptor_set_allocator: DescriptorSetAllocator,
 
+    staging_buffers: Vec<Arc<StagingBuffer>>,
     buffers: Vec<Arc<BufferResource>>,
     images: Vec<Arc<ImageResource>>,
     render_passes: Vec<Arc<RenderPassResource>>,
@@ -39,6 +42,30 @@ pub struct VulkanAllocator {
 }
 
 impl VulkanAllocator {
+    pub(crate) fn new(
+        device: VkDeviceRef,
+        shared_state: SharedState,
+        memory_types: Vec<vk::MemoryType>,
+        memory_heaps: Vec<vk::MemoryHeap>,
+    ) -> Self {
+        let memory_manager = MemoryManager::new(device.clone(), memory_types, memory_heaps);
+        let descriptor_set_allocator = DescriptorSetAllocator::new(device.clone(), shared_state.clone());
+
+        Self {
+            device,
+            shared_state,
+            memory_manager,
+            descriptor_set_layouts: HashMap::new(),
+            descriptor_set_allocator,
+            staging_buffers: Vec::new(),
+            buffers: Vec::new(),
+            images: Vec::new(),
+            render_passes: Vec::new(),
+            pipelines: Vec::new(),
+            samplers: Vec::new(),
+        }
+    }
+
     pub fn allocate_descriptor_set(&mut self, bindings: &'static [DescriptorSetLayoutBindingDesc]) -> Arc<DescriptorSetResource> {
         let layout = self.get_or_create_descriptor_set_layout(bindings);
         let resource = self.descriptor_set_allocator.allocate_descriptor_set(layout, bindings);
@@ -46,12 +73,24 @@ impl VulkanAllocator {
     }
 
     pub fn new_buffer(&mut self, usage: BufferUsageFlags, flags: BufferCreateFlags, size: DeviceSize) -> Arc<BufferResource> {
-        Arc::new(BufferResource::new(&self.device, &mut self.memory_manager, usage, flags, size))
+        let res = Arc::new(BufferResource::new(&self.device, &mut self.memory_manager, usage, flags, size));
+        self.buffers.push(res.clone());
+        res
+    }
+    
+    pub fn new_staging_buffer(&mut self, size: DeviceSize) -> StagingBufferResource {
+        let usage = BufferUsageFlags::empty();
+        let flags = BufferCreateFlags::empty();
+        let res = Arc::new(StagingBuffer::new(&self.device, &mut self.memory_manager, usage, flags, size));
+        self.staging_buffers.push(res.clone());
+        StagingBufferResource(res)
     }
 
     pub fn new_image(&mut self, usage: ImageUsageFlags, flags: ImageCreateFlags,
                      width: u32, height: u32, format: Format, samples: SampleCountFlags) -> Arc<ImageResource> {
-        Arc::new(ImageResource::new(&self.device, &mut self.memory_manager, usage, flags, width, height, format, samples))
+        let res = Arc::new(ImageResource::new(&self.device, &mut self.memory_manager, usage, flags, width, height, format, samples));
+        self.images.push(res.clone());
+        res
     }
 
     pub fn new_sampler(&mut self, f: impl FnOnce(SamplerCreateInfo) -> SamplerCreateInfo) -> Arc<SamplerResource> {
@@ -74,18 +113,37 @@ impl VulkanAllocator {
                 .mip_lod_bias(0.0);
         let sampler_info = f(default_info);
         let sampler = SamplerResource::new(&self.device, &sampler_info);
-        Arc::new(sampler)
+        let res = Arc::new(sampler);
+        self.samplers.push(res.clone());
+
+        res
     }
 
-    pub fn new_render_pass(&mut self) -> Arc<RenderPassResource> {
-
+    pub fn new_render_pass(
+        &mut self,
+        attachments_description: AttachmentsDescription,
+        swapchain_format: vk::Format,
+        swapchain_extent: vk::Extent2D,
+    ) -> Arc<RenderPassResource> {
+        let res = Arc::new(RenderPassResource::new(
+            &self.device,
+            &mut self.memory_manager,
+            attachments_description,
+            swapchain_format,
+            swapchain_extent,
+        ));
+        self.render_passes.push(res.clone());
+        res
     }
     pub fn new_pipeline(&mut self, render_pass: Arc<RenderPassResource>, pipeline_desc: GraphicsPipelineDesc) -> Arc<GraphicsPipelineResource> {
         let descriptor_set_layouts = pipeline_desc.bindings.iter()
             .map(|bindings_desc| self.get_or_create_descriptor_set_layout(bindings_desc))
             .collect();
 
-        Arc::new(GraphicsPipelineResource::new(&self.device, render_pass, pipeline_desc, descriptor_set_layouts))
+        let res = Arc::new(GraphicsPipelineResource::new(&self.device, render_pass, pipeline_desc, descriptor_set_layouts));
+        self.pipelines.push(res.clone());
+
+        res
     }
     fn get_or_create_descriptor_set_layout(&mut self, bindings_desc: &[DescriptorSetLayoutBindingDesc]) -> DescriptorSetLayout {
         let key: Vec<DescriptorSetLayoutBindingDesc> = bindings_desc.to_vec();
@@ -116,24 +174,39 @@ impl VulkanAllocator {
 
     pub fn dump_resource_usage(&self) {
         let buffer_count = self.buffers.len();
+        let staging_buffer_count = self.staging_buffers.len();
         let image_count = self.images.len();
         let render_pass_count = self.render_passes.len();
         let pipeline_count = self.pipelines.len();
+        let sampler_count = self.samplers.len();
         println!("Resource usage dump:");
         println!("Buffers: {}", buffer_count);
+        println!("Staging buffers: {}", staging_buffer_count);
         println!("Images: {}", image_count);
         println!("Render passes: {}", render_pass_count);
         println!("Pipelines: {}", pipeline_count);
+        println!("Samplers: {}", sampler_count);
     }
 
     pub fn destroy_old_resources(&mut self) {
-        let last_waited = self.shared_state.last_host_waited_submission();
+        let last_waited = self.shared_state.last_host_waited_submission().num();
 
         let mut i = 0;
         while i < self.buffers.len() {
             if self.buffers[i].submission_usage.load().is_none_or(|n| n <= last_waited) && Arc::strong_count(&self.buffers[i]) == 1 {
                 let buffer = Arc::into_inner(self.buffers.swap_remove(i)).unwrap();
                 destroy_buffer_resource(&self.device, buffer);
+            }
+            else {
+                i += 1;
+            }
+        }
+
+        let mut i = 0;
+        while i < self.staging_buffers.len() {
+            if self.staging_buffers[i].submission_usage.load().is_none_or(|n| n <= last_waited) && Arc::strong_count(&self.staging_buffers[i]) == 1 {
+                let staging_buffer = Arc::into_inner(self.staging_buffers.swap_remove(i)).unwrap();
+                destroy_staging_buffer_resource(&self.device, staging_buffer);
             }
             else {
                 i += 1;
@@ -246,11 +319,11 @@ impl LastResourceUsage {
         Self::None
     }
 
-    pub fn on_host_waited(&mut self, last_waited_num: usize, had_host_writes: bool) {
+    pub fn on_host_waited(&mut self, last_waited_num: HostWaitedNum, had_host_writes: bool) {
         if let Self::HasWrite{ last_write, visible_for } = self
             && let Some(last_write_fr) = last_write
             && let Some(submission_num) = last_write_fr.submission_num
-            && last_waited_num >= submission_num {
+            && last_waited_num.num() >= submission_num {
 
             *last_write = None;
             if had_host_writes {

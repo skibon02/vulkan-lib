@@ -48,7 +48,7 @@ impl DescriptorSetResource {
         &self.bindings
     }
 
-    pub fn try_bind_buffer(&mut self, binding_index: u32, buffer: Arc<BufferResource>) {
+    pub fn try_bind_buffer(&self, binding_index: u32, buffer: Arc<BufferResource>) {
         let mut bindings = self.bindings.lock().unwrap();
         if self.updates_locked.load(Ordering::Relaxed) {
             warn!("Attempted to bind buffer to descriptor set while updates are locked!");
@@ -64,7 +64,7 @@ impl DescriptorSetResource {
         }
     }
 
-    pub fn try_bind_image(&mut self, binding_index: u32, image: Arc<ImageResource>) {
+    pub fn try_bind_image(&self, binding_index: u32, image: Arc<ImageResource>) {
         let mut bindings = self.bindings.lock().unwrap();
         if self.updates_locked.load(Ordering::Relaxed) {
             warn!("Attempted to bind buffer to descriptor set while updates are locked!");
@@ -80,7 +80,7 @@ impl DescriptorSetResource {
         }
     }
 
-    pub fn try_bind_image_sampler(&mut self, binding_index: u32, image: Arc<ImageResource>, sampler: Arc<SamplerResource>) {
+    pub fn try_bind_image_sampler(&self, binding_index: u32, image: Arc<ImageResource>, sampler: Arc<SamplerResource>) {
         let mut bindings = self.bindings.lock().unwrap();
         if self.updates_locked.load(Ordering::Relaxed) {
             warn!("Attempted to bind buffer to descriptor set while updates are locked!");
