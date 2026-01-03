@@ -1,10 +1,12 @@
 use std::ffi::CStr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use ash::vk;
 use ash::vk::{ColorComponentFlags, CompareOp, CullModeFlags, DescriptorSetLayout, DynamicState, GraphicsPipelineCreateInfo, Pipeline, PipelineCache, PipelineCacheCreateInfo, PipelineColorBlendAttachmentState, PipelineColorBlendStateCreateInfo, PipelineDepthStencilStateCreateInfo, PipelineDynamicStateCreateInfo, PipelineInputAssemblyStateCreateInfo, PipelineLayout, PipelineLayoutCreateInfo, PipelineMultisampleStateCreateInfo, PipelineRasterizationStateCreateInfo, PipelineShaderStageCreateInfo, PipelineVertexInputStateCreateInfo, PipelineViewportStateCreateInfo, PrimitiveTopology, SampleCountFlags, ShaderModuleCreateInfo, ShaderStageFlags, VertexInputAttributeDescription, VertexInputBindingDescription, FALSE};
-use log::error;
+use log::{error, warn};
 use smallvec::SmallVec;
 use sparkles::range_event_start;
+use crate::try_get_instance;
 use crate::queue::OptionSeqNumShared;
 use crate::resources::render_pass::RenderPassResource;
 use crate::shaders::DescriptorSetLayoutBindingDesc;
@@ -17,8 +19,8 @@ pub struct GraphicsPipelineResource {
     pipeline_cache: PipelineCache,
 
     pub(crate) submission_usage: OptionSeqNumShared,
-    
-    dropped: bool,
+
+    dropped: AtomicBool,
 }
 
 
@@ -128,8 +130,8 @@ impl GraphicsPipelineResource {
             pipeline_layout,
             pipeline_cache,
             submission_usage: OptionSeqNumShared::default(),
-            
-            dropped: false,
+
+            dropped: AtomicBool::new(false),
         }
     }
 }
@@ -207,18 +209,33 @@ pub enum VertexAssembly {
 
 impl Drop for GraphicsPipelineResource {
     fn drop(&mut self) {
-        if !self.dropped {
-            error!("PipelineResource dropped without proper destruction!");
+        if !self.dropped.load(Ordering::Relaxed) {
+            destroy_pipeline(self, false);
         }
     }
 }
 
-pub(crate) fn destroy_pipeline(device: &VkDeviceRef, mut pipeline: GraphicsPipelineResource) {
-    if !pipeline.dropped {
-        unsafe {
-            device.destroy_pipeline(pipeline.pipeline, None);
-            device.destroy_pipeline_layout(pipeline.pipeline_layout, None);
+pub(crate) fn destroy_pipeline(pipeline: &GraphicsPipelineResource, no_usages: bool) {
+    if !pipeline.dropped.swap(true, Ordering::Relaxed) {
+        if let Some(instance) = try_get_instance() {
+            if !no_usages {
+                let last_host_waited = instance.shared_state.last_host_waited_cached().num();
+                if pipeline.submission_usage.load().is_some_and(|u| u > last_host_waited) {
+                    warn!("Trying to destroy pipeline resource, but VulkanAllocator was destroyed earlier! Calling device_wait_idle...");
+                    unsafe {
+                        instance.device.device_wait_idle().unwrap();
+                    }
+                }
+            }
+            let device = instance.device.clone();
+            unsafe {
+                device.destroy_pipeline_cache(pipeline.pipeline_cache, None);
+                device.destroy_pipeline(pipeline.pipeline, None);
+                device.destroy_pipeline_layout(pipeline.pipeline_layout, None);
+            }
         }
-        pipeline.dropped = true;
+        else {
+            error!("VulkanInstance was destroyed! Cannot destroy pipeline resource");
+        }
     }
 }

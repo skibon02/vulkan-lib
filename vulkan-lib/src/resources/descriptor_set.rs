@@ -39,8 +39,6 @@ pub struct DescriptorSetResource {
     pub(crate) bindings: Mutex<SmallVec<[DescriptorSetBinding; 5]>>,
     pub(crate) submission_usage: OptionSeqNumShared,
     pub(crate) updates_locked: AtomicBool,
-
-    pub(crate) dropped: bool,
 }
 
 impl DescriptorSetResource {
@@ -48,51 +46,60 @@ impl DescriptorSetResource {
         &self.bindings
     }
 
-    pub fn try_bind_buffer(&self, binding_index: u32, buffer: Arc<BufferResource>) {
+    #[must_use]
+    pub fn try_bind_buffer(&self, binding_index: u32, buffer: Arc<BufferResource>) -> Option<()> {
         let mut bindings = self.bindings.lock().unwrap();
         if self.updates_locked.load(Ordering::Relaxed) {
             warn!("Attempted to bind buffer to descriptor set while updates are locked!");
-            return;
+            return None;
         }
 
         if let Some(binding) = bindings.iter_mut().find(|b| b.binding_index == binding_index) {
             binding.resource = Some(BoundResource::Buffer(buffer));
             binding.resource_updated = true;
+            Some(())
         }
         else {
             warn!("Incorrect binding index specified in bind_buffer!");
+            None
         }
     }
 
-    pub fn try_bind_image(&self, binding_index: u32, image: Arc<ImageResource>) {
+    #[must_use]
+    pub fn try_bind_image(&self, binding_index: u32, image: Arc<ImageResource>) -> Option<()> {
         let mut bindings = self.bindings.lock().unwrap();
         if self.updates_locked.load(Ordering::Relaxed) {
             warn!("Attempted to bind buffer to descriptor set while updates are locked!");
-            return;
+            return None;
         }
 
         if let Some(binding) = bindings.iter_mut().find(|b| b.binding_index == binding_index) {
             binding.resource = Some(BoundResource::Image(image));
             binding.resource_updated = true;
+            Some(())
         }
         else {
             warn!("Incorrect binding index specified in bind_image!");
+            None
         }
     }
 
-    pub fn try_bind_image_sampler(&self, binding_index: u32, image: Arc<ImageResource>, sampler: Arc<SamplerResource>) {
+    #[must_use]
+    pub fn try_bind_image_sampler(&self, binding_index: u32, image: Arc<ImageResource>, sampler: Arc<SamplerResource>) -> Option<()> {
         let mut bindings = self.bindings.lock().unwrap();
         if self.updates_locked.load(Ordering::Relaxed) {
             warn!("Attempted to bind buffer to descriptor set while updates are locked!");
-            return;
+            return None;
         }
 
         if let Some(binding) = bindings.iter_mut().find(|b| b.binding_index == binding_index) {
             binding.resource = Some(BoundResource::CombinedImageSampler { image, sampler });
             binding.resource_updated = true;
+            Some(())
         }
         else {
             warn!("Incorrect binding index specified in bind_image_and_sampler!");
+            None
         }
     }
 
@@ -117,6 +124,7 @@ impl DescriptorSetResource {
             if !binding.resource_updated {
                 continue;
             }
+            binding.resource_updated = false;
             if let Some(resource) = &binding.resource {
                 match resource {
                     BoundResource::Buffer(buffer) => {
@@ -178,16 +186,10 @@ impl DescriptorSetResource {
             );
         }
 
-        unsafe {
-            device.update_descriptor_sets(&descriptor_writes, &[]);
-        }
-    }
-}
-
-impl Drop for DescriptorSetResource {
-    fn drop(&mut self) {
-        if !self.dropped {
-            error!("DescriptorSetResource dropped without proper destruction!");
+        if !descriptor_writes.is_empty() {
+            unsafe {
+                device.update_descriptor_sets(&descriptor_writes, &[]);
+            }
         }
     }
 }

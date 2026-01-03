@@ -1,4 +1,5 @@
 use std::ffi::{c_char, CString};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use anyhow::bail;
 use ash::Entry;
 use ash::vk::{make_api_version, ApplicationInfo, BufferCreateInfo, Extent2D, PhysicalDevice};
@@ -16,8 +17,8 @@ use crate::wrappers::timestamp_pool::TimestampPool;
 use crate::queue::GraphicsQueue;
 pub use ash::vk;
 pub use vk::{DescriptorType, ShaderStageFlags};
+use crate::queue::shared::SharedState;
 
-pub mod instance;
 mod wrappers;
 mod swapchain_wrapper;
 pub mod util;
@@ -29,18 +30,24 @@ pub mod queue;
 pub mod android;
 pub mod resources;
 
+static INSTANCE_SLOT: Mutex<Weak<VulkanInstance>> = Mutex::new(Weak::new());
+
+pub(crate) fn try_get_instance() -> Option<Arc<VulkanInstance>> {
+    INSTANCE_SLOT.lock().unwrap().upgrade()
+}
+
 pub struct VulkanInstance {
     debug_report: VkDebugReport,
     physical_device: PhysicalDevice,
     device: VkDeviceRef,
+    shared_state: SharedState,
 
-    // runtime state
     entry: Entry,
 }
 
 impl VulkanInstance {
     #[track_caller]
-    pub fn new_for_handle(window_handle: RawWindowHandle, display_handle: RawDisplayHandle, initial_size: (u32, u32)) -> anyhow::Result<(Self, GraphicsQueue)> {
+    pub fn new_for_handle(window_handle: RawWindowHandle, display_handle: RawDisplayHandle, initial_size: (u32, u32)) -> anyhow::Result<GraphicsQueue> {
         let Ok(entry) = (unsafe { Entry::load() }) else {
             bail!("Failed to load Vulkan entry");
         };
@@ -191,13 +198,6 @@ impl VulkanInstance {
 
         let memory_heaps = memory_properties.memory_heaps_as_slice().to_vec();
         let memory_types = memory_properties.memory_types_as_slice().to_vec();
-        
-        let mut res = Self {
-            entry,
-            physical_device,
-            device: device.clone(),
-            debug_report,
-        };
 
         let extent = Extent2D {
             width: initial_size.0,
@@ -211,8 +211,22 @@ impl VulkanInstance {
             None,
         )?;
 
-        Ok((res, GraphicsQueue::new(
-            device,
+        let shared_state = SharedState::new(device.clone());
+        let res = Arc::new(Self {
+            entry,
+            physical_device,
+            device: device.clone(),
+            debug_report,
+            shared_state,
+        });
+        {
+            let mut slot = INSTANCE_SLOT.lock().unwrap();
+            *slot = Arc::downgrade(&res);
+        }
+
+
+        Ok(GraphicsQueue::new(
+            res,
             queue_family_index,
             queue,
             physical_device,
@@ -221,6 +235,6 @@ impl VulkanInstance {
             timestamp_pool,
             memory_types,
             memory_heaps,
-        )))
+        ))
     }
 }

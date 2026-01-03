@@ -178,7 +178,6 @@ impl DescriptorSetAllocator {
             bindings: Mutex::new(bindings),
             submission_usage: OptionSeqNumShared::default(),
             updates_locked: AtomicBool::new(false),
-            dropped: false,
         });
 
         self.sets.push(ds.clone());

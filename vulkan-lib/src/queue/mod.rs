@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 use anyhow::Context;
 use ash::vk;
-use ash::vk::{AccessFlags, BufferMemoryBarrier, CommandBufferBeginInfo, DependencyFlags, Extent2D, ImageAspectFlags, ImageLayout, ImageMemoryBarrier, ImageSubresourceRange, ImageView, MemoryHeap, MemoryType, PhysicalDevice, PipelineBindPoint, PipelineStageFlags, Queue, Rect2D, RenderPassBeginInfo, SubpassContents, Viewport, WHOLE_SIZE};
+use ash::vk::{AccessFlags, BufferMemoryBarrier, CommandBufferBeginInfo, DependencyFlags, Extent2D, ImageAspectFlags, ImageCreateFlags, ImageLayout, ImageMemoryBarrier, ImageSubresourceRange, ImageUsageFlags, ImageView, MemoryHeap, MemoryType, PhysicalDevice, PipelineBindPoint, PipelineStageFlags, Queue, Rect2D, RenderPassBeginInfo, SubpassContents, Viewport, WHOLE_SIZE};
 use log::{info, warn};
 use smallvec::{smallvec, SmallVec};
 use sparkles::monotonic::get_perf_frequency;
@@ -20,19 +20,35 @@ use sparkles::{range_event_start, static_name};
 use sparkles::external_events::ExternalEventsSource;
 use strum::IntoDiscriminant;
 use crate::extensions::calibrated_timestamps::CalibratedTimestamps;
-use crate::resources::render_pass::{FrameBufferAttachment, RenderPassResource};
+use crate::resources::image::ImageResource;
+use crate::resources::render_pass::{AttachmentSlot, FrameBufferAttachment, RenderPassResource};
 use crate::resources::VulkanAllocator;
 use command_buffers::CommandBufferManager;
 use shared::{HostWaitedNum, SharedState};
-use crate::queue::queue_local::QueueLocalToken;
 use crate::queue::memory_manager::MemoryManager;
+use crate::queue::queue_local::QueueLocalToken;
 use crate::queue::recording::{DeviceCommand, DrawCommand, RecordContext, SpecificResourceUsage};
 use crate::queue::semaphores::{SemaphoreManager, WaitSemaphoreRef, WaitSemaphoreStagesRef, WaitedOperation};
 use crate::resources::{LastResourceUsage, RequiredSync, ResourceUsage};
 use crate::swapchain_wrapper::SwapchainWrapper;
+use crate::VulkanInstance;
 use crate::wrappers::device::VkDeviceRef;
 use crate::wrappers::surface::VkSurfaceRef;
 use crate::wrappers::timestamp_pool::TimestampPool;
+
+/// Data for a single framebuffer and its attachments
+pub(crate) struct FramebufferData {
+    pub(crate) framebuffer: vk::Framebuffer,
+    pub(crate) depth_image: Option<Arc<ImageResource>>,
+    pub(crate) color_image: Option<Arc<ImageResource>>,
+}
+
+/// Set of framebuffers for a render pass
+/// Each framebuffer has its own depth/color attachment images
+pub(crate) struct FramebufferSet {
+    pub(crate) render_pass: sync::Weak<RenderPassResource>,
+    pub(crate) framebuffers: SmallVec<[FramebufferData; 4]>,
+}
 
 pub struct GraphicsQueue {
     physical_device: PhysicalDevice,
@@ -40,11 +56,11 @@ pub struct GraphicsQueue {
     queue: vk::Queue,
     surface: VkSurfaceRef,
     swapchain_wrapper: SwapchainWrapper,
-    framebuffers: HashMap<vk::RenderPass, (sync::Weak<RenderPassResource>, SmallVec<[vk::Framebuffer; 4]>)>,
-    recycled_framebuffers: HashMap<usize, SmallVec<[vk::Framebuffer; 4]>>,
+    framebuffers: HashMap<vk::RenderPass, FramebufferSet>,
+    recycled_framebuffer_sets: HashMap<usize, Vec<FramebufferSet>>,
+    recycled_swapchain_images: HashMap<usize, Vec<Arc<ImageResource>>>,
     token: QueueLocalToken,
 
-    shared_state: shared::SharedState,
     semaphore_manager: SemaphoreManager,
     command_buffer_manager: CommandBufferManager,
 
@@ -60,10 +76,14 @@ pub struct GraphicsQueue {
 
     // extensions
     calibrated_timestamps: Option<CalibratedTimestamps>,
+
+
+    // Last to be dropped
+    instance: Arc<VulkanInstance>,
 }
 impl GraphicsQueue {
     pub fn new(
-        device: VkDeviceRef,
+        instance: Arc<VulkanInstance>,
         queue_family_index: u32,
         queue: Queue,
         physical_device: PhysicalDevice,
@@ -73,7 +93,6 @@ impl GraphicsQueue {
         memory_types: Vec<MemoryType>,
         memory_heaps: Vec<MemoryHeap>,
     ) -> Self {
-        let shared_state = SharedState::new(device.clone());
         let surface = swapchain_wrapper.surface();
 
         let mut sparkles_gpu_channel = ExternalEventsSource::new("Vulkan GPU".to_string());
@@ -83,17 +102,19 @@ impl GraphicsQueue {
             }
         }
 
+        let device = instance.device.clone();
         GraphicsQueue {
-            physical_device,
             device: device.clone(),
+            instance,
+            physical_device,
             queue,
             surface,
             swapchain_wrapper,
             framebuffers: HashMap::new(),
-            recycled_framebuffers: HashMap::new(),
+            recycled_framebuffer_sets: HashMap::new(),
+            recycled_swapchain_images: HashMap::new(),
             token: QueueLocalToken::try_new().unwrap(),
 
-            shared_state,
             semaphore_manager: SemaphoreManager::new(device.clone()),
             command_buffer_manager: CommandBufferManager::new(device.clone(), queue_family_index),
 
@@ -109,51 +130,101 @@ impl GraphicsQueue {
 
     pub fn new_allocator(&self) -> VulkanAllocator {
         VulkanAllocator::new(
-            self.device.clone(),
-            self.shared_state.clone(),
+            self.instance.clone(),
             self.memory_types.clone(),
             self.memory_heaps.clone(),
         )
     }
 
     fn get_or_create_framebuffers(&mut self, render_pass: &Arc<RenderPassResource>) -> SmallVec<[vk::Framebuffer; 4]> {
-        let framebuffer = self.framebuffers
+        let framebuffer_set = self.framebuffers
             .entry(render_pass.render_pass)
             .or_insert_with(|| {
-                let mut framebuffers = smallvec![];
                 let swapchain_images = self.swapchain_wrapper.get_images();
                 let swapchain_image_count = swapchain_images.len();
+                let swapchain_extent = self.swapchain_wrapper.get_extent();
 
-                // Build framebuffer attachments dynamically based on current swapchain image count
-                let framebuffer_attachments = render_pass.build_framebuffer_attachments(swapchain_image_count);
+                // Create a temporary MemoryManager for allocating images
+                let mut memory_manager = MemoryManager::new(
+                    self.device.clone(),
+                    self.memory_types.clone(),
+                    self.memory_heaps.clone(),
+                );
 
-                for attachments in framebuffer_attachments {
+                let attachments_desc = render_pass.attachments_desc();
+                let mut framebuffer_data_vec = smallvec![];
+
+                // Create one framebuffer per swapchain image
+                for framebuffer_index in 0..swapchain_image_count {
                     let mut views: SmallVec<[ImageView; 5]> = smallvec![];
-                    for attachment in attachments {
-                        let image_view = match attachment {
-                            FrameBufferAttachment::SwapchainImage(i) => swapchain_images[i].image_view,
-                            FrameBufferAttachment::Image(image) => image.image_view,
-                        };
-                        views.push(image_view);
+                    let mut depth_image = None;
+                    let mut color_image = None;
+
+                    // Attachment 0: swapchain image
+                    views.push(swapchain_images[framebuffer_index].image_view);
+
+                    // Create depth/color images for this framebuffer
+                    for (_, slot, desc) in attachments_desc.iter_non_swapchain_attachments() {
+                        match slot {
+                            AttachmentSlot::Depth => {
+                                let image = Arc::new(ImageResource::new(
+                                    &self.device,
+                                    &mut memory_manager,
+                                    ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
+                                    ImageCreateFlags::empty(),
+                                    swapchain_extent.width,
+                                    swapchain_extent.height,
+                                    desc.format,
+                                    desc.samples,
+                                ));
+                                views.push(image.image_view);
+                                depth_image = Some(image);
+                            },
+                            AttachmentSlot::ColorMSAA => {
+                                let image = Arc::new(ImageResource::new(
+                                    &self.device,
+                                    &mut memory_manager,
+                                    ImageUsageFlags::COLOR_ATTACHMENT,
+                                    ImageCreateFlags::empty(),
+                                    swapchain_extent.width,
+                                    swapchain_extent.height,
+                                    desc.format,
+                                    desc.samples,
+                                ));
+                                views.push(image.image_view);
+                                color_image = Some(image);
+                            },
+                            AttachmentSlot::Swapchain => unreachable!("Swapchain in non-swapchain iterator"),
+                        }
                     }
-                    let swapchain_extent = self.swapchain_wrapper.get_extent();
+
+                    // Create the framebuffer
                     let framebuffer_create_info = vk::FramebufferCreateInfo::default()
                         .render_pass(render_pass.render_pass)
                         .attachments(&views)
                         .width(swapchain_extent.width)
                         .height(swapchain_extent.height)
                         .layers(1);
+
                     let framebuffer = unsafe {
                         self.device.create_framebuffer(&framebuffer_create_info, None).unwrap()
                     };
 
-                    framebuffers.push(framebuffer);
+                    framebuffer_data_vec.push(FramebufferData {
+                        framebuffer,
+                        depth_image,
+                        color_image,
+                    });
                 }
 
-                let render_pass = Arc::downgrade(render_pass);
-                (render_pass, framebuffers)
+                FramebufferSet {
+                    render_pass: Arc::downgrade(render_pass),
+                    framebuffers: framebuffer_data_vec,
+                }
             });
-        framebuffer.1.clone()
+
+        // Extract framebuffer handles to return
+        framebuffer_set.framebuffers.iter().map(|fd| fd.framebuffer).collect()
     }
 
 
@@ -161,23 +232,45 @@ impl GraphicsQueue {
         // destroy framebuffers if their render pass was destroyed
         let keys = self.framebuffers.keys().cloned().collect::<SmallVec<[_; 5]>>();
         for key in keys {
-            if sync::Weak::upgrade(&self.framebuffers.get(&key).unwrap().0).is_none() {
-                let (render_pass, framebuffers) =self.framebuffers.remove(&key).unwrap();
-                for framebuffer in framebuffers {
+            if sync::Weak::upgrade(&self.framebuffers.get(&key).unwrap().render_pass).is_none() {
+                let framebuffer_set = self.framebuffers.remove(&key).unwrap();
+                for fb_data in framebuffer_set.framebuffers {
                     unsafe {
-                        self.device.destroy_framebuffer(framebuffer, None);
+                        self.device.destroy_framebuffer(fb_data.framebuffer, None);
+                    }
+                    // Destroy depth/color images
+                    if let Some(depth_image) = fb_data.depth_image {
+                        crate::resources::image::destroy_image_resource(&depth_image, true);
+                    }
+                    if let Some(color_image) = fb_data.color_image {
+                        crate::resources::image::destroy_image_resource(&color_image, true);
                     }
                 }
             }
         }
 
-        // destroy pending for recycle framebuffers
-        let last_waited_num = self.shared_state.last_host_waited_submission().num();
-        for (_, framebuffers) in self.recycled_framebuffers.extract_if(|s, _| *s <= last_waited_num) {
-            for framebuffer in framebuffers {
-                unsafe {
-                    self.device.destroy_framebuffer(framebuffer, None);
+        // destroy recycled framebuffer sets (with images) when their submission is waited
+        let last_waited_num = self.instance.shared_state.last_host_waited_submission().num();
+        for (_, framebuffer_sets) in self.recycled_framebuffer_sets.extract_if(|s, _| *s <= last_waited_num) {
+            for framebuffer_set in framebuffer_sets {
+                for fb_data in framebuffer_set.framebuffers {
+                    unsafe {
+                        self.device.destroy_framebuffer(fb_data.framebuffer, None);
+                    }
+                    if let Some(depth_image) = fb_data.depth_image {
+                        crate::resources::image::destroy_image_resource(&depth_image, true);
+                    }
+                    if let Some(color_image) = fb_data.color_image {
+                        crate::resources::image::destroy_image_resource(&color_image, true);
+                    }
                 }
+            }
+        }
+
+        // destroy recycled swapchain images when their submission is waited
+        for (_, swapchain_images) in self.recycled_swapchain_images.extract_if(|s, _| *s <= last_waited_num) {
+            for image in swapchain_images {
+                crate::resources::image::destroy_image_resource(&image, true);
             }
         }
     }
@@ -190,35 +283,49 @@ impl GraphicsQueue {
             height: new_extent.1,
         };
 
-        // 1. Move old framebuffers to recycled
-        for (_, (render_pass, framebuffers)) in self.framebuffers.drain() {
-            if let Some(render_pass) = sync::Weak::upgrade(&render_pass) {
+        // 1. Destroy old framebuffers and their depth/color images
+        for (_, framebuffer_set) in self.framebuffers.drain() {
+            if let Some(render_pass) = sync::Weak::upgrade(&framebuffer_set.render_pass) {
                 let last_used = render_pass.submission_usage.load();
-                // keep for lazy destruction
+                // If recently used, delay destruction of entire set
                 if let Some(seq_num) = last_used {
-                    self.recycled_framebuffers.entry(seq_num).or_default()
-                        .extend_from_slice(&framebuffers);
+                    self.recycled_framebuffer_sets.entry(seq_num).or_default()
+                        .push(framebuffer_set);
                 }
                 else {
-                    for framebuffer in framebuffers {
+                    // Destroy immediately
+                    for fb_data in framebuffer_set.framebuffers {
                         unsafe {
-                            self.device.destroy_framebuffer(framebuffer, None);
+                            self.device.destroy_framebuffer(fb_data.framebuffer, None);
+                        }
+                        if let Some(depth_image) = fb_data.depth_image {
+                            crate::resources::image::destroy_image_resource(&depth_image, true);
+                        }
+                        if let Some(color_image) = fb_data.color_image {
+                            crate::resources::image::destroy_image_resource(&color_image, true);
                         }
                     }
                 }
             }
             else {
-                for framebuffer in framebuffers {
+                // Render pass already destroyed, clean up immediately
+                for fb_data in framebuffer_set.framebuffers {
                     unsafe {
-                        self.device.destroy_framebuffer(framebuffer, None);
+                        self.device.destroy_framebuffer(fb_data.framebuffer, None);
+                    }
+                    if let Some(depth_image) = fb_data.depth_image {
+                        crate::resources::image::destroy_image_resource(&depth_image, true);
+                    }
+                    if let Some(color_image) = fb_data.color_image {
+                        crate::resources::image::destroy_image_resource(&color_image, true);
                     }
                 }
             }
         }
 
-        // 2. Recreate swapchain
+        // 2. Recreate swapchain and recycle old swapchain images
         let old_format = self.swapchain_wrapper.get_surface_format();
-        unsafe {
+        let old_swapchain_images = unsafe {
             self.swapchain_wrapper
                 .recreate(self.physical_device, new_extent, self.surface.clone())
                 .unwrap()
@@ -227,6 +334,11 @@ impl GraphicsQueue {
         if new_format != old_format {
             unimplemented!("Swapchain format has changed");
         }
+
+        // Add old swapchain images to recycling queue
+        let seq_num = self.instance.shared_state.last_submission_num();
+        self.recycled_swapchain_images.entry(seq_num).or_default()
+            .extend(old_swapchain_images);
     }
 
     pub fn wait_idle(&mut self) {
@@ -236,17 +348,18 @@ impl GraphicsQueue {
         }
 
         // after wait_idle, all submissions up to last_submission_num are done
-        let last_submitted = self.shared_state.last_submission_num();
+        let last_submitted = self.instance.shared_state.last_submission_num();
         if last_submitted > 0 {
-            self.shared_state.confirm_all_waited(last_submitted);
+            self.instance.shared_state.confirm_all_waited(last_submitted);
         }
 
         self.semaphore_manager.on_wait_idle();
         self.command_buffer_manager.on_wait_idle();
+        self.recycle_old_resources();
     }
 
     pub fn wait_prev_submission(&mut self, rel_sub_num: usize) -> HostWaitedNum {
-        self.shared_state.wait_submission(rel_sub_num)
+        self.instance.shared_state.wait_submission(rel_sub_num)
     }
 
     pub fn swapchain_image_count(&self) -> usize {
@@ -360,10 +473,10 @@ impl GraphicsQueue {
         f(&mut record_context);
 
         self.recycle_old_resources();
-        let submission_num = self.shared_state.increment_and_get_submission_num();
+        let submission_num = self.instance.shared_state.increment_and_get_submission_num();
 
-        self.shared_state.poll_completed_fences(); // fast check if any of previous submissions are finished
-        let last_waited_submission = self.shared_state.last_host_waited_submission();
+        self.instance.shared_state.poll_completed_fences(); // fast check if any of previous submissions are finished
+        let last_waited_submission = self.instance.shared_state.last_host_waited_submission();
         self.semaphore_manager.on_last_waited_submission(last_waited_submission); // recycle old semaphores
         self.command_buffer_manager.on_last_waited_submission(last_waited_submission); // recycle old command buffers
 
@@ -422,7 +535,7 @@ impl GraphicsQueue {
 
             // 1) accumulate barriers for all commands in the group
             for cmd in group.iter() {
-                for usage in cmd.usages(submission_num, self.swapchain_wrapper.get_images()) {
+                for usage in cmd.usages(submission_num, self.swapchain_wrapper.get_images(), &self.framebuffers) {
                     match usage {
                         SpecificResourceUsage::BufferUsage {
                             usage,
@@ -529,25 +642,27 @@ impl GraphicsQueue {
                     let swapchain_image_inner = swapchain_images[*framebuffer_index as usize].inner.get(&mut self.token);
                     swapchain_image_inner.layout = swapchain_image_final_layout;
 
-                    let mut attachment_i = 0;
-                    if let Some(depth_att_desc) = attachments_description.get_depth_attachment_desc() {
-                        let depth_image_final_layout = depth_att_desc.final_layout;
+                    // Get framebuffer data to access depth/color images
+                    if let Some(framebuffer_set) = self.framebuffers.get(&render_pass.render_pass) {
+                        let framebuffer_data = &framebuffer_set.framebuffers[*framebuffer_index as usize];
 
-                        let depth_image = render_pass.attachment(swapchain_images, *framebuffer_index as usize, attachment_i);
-                        let depth_inner = depth_image.inner.get(&mut self.token);
-                        depth_inner.layout = depth_image_final_layout;
+                        if let Some(depth_att_desc) = attachments_description.get_depth_attachment_desc() {
+                            let depth_image_final_layout = depth_att_desc.final_layout;
 
-                        attachment_i += 1;
-                    }
+                            if let Some(depth_image) = &framebuffer_data.depth_image {
+                                let depth_inner = depth_image.inner.get(&mut self.token);
+                                depth_inner.layout = depth_image_final_layout;
+                            }
+                        }
 
-                    if let Some(color_attachment_desc) = attachments_description.get_color_attachment_desc() {
-                        let color_attachment_final_layout = color_attachment_desc.final_layout;
+                        if let Some(color_attachment_desc) = attachments_description.get_color_attachment_desc() {
+                            let color_attachment_final_layout = color_attachment_desc.final_layout;
 
-                        let color_attachment_image = render_pass.attachment(swapchain_images, *framebuffer_index as usize, attachment_i);
-                        let color_attachment_inner = color_attachment_image.inner.get(&mut self.token);
-                        color_attachment_inner.layout = color_attachment_final_layout;
-
-                        attachment_i += 1;
+                            if let Some(color_image) = &framebuffer_data.color_image {
+                                let color_inner = color_image.inner.get(&mut self.token);
+                                color_inner.layout = color_attachment_final_layout;
+                            }
+                        }
                     }
                 }
             }
@@ -736,7 +851,7 @@ impl GraphicsQueue {
         }
 
         // get fence
-        let fence = self.shared_state.take_free_fence();
+        let fence = self.instance.shared_state.take_free_fence();
         unsafe {
             self.device.reset_fences(&[fence]).unwrap();
         }
@@ -786,7 +901,7 @@ impl GraphicsQueue {
         }
 
         // register fence
-        self.shared_state.submitted_fence(submission_num, fence);
+        self.instance.shared_state.submitted_fence(submission_num, fence);
     }
 
     // Acquire next swapchain image with semaphore signaling
@@ -862,6 +977,12 @@ impl GraphicsQueue {
                 )
                 .context("queue_present")
         }
+    }
+}
+
+impl Drop for GraphicsQueue {
+    fn drop(&mut self) {
+        self.wait_idle();
     }
 }
 

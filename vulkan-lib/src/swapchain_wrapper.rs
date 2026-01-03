@@ -129,18 +129,14 @@ impl SwapchainWrapper {
 
     /// # Safety
     /// Image views should not be used. Swapchain should not be used.
+    /// Returns the old swapchain images that need to be destroyed later
     pub unsafe fn recreate(&mut self, physical_device: PhysicalDevice,
-                           extent: Extent2D, surface: VkSurfaceRef) -> anyhow::Result<()> {
+                           extent: Extent2D, surface: VkSurfaceRef) -> anyhow::Result<SwapchainImages> {
 
         let swapchain = self.swapchain;
-        let images = mem::take(&mut self.swapchain_images);
-        for image in images {
-            // todo: is it ok?
-            let inner = Arc::into_inner(image).expect("Swapchain images were used during swapchain recreation!");
-            destroy_image_resource(&self.device, inner);
-        }
+        let old_images = mem::take(&mut self.swapchain_images);
         *self = Self::new(self.device.clone(), physical_device, extent, surface, Some(swapchain))?;
-        Ok(())
+        Ok(old_images)
     }
 }
 

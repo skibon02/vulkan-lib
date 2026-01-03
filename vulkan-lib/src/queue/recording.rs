@@ -6,7 +6,7 @@ use std::sync::Arc;
 use smallvec::{smallvec, SmallVec};
 use ash::vk::{self, AccessFlags, BufferCopy, BufferImageCopy, ClearValue, DeviceSize, Format, ImageAspectFlags, ImageLayout, PipelineStageFlags};
 use log::{error, warn};
-use crate::queue::OptionSeqNumShared;
+use crate::queue::{FramebufferSet, OptionSeqNumShared};
 use crate::queue::queue_local::QueueLocal;
 use crate::resources::buffer::{BufferResource, BufferResourceInner};
 use crate::resources::descriptor_set::{BoundResource, DescriptorSetResource};
@@ -302,8 +302,8 @@ impl<'a> RenderPassContext<'a> {
 
     pub fn draw(&mut self, vertex_count: u32, instance_count: u32, first_vertex: u32, first_instance: u32) {
         let mut new_descriptor_set_bindings = SmallVec::new();
-        for (i, binding) in &self.bound_descriptor_sets {
-            new_descriptor_set_bindings.push((*i, binding.clone()));
+        for (i, descriptor_set) in &self.bound_descriptor_sets {
+            new_descriptor_set_bindings.push((*i, descriptor_set.clone()));
         }
         self.bound_descriptor_sets.clear();
         let new_vertex_buffer = self.bound_vertex_buffer.take();
@@ -430,7 +430,7 @@ pub enum DeviceCommand {
 
 impl DeviceCommand {
     /// Get usages for command, update last_used_in
-    pub fn usages(&self, submission_num: usize, swapchain_images: &SwapchainImages) -> Box<dyn Iterator<Item=SpecificResourceUsage>> {
+    pub fn usages<'a>(&'a self, submission_num: usize, swapchain_images: &'a SwapchainImages, framebuffer_sets: &'a HashMap<vk::RenderPass, FramebufferSet>) -> Box<dyn Iterator<Item=SpecificResourceUsage> + 'a> {
         match self {
             DeviceCommand::CopyBuffer {
                 src,
@@ -590,57 +590,67 @@ impl DeviceCommand {
                 ];
 
                 // Use iterator for non-swapchain attachments
-                for (attachment_index, slot, desc) in attachments.iter_non_swapchain_attachments() {
-                    let attachment = render_pass.attachment(swapchain_images, *framebuffer_index as usize, attachment_index);
+                if let Some(framebuffer_set) = framebuffer_sets.get(&render_pass.render_pass) {
+                    let framebuffer_data = &framebuffer_set.framebuffers[*framebuffer_index as usize];
 
-                    match slot {
-                        crate::resources::render_pass::AttachmentSlot::Depth => {
-                            let format = desc.format;
-                            let contains_stencil = matches!(format, Format::S8_UINT | Format::D16_UNORM_S8_UINT | Format::D24_UNORM_S8_UINT | Format::D32_SFLOAT_S8_UINT);
-                            let contains_depth = !matches!(format, Format::S8_UINT);
-                            let mut aspect_mask = ImageAspectFlags::empty();
-                            if contains_depth {
-                                aspect_mask |= ImageAspectFlags::DEPTH
+                    for (_, slot, desc) in attachments.iter_non_swapchain_attachments() {
+                        let attachment_option = match slot {
+                            crate::resources::render_pass::AttachmentSlot::Depth => &framebuffer_data.depth_image,
+                            crate::resources::render_pass::AttachmentSlot::ColorMSAA => &framebuffer_data.color_image,
+                            crate::resources::render_pass::AttachmentSlot::Swapchain => unreachable!("Swapchain should not be in non-swapchain iterator"),
+                        };
+
+                        if let Some(attachment) = attachment_option {
+                            match slot {
+                                crate::resources::render_pass::AttachmentSlot::Depth => {
+                                    let format = desc.format;
+                                    let contains_stencil = matches!(format, Format::S8_UINT | Format::D16_UNORM_S8_UINT | Format::D24_UNORM_S8_UINT | Format::D32_SFLOAT_S8_UINT);
+                                    let contains_depth = !matches!(format, Format::S8_UINT);
+                                    let mut aspect_mask = ImageAspectFlags::empty();
+                                    if contains_depth {
+                                        aspect_mask |= ImageAspectFlags::DEPTH
+                                    }
+                                    if contains_stencil {
+                                        aspect_mask |= ImageAspectFlags::STENCIL
+                                    }
+                                    let required_layout = if desc.initial_layout == ImageLayout::UNDEFINED {
+                                        None
+                                    }
+                                    else {
+                                        Some(desc.initial_layout)
+                                    };
+                                    usages.push(SpecificResourceUsage::ImageUsage {
+                                        image: attachment.clone(),
+                                        usage: ResourceUsage::new(
+                                            Some(submission_num),
+                                            PipelineStageFlags::EARLY_FRAGMENT_TESTS | PipelineStageFlags::LATE_FRAGMENT_TESTS,
+                                            AccessFlags::DEPTH_STENCIL_ATTACHMENT_READ | AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
+                                        ),
+                                        required_layout,
+                                        image_aspect: aspect_mask,
+                                    });
+                                },
+                                crate::resources::render_pass::AttachmentSlot::ColorMSAA => {
+                                    let required_layout = if desc.initial_layout == ImageLayout::UNDEFINED {
+                                        None
+                                    }
+                                    else {
+                                        Some(desc.initial_layout)
+                                    };
+                                    usages.push(SpecificResourceUsage::ImageUsage {
+                                        image: attachment.clone(),
+                                        usage: ResourceUsage::new(
+                                            Some(submission_num),
+                                            PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                                            AccessFlags::COLOR_ATTACHMENT_READ | AccessFlags::COLOR_ATTACHMENT_WRITE,
+                                        ),
+                                        required_layout,
+                                        image_aspect: ImageAspectFlags::COLOR,
+                                    });
+                                },
+                                crate::resources::render_pass::AttachmentSlot::Swapchain => unreachable!("Swapchain should not be in non-swapchain iterator"),
                             }
-                            if contains_stencil {
-                                aspect_mask |= ImageAspectFlags::STENCIL
-                            }
-                            let required_layout = if desc.initial_layout == ImageLayout::UNDEFINED {
-                                None
-                            }
-                            else {
-                                Some(desc.initial_layout)
-                            };
-                            usages.push(SpecificResourceUsage::ImageUsage {
-                                image: attachment,
-                                usage: ResourceUsage::new(
-                                    Some(submission_num),
-                                    PipelineStageFlags::EARLY_FRAGMENT_TESTS | PipelineStageFlags::LATE_FRAGMENT_TESTS,
-                                    AccessFlags::DEPTH_STENCIL_ATTACHMENT_READ | AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
-                                ),
-                                required_layout,
-                                image_aspect: aspect_mask,
-                            });
-                        },
-                        crate::resources::render_pass::AttachmentSlot::ColorMSAA => {
-                            let required_layout = if desc.initial_layout == ImageLayout::UNDEFINED {
-                                None
-                            }
-                            else {
-                                Some(desc.initial_layout)
-                            };
-                            usages.push(SpecificResourceUsage::ImageUsage {
-                                image: attachment,
-                                usage: ResourceUsage::new(
-                                    Some(submission_num),
-                                    PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
-                                    AccessFlags::COLOR_ATTACHMENT_READ | AccessFlags::COLOR_ATTACHMENT_WRITE,
-                                ),
-                                required_layout,
-                                image_aspect: ImageAspectFlags::COLOR,
-                            });
-                        },
-                        crate::resources::render_pass::AttachmentSlot::Swapchain => unreachable!("Swapchain should not be in non-swapchain iterator"),
+                        }
                     }
                 }
 

@@ -1,7 +1,10 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use ash::vk;
 use ash::vk::{Extent3D, Format, ImageCreateFlags, ImageCreateInfo, ImageLayout, ImageTiling, ImageType, ImageUsageFlags, ImageView, MemoryAllocateInfo, SampleCountFlags};
+use log::{error, warn};
 use slotmap::DefaultKey;
+use crate::try_get_instance;
 use crate::queue::queue_local::QueueLocal;
 use crate::queue::memory_manager::{MemoryManager, MemoryTypeAlgorithm};
 use crate::queue::OptionSeqNumShared;
@@ -17,7 +20,7 @@ pub struct ImageResource {
     pub(crate) submission_usage: OptionSeqNumShared,
     pub(crate)inner: QueueLocal<ImageResourceInner>,
 
-    dropped: bool,
+    dropped: AtomicBool,
 }
 
 pub(crate) struct ImageResourceInner {
@@ -92,7 +95,7 @@ impl ImageResource {
                 layout: ImageLayout::UNDEFINED,
             }),
 
-            dropped: false,
+            dropped: AtomicBool::new(false),
         }
     }
 
@@ -125,7 +128,7 @@ impl ImageResource {
                 layout: ImageLayout::UNDEFINED,
             }),
 
-            dropped: false,
+            dropped: AtomicBool::new(false),
         }
     }
 
@@ -149,21 +152,35 @@ pub fn format_aspect_flags(format: Format) -> vk::ImageAspectFlags {
 
 impl Drop for ImageResource {
     fn drop(&mut self) {
-        if !self.dropped {
-            log::error!("ImageResource was not destroyed before dropping!");
+        if !self.dropped.load(Ordering::Relaxed) {
+            destroy_image_resource(self, false);
         }
     }
 }
 
-pub(crate) fn destroy_image_resource(device: &VkDeviceRef, mut image_resource: ImageResource) {
-    if !image_resource.dropped {
-        unsafe {
-            device.destroy_image_view(image_resource.image_view, None);
-            if let Some(mem) = image_resource.memory {
-                device.destroy_image(image_resource.image, None);
-                device.free_memory(mem, None);
+pub(crate) fn destroy_image_resource(image_resource: &ImageResource, no_usages: bool) {
+    if !image_resource.dropped.swap(true, Ordering::Relaxed) {
+        if let Some(instance) = try_get_instance() {
+            if !no_usages {
+                let last_host_waited = instance.shared_state.last_host_waited_cached().num();
+                if image_resource.submission_usage.load().is_some_and(|u| u > last_host_waited) {
+                    warn!("Trying to destroy image resource, but VulkanAllocator was destroyed earlier! Calling device_wait_idle...");
+                    unsafe {
+                        instance.device.device_wait_idle().unwrap();
+                    }
+                }
             }
-            image_resource.dropped = true;
+            let device = instance.device.clone();
+            unsafe {
+                device.destroy_image_view(image_resource.image_view, None);
+                if let Some(mem) = image_resource.memory {
+                    device.destroy_image(image_resource.image, None);
+                    device.free_memory(mem, None);
+                }
+            }
+        }
+        else {
+            error!("VulkanInstance was destroyed! Cannot destroy image resource");
         }
     }
 }

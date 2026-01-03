@@ -30,7 +30,6 @@ pub struct App {
     layout_calculator: LayoutCalculator,
 
     // Rendering thread
-    instance: VulkanInstance,
     render_tx: mpsc::Sender<RenderMessage>,
     render_thread: Option<JoinHandle<()>>,
     render_ready: Arc<AtomicBool>,
@@ -48,8 +47,8 @@ impl App {
         let raw_display_handle = window.raw_display_handle().unwrap();
         let inner_size = window.inner_size();
 
-        let (instance, mut vulkan_renderer) = VulkanInstance::new_for_handle(raw_window_handle, raw_display_handle, (inner_size.width, inner_size.height)).unwrap();
-        let (render_task, render_tx, render_ready, resize_ready) = render::RenderTask::new(vulkan_renderer);
+        let vulkan_renderer = VulkanInstance::new_for_handle(raw_window_handle, raw_display_handle, (inner_size.width, inner_size.height)).unwrap();
+        let (render_task, render_tx, render_ready, resize_ready) = render::RenderTask::new(vulkan_renderer, inner_size);
         let render_jh = render_task.spawn();
         
         // create UI component
@@ -74,7 +73,6 @@ impl App {
             render_ready,
             resize_ready,
             render_thread: Some(render_jh),
-            instance,
 
             frame_cnt: 0,
             last_sec: Instant::now(),
@@ -150,7 +148,7 @@ impl App {
                     // convert into primitive elements, fill instance buffer (text -> list of symbols, img/box -> rects)
 
                     let _ = self.render_tx.send(RenderMessage::Redraw {
-                        bg_color: [0.0, 0.0, 0.0],
+                        bg_color: [0.7, 0.3, 0.9],
                     });
 
                     // handle fps

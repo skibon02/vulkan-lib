@@ -5,6 +5,7 @@ use ash::vk::{AccessFlags, AttachmentDescription, AttachmentLoadOp, AttachmentSt
 use log::{error, warn};
 use smallvec::{smallvec, SmallVec};
 use sparkles::range_event_start;
+use crate::try_get_instance;
 use crate::queue::OptionSeqNumShared;
 use crate::queue::memory_manager::MemoryManager;
 use crate::resources::image::ImageResource;
@@ -26,58 +27,21 @@ pub enum FrameBufferAttachment {
 pub struct RenderPassResource {
     pub(crate) render_pass: vk::RenderPass,
     attachments_description: AttachmentsDescription,
-    depth_image: Option<Arc<ImageResource>>,
-    color_image: Option<Arc<ImageResource>>,
     pub(crate) submission_usage: OptionSeqNumShared,
     framebuffer_registered: AtomicBool,
 
-    dropped: bool,
+    dropped: AtomicBool,
 }
 
 impl RenderPassResource {
     pub(crate) fn new(
         device: &VkDeviceRef,
-        memory_manager: &mut MemoryManager,
         mut attachments_description: AttachmentsDescription,
         swapchain_format: vk::Format,
-        swapchain_extent: vk::Extent2D,
     ) -> Self {
         let g = range_event_start!("Create render pass");
 
         attachments_description.fill_defaults(swapchain_format);
-
-        // Create depth/MSAA images internally
-        let depth_image = if let Some(depth_desc) = attachments_description.depth_attachment_desc {
-            let image = Arc::new(ImageResource::new(
-                device,
-                memory_manager,
-                ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
-                ImageCreateFlags::empty(),
-                swapchain_extent.width,
-                swapchain_extent.height,
-                depth_desc.format,
-                depth_desc.samples,
-            ));
-            Some(image)
-        } else {
-            None
-        };
-
-        let color_image = if let Some(color_desc) = attachments_description.color_attachement_desc {
-            let image = Arc::new(ImageResource::new(
-                device,
-                memory_manager,
-                ImageUsageFlags::COLOR_ATTACHMENT,
-                ImageCreateFlags::empty(),
-                swapchain_extent.width,
-                swapchain_extent.height,
-                color_desc.format,
-                color_desc.samples,
-            ));
-            Some(image)
-        } else {
-            None
-        };
 
         // Build Vulkan attachment descriptions for render pass
         let mut vk_attachments: SmallVec<[AttachmentDescription; 5]> = smallvec![attachments_description.swapchain_attachment_desc];
@@ -139,42 +103,10 @@ impl RenderPassResource {
         Self {
             render_pass,
             attachments_description,
-            depth_image,
-            color_image,
             submission_usage: OptionSeqNumShared::default(),
             framebuffer_registered: AtomicBool::new(false),
-            dropped: false,
+            dropped: AtomicBool::new(false),
         }
-    }
-
-    /// Build framebuffer attachments dynamically based on current swapchain image count
-    /// This allows handling swapchain recreation with different image counts
-    pub(crate) fn build_framebuffer_attachments(&self, swapchain_image_count: usize) -> SmallVec<[SmallVec<[FrameBufferAttachment; 5]>; 5]> {
-        let mut attachments: SmallVec<[SmallVec<[FrameBufferAttachment; 5]>; 5]> = smallvec![];
-
-        for framebuffer_index in 0..swapchain_image_count {
-            let mut fb_attachments: SmallVec<[FrameBufferAttachment; 5]> = smallvec![];
-
-            // Attachment 0: swapchain image
-            fb_attachments.push(FrameBufferAttachment::SwapchainImage(framebuffer_index));
-
-            // Use iterator for remaining attachments
-            for (_, slot, _) in self.attachments_description.iter_non_swapchain_attachments() {
-                match slot {
-                    AttachmentSlot::Depth => {
-                        fb_attachments.push(FrameBufferAttachment::Image(self.depth_image.clone().unwrap()));
-                    },
-                    AttachmentSlot::ColorMSAA => {
-                        fb_attachments.push(FrameBufferAttachment::Image(self.color_image.clone().unwrap()));
-                    },
-                    AttachmentSlot::Swapchain => unreachable!("Swapchain should not be in non-swapchain iterator"),
-                }
-            }
-
-            attachments.push(fb_attachments);
-        }
-
-        attachments
     }
 
     pub(crate) fn should_register_framebuffers(&self) -> bool {
@@ -183,22 +115,6 @@ impl RenderPassResource {
 
     pub fn attachments_desc(&self) -> AttachmentsDescription {
         self.attachments_description.clone()
-    }
-
-    /// Get a specific non-swapchain attachment by index (0=depth, 1=color)
-    /// This maps the attachment_index from the iterator to the actual image resource
-    pub(crate) fn attachment(&self, _swapchain_images: &SwapchainImages, _framebuffer_i: usize, attachment_i: usize) -> Arc<ImageResource> {
-        // Use the same iteration logic to find the attachment at attachment_i
-        for (index, slot, _) in self.attachments_description.iter_non_swapchain_attachments() {
-            if index == attachment_i {
-                return match slot {
-                    AttachmentSlot::Depth => self.depth_image.clone().unwrap(),
-                    AttachmentSlot::ColorMSAA => self.color_image.clone().unwrap(),
-                    AttachmentSlot::Swapchain => unreachable!("Swapchain should not be in non-swapchain iterator"),
-                };
-            }
-        }
-        panic!("Attachment index {} not found", attachment_i);
     }
 }
 #[derive(Clone)]
@@ -289,29 +205,30 @@ impl AttachmentsDescription {
 
 impl Drop for RenderPassResource {
     fn drop(&mut self) {
-        if !self.dropped {
-            error!("RenderPassResource was not destroyed before dropping!");
+        if !self.dropped.load(Ordering::Relaxed) {
+            destroy_render_pass(self, false);
         }
     }
 }
-pub(crate) fn destroy_render_pass(device: &VkDeviceRef, mut render_pass: RenderPassResource) {
-    if !render_pass.dropped {
-        unsafe {
-            device.destroy_render_pass(render_pass.render_pass, None)
-        }
-
-        // Destroy depth and color images if they exist
-        if let Some(depth_image) = render_pass.depth_image.take() {
-            if let Ok(image) = Arc::try_unwrap(depth_image) {
-                crate::resources::image::destroy_image_resource(device, image);
+pub(crate) fn destroy_render_pass(render_pass: &RenderPassResource, no_usages: bool) {
+    if !render_pass.dropped.swap(true, Ordering::Relaxed) {
+        if let Some(instance) = try_get_instance() {
+            if !no_usages {
+                let last_host_waited = instance.shared_state.last_host_waited_cached().num();
+                if render_pass.submission_usage.load().is_some_and(|u| u > last_host_waited) {
+                    warn!("Trying to destroy render pass resource, but VulkanAllocator was destroyed earlier! Calling device_wait_idle...");
+                    unsafe {
+                        instance.device.device_wait_idle().unwrap();
+                    }
+                }
+            }
+            let device = instance.device.clone();
+            unsafe {
+                device.destroy_render_pass(render_pass.render_pass, None)
             }
         }
-        if let Some(color_image) = render_pass.color_image.take() {
-            if let Ok(image) = Arc::try_unwrap(color_image) {
-                crate::resources::image::destroy_image_resource(device, image);
-            }
+        else {
+            error!("VulkanInstance was destroyed! Cannot destroy render pass resource");
         }
-
-        render_pass.dropped = true;
     }
 }

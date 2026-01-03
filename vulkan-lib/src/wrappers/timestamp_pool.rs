@@ -25,6 +25,7 @@ pub struct TimestampPool {
     slots: Vec<QuerySlot>,
     cur_i: usize,
     tm_period: f32,
+    need_reset: bool,
 }
 
 impl TimestampPool {
@@ -39,7 +40,8 @@ impl TimestampPool {
             query_pool,
             slots: vec![QuerySlot::Free; max_timestamp_slots as usize],
             cur_i: 0,
-            tm_period
+            tm_period,
+            need_reset: true,
         })
     }
     pub fn write_start_timestamp(&mut self, cb: CommandBuffer, submission_num: usize) -> u32 {
@@ -53,6 +55,12 @@ impl TimestampPool {
         }
         self.cur_i = (slot as usize + 1) % self.slots.len();
 
+        if self.need_reset {
+            self.need_reset = false;
+            unsafe {
+                self.device.cmd_reset_query_pool(cb, self.query_pool, 0, self.slots.len() as u32 * 2);
+            }
+        }
         unsafe { self.device.cmd_write_timestamp(cb, PipelineStageFlags::TOP_OF_PIPE, self.query_pool, slot * 2); }
         if !self.slots[slot as usize].is_free() {
             warn!("Overwriting timestamp slot {}", slot);

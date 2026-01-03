@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use ash::vk;
 use ash::vk::{AccessFlags, BufferCreateFlags, BufferUsageFlags, DescriptorSetLayout, DescriptorSetLayoutBinding, DescriptorSetLayoutCreateInfo, DeviceSize, Format, ImageCreateFlags, ImageUsageFlags, PipelineStageFlags, SampleCountFlags, SamplerCreateInfo};
+use log::info;
 use slotmap::DefaultKey;
 use smallvec::SmallVec;
 use descriptor_pool::DescriptorSetAllocator;
@@ -15,6 +16,7 @@ use crate::queue::memory_manager::MemoryManager;
 use crate::queue::shared::{HostWaitedNum, SharedState};
 use crate::resources::staging_buffer::{destroy_staging_buffer_resource, StagingBuffer, StagingBufferResource};
 use crate::shaders::DescriptorSetLayoutBindingDesc;
+use crate::VulkanInstance;
 use crate::wrappers::device::VkDeviceRef;
 
 pub mod buffer;
@@ -27,8 +29,7 @@ pub mod descriptor_pool;
 pub mod staging_buffer;
 
 pub struct VulkanAllocator {
-    device: VkDeviceRef,
-    shared_state: SharedState,
+    instance: Arc<VulkanInstance>,
     memory_manager: MemoryManager,
     descriptor_set_layouts: HashMap<Vec<DescriptorSetLayoutBindingDesc>, DescriptorSetLayout>,
     descriptor_set_allocator: DescriptorSetAllocator,
@@ -43,17 +44,17 @@ pub struct VulkanAllocator {
 
 impl VulkanAllocator {
     pub(crate) fn new(
-        device: VkDeviceRef,
-        shared_state: SharedState,
+        instance: Arc<VulkanInstance>,
         memory_types: Vec<vk::MemoryType>,
         memory_heaps: Vec<vk::MemoryHeap>,
     ) -> Self {
+        let device = instance.device.clone();
+        let shared_state = instance.shared_state.clone();
         let memory_manager = MemoryManager::new(device.clone(), memory_types, memory_heaps);
         let descriptor_set_allocator = DescriptorSetAllocator::new(device.clone(), shared_state.clone());
 
         Self {
-            device,
-            shared_state,
+            instance,
             memory_manager,
             descriptor_set_layouts: HashMap::new(),
             descriptor_set_allocator,
@@ -73,7 +74,7 @@ impl VulkanAllocator {
     }
 
     pub fn new_buffer(&mut self, usage: BufferUsageFlags, flags: BufferCreateFlags, size: DeviceSize) -> Arc<BufferResource> {
-        let res = Arc::new(BufferResource::new(&self.device, &mut self.memory_manager, usage, flags, size));
+        let res = Arc::new(BufferResource::new(&self.instance.device, &mut self.memory_manager, usage, flags, size));
         self.buffers.push(res.clone());
         res
     }
@@ -81,14 +82,14 @@ impl VulkanAllocator {
     pub fn new_staging_buffer(&mut self, size: DeviceSize) -> StagingBufferResource {
         let usage = BufferUsageFlags::empty();
         let flags = BufferCreateFlags::empty();
-        let res = Arc::new(StagingBuffer::new(&self.device, &mut self.memory_manager, usage, flags, size));
+        let res = Arc::new(StagingBuffer::new(&self.instance.device, &mut self.memory_manager, usage, flags, size));
         self.staging_buffers.push(res.clone());
         StagingBufferResource(res)
     }
 
     pub fn new_image(&mut self, usage: ImageUsageFlags, flags: ImageCreateFlags,
                      width: u32, height: u32, format: Format, samples: SampleCountFlags) -> Arc<ImageResource> {
-        let res = Arc::new(ImageResource::new(&self.device, &mut self.memory_manager, usage, flags, width, height, format, samples));
+        let res = Arc::new(ImageResource::new(&self.instance.device, &mut self.memory_manager, usage, flags, width, height, format, samples));
         self.images.push(res.clone());
         res
     }
@@ -112,7 +113,7 @@ impl VulkanAllocator {
                 .max_lod(0.0)
                 .mip_lod_bias(0.0);
         let sampler_info = f(default_info);
-        let sampler = SamplerResource::new(&self.device, &sampler_info);
+        let sampler = SamplerResource::new(&self.instance.device, &sampler_info);
         let res = Arc::new(sampler);
         self.samplers.push(res.clone());
 
@@ -123,14 +124,11 @@ impl VulkanAllocator {
         &mut self,
         attachments_description: AttachmentsDescription,
         swapchain_format: vk::Format,
-        swapchain_extent: vk::Extent2D,
     ) -> Arc<RenderPassResource> {
         let res = Arc::new(RenderPassResource::new(
-            &self.device,
-            &mut self.memory_manager,
+            &self.instance.device,
             attachments_description,
             swapchain_format,
-            swapchain_extent,
         ));
         self.render_passes.push(res.clone());
         res
@@ -140,7 +138,7 @@ impl VulkanAllocator {
             .map(|bindings_desc| self.get_or_create_descriptor_set_layout(bindings_desc))
             .collect();
 
-        let res = Arc::new(GraphicsPipelineResource::new(&self.device, render_pass, pipeline_desc, descriptor_set_layouts));
+        let res = Arc::new(GraphicsPipelineResource::new(&self.instance.device, render_pass, pipeline_desc, descriptor_set_layouts));
         self.pipelines.push(res.clone());
 
         res
@@ -164,7 +162,7 @@ impl VulkanAllocator {
             .bindings(&bindings);
 
         let layout = unsafe {
-            self.device.create_descriptor_set_layout(&layout_create_info, None).unwrap()
+            self.instance.device.create_descriptor_set_layout(&layout_create_info, None).unwrap()
         };
 
         self.descriptor_set_layouts.insert(key, layout);
@@ -189,13 +187,13 @@ impl VulkanAllocator {
     }
 
     pub fn destroy_old_resources(&mut self) {
-        let last_waited = self.shared_state.last_host_waited_submission().num();
+        let last_waited = self.instance.shared_state.last_host_waited_submission().num();
 
         let mut i = 0;
         while i < self.buffers.len() {
             if self.buffers[i].submission_usage.load().is_none_or(|n| n <= last_waited) && Arc::strong_count(&self.buffers[i]) == 1 {
-                let buffer = Arc::into_inner(self.buffers.swap_remove(i)).unwrap();
-                destroy_buffer_resource(&self.device, buffer);
+                destroy_buffer_resource(&self.buffers[i], true);
+                self.buffers.swap_remove(i);
             }
             else {
                 i += 1;
@@ -205,8 +203,8 @@ impl VulkanAllocator {
         let mut i = 0;
         while i < self.staging_buffers.len() {
             if self.staging_buffers[i].submission_usage.load().is_none_or(|n| n <= last_waited) && Arc::strong_count(&self.staging_buffers[i]) == 1 {
-                let staging_buffer = Arc::into_inner(self.staging_buffers.swap_remove(i)).unwrap();
-                destroy_staging_buffer_resource(&self.device, staging_buffer);
+                destroy_staging_buffer_resource(&self.staging_buffers[i], true);
+                self.staging_buffers.swap_remove(i);
             }
             else {
                 i += 1;
@@ -217,8 +215,8 @@ impl VulkanAllocator {
         let mut i = 0;
         while i < self.images.len() {
             if self.images[i].submission_usage.load().is_none_or(|n| n <= last_waited) && Arc::strong_count(&self.images[i]) == 1 {
-                let image = Arc::into_inner(self.images.swap_remove(i)).unwrap();
-                destroy_image_resource(&self.device, image);
+                destroy_image_resource(&self.images[i], true);
+                self.images.swap_remove(i);
             }
             else {
                 i += 1;
@@ -230,8 +228,8 @@ impl VulkanAllocator {
         let mut i = 0;
         while i < self.pipelines.len() {
             if self.pipelines[i].submission_usage.load().is_none_or(|n| n <= last_waited) && Arc::strong_count(&self.pipelines[i]) == 1 {
-                let pipeline = Arc::into_inner(self.pipelines.swap_remove(i)).unwrap();
-                destroy_pipeline(&self.device, pipeline);
+                destroy_pipeline(&self.pipelines[i], true);
+                self.pipelines.swap_remove(i);
             }
             else {
                 i += 1;
@@ -241,8 +239,8 @@ impl VulkanAllocator {
         let mut i = 0;
         while i < self.render_passes.len() {
             if self.render_passes[i].submission_usage.load().is_none_or(|n| n <= last_waited) && Arc::strong_count(&self.render_passes[i]) == 1 {
-                let render_pass = Arc::into_inner(self.render_passes.swap_remove(i)).unwrap();
-                destroy_render_pass(&self.device, render_pass);
+                destroy_render_pass(&self.render_passes[i], true);
+                self.render_passes.swap_remove(i);
             }
             else {
                 i += 1;
@@ -253,11 +251,16 @@ impl VulkanAllocator {
 
 impl Drop for VulkanAllocator {
     fn drop(&mut self) {
+        unsafe {
+            self.instance.device.device_wait_idle().unwrap();
+        }
+
+        info!("Dropping vulkan allocator...");
         self.destroy_old_resources();
 
         for (_, descriptor_set_layout) in self.descriptor_set_layouts.drain() {
             unsafe {
-                self.device.destroy_descriptor_set_layout(descriptor_set_layout, None);
+                self.instance.device.destroy_descriptor_set_layout(descriptor_set_layout, None);
             }
         }
 

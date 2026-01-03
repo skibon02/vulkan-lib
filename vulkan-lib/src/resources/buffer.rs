@@ -1,8 +1,10 @@
 use std::ops::Range;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use ash::vk;
 use ash::vk::{BufferCreateFlags, BufferCreateInfo, BufferUsageFlags, DeviceSize, MemoryAllocateInfo};
 use log::{error, warn};
+use crate::try_get_instance;
 use crate::queue::queue_local::QueueLocal;
 use crate::resources::LastResourceUsage;
 use crate::queue::memory_manager::{MemoryManager, MemoryTypeAlgorithm};
@@ -17,7 +19,7 @@ pub struct BufferResource {
     pub(crate) submission_usage: OptionSeqNumShared,
     pub(crate) inner: QueueLocal<BufferResourceInner>,
 
-    dropped: bool,
+    dropped: AtomicBool,
 }
 
 pub(crate) struct BufferResourceInner {
@@ -59,7 +61,7 @@ impl BufferResource {
                 usages: LastResourceUsage::None,
             }),
 
-            dropped: false,
+            dropped: AtomicBool::new(false),
         }
     }
     
@@ -94,17 +96,31 @@ impl BufferResource {
 
 impl Drop for BufferResource {
     fn drop(&mut self) {
-        if !self.dropped {
-            error!("BufferResource was not destroyed before being dropped. This may lead to memory leaks.");
+        if !self.dropped.load(Ordering::Relaxed) {
+            destroy_buffer_resource(self, false);
         }
     }
 }
-pub(crate) fn destroy_buffer_resource(device: &VkDeviceRef, mut buffer_resource: BufferResource) {
-    if !buffer_resource.dropped {
-        unsafe {
-            device.destroy_buffer(buffer_resource.buffer, None);
-            device.free_memory(buffer_resource.memory, None);
+pub(crate) fn destroy_buffer_resource(buffer_resource: &BufferResource, no_usages: bool) {
+    if !buffer_resource.dropped.swap(true, Ordering::Relaxed) {
+        if let Some(instance) = try_get_instance() {
+            if !no_usages {
+                let last_host_waited = instance.shared_state.last_host_waited_cached().num();
+                if buffer_resource.submission_usage.load().is_some_and(|u| u > last_host_waited) {
+                    warn!("Trying to destroy buffer resource, but VulkanAllocator was destroyed earlier! Calling device_wait_idle...");
+                    unsafe {
+                        instance.device.device_wait_idle().unwrap();
+                    }
+                }
+            }
+            let device = instance.device.clone();
+            unsafe {
+                device.destroy_buffer(buffer_resource.buffer, None);
+                device.free_memory(buffer_resource.memory, None);
+            }
         }
-        buffer_resource.dropped = true;
+        else {
+            error!("VulkanInstance was destroyed! Cannot destroy buffer resource");
+        }
     }
 }
