@@ -306,7 +306,7 @@ pub enum LastResourceUsage {
         last_write: Option<ResourceUsage>,
         visible_for: AccessFlags,
     },
-    None
+    FenceWaited
 }
 
 #[derive(Copy, Clone, Debug, Default)]
@@ -319,26 +319,19 @@ pub struct RequiredSync {
 
 impl LastResourceUsage {
     pub fn new() -> Self {
-        Self::None
+        Self::FenceWaited
     }
 
     pub fn on_host_waited(&mut self, last_waited_num: HostWaitedNum, had_host_writes: bool) {
-        if let Self::HasWrite{ last_write, visible_for } = self
-            && let Some(last_write_fr) = last_write
-            && let Some(submission_num) = last_write_fr.submission_num
-            && last_waited_num.num() >= submission_num {
+        if let Self::HasWrite{ last_write, visible_for } = self {
+            if let Some(last_write_fr) = last_write
+                && let Some(submission_num) = last_write_fr.submission_num
+                && last_waited_num.num() >= submission_num {
 
-            *last_write = None;
-            if had_host_writes {
-                *visible_for = AccessFlags::empty();
+                *self = Self::FenceWaited;
             }
-        }
-        else {
-            if self.is_none() {
-                *self = Self::HasWrite {
-                    last_write: None,
-                    visible_for: AccessFlags::empty(),
-                }
+            else if last_write.is_none() {
+
             }
         }
     }
@@ -409,7 +402,7 @@ impl LastResourceUsage {
     }
 
     pub fn is_none(&self) -> bool {
-        matches!(self, Self::None)
+        matches!(self, Self::FenceWaited)
     }
 }
 

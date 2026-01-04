@@ -91,7 +91,7 @@ impl StagingBuffer {
             size: size as usize,
             submission_usage: OptionSeqNumShared::default(),
             inner: QueueLocal::new(BufferResourceInner {
-                usages: LastResourceUsage::None,
+                usages: LastResourceUsage::FenceWaited,
             }),
             frozen_len: Mutex::new(0),
 

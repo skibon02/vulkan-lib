@@ -390,12 +390,6 @@ impl RenderTask {
                                 },
                             ];
 
-                            let region = BufferCopy::default()
-                                .src_offset(0)
-                                .dst_offset(0)
-                                .size(total_bytes);
-
-
                             let present_wait_ref = self.vulkan_renderer.record_device_commands_signal(Some(acquire_wait_ref.with_stages(PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)), |ctx| {
                                 if let Some(range) = global_range {
                                     ctx.copy_buffer(range, global_ds_buffer.full());

@@ -91,7 +91,7 @@ impl ImageResource {
             extent: vk::Extent2D { width, height },
             submission_usage: OptionSeqNumShared::default(),
             inner: QueueLocal::new(ImageResourceInner {
-                usages: LastResourceUsage::None,
+                usages: LastResourceUsage::FenceWaited,
                 layout: ImageLayout::UNDEFINED,
             }),
 
@@ -124,7 +124,7 @@ impl ImageResource {
             extent: vk::Extent2D { width, height },
             submission_usage: OptionSeqNumShared::default(),
             inner: QueueLocal::new(ImageResourceInner {
-                usages: LastResourceUsage::None,
+                usages: LastResourceUsage::FenceWaited,
                 layout: ImageLayout::UNDEFINED,
             }),
 

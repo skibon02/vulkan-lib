@@ -58,7 +58,7 @@ impl BufferResource {
             size: size as usize,
             submission_usage: OptionSeqNumShared::default(),
             inner: QueueLocal::new(BufferResourceInner {
-                usages: LastResourceUsage::None,
+                usages: LastResourceUsage::FenceWaited,
             }),
 
             dropped: AtomicBool::new(false),
