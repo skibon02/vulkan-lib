@@ -7,13 +7,13 @@ use smallvec::{smallvec, SmallVec};
 use ash::vk::{self, AccessFlags, BufferCopy, BufferImageCopy, ClearValue, DeviceSize, Format, ImageAspectFlags, ImageLayout, PipelineStageFlags};
 use log::{error, warn};
 use crate::queue::{FramebufferSet, OptionSeqNumShared};
-use crate::queue::queue_local::QueueLocal;
+use crate::queue::queue_local::{QueueLocal, QueueLocalToken};
 use crate::resources::buffer::{BufferResource, BufferResourceInner};
 use crate::resources::descriptor_set::{BoundResource, DescriptorSetResource};
 use crate::resources::image::ImageResource;
 use crate::resources::pipeline::GraphicsPipelineResource;
 use crate::resources::render_pass::RenderPassResource;
-use crate::resources::ResourceUsage;
+use crate::resources::{RequiredSync, ResourceUsage};
 use crate::resources::staging_buffer::{StagingBuffer, StagingBufferRange};
 use crate::swapchain_wrapper::SwapchainImages;
 
@@ -363,10 +363,6 @@ impl AnyBuffer {
             AnyBuffer::Staging(s) => &s.submission_usage,
         }
     }
-
-    pub fn has_host_writes(&self) -> bool {
-        matches!(self, AnyBuffer::Staging(_))
-    }
 }
 
 pub(crate) enum SpecificResourceUsage {
@@ -379,6 +375,16 @@ pub(crate) enum SpecificResourceUsage {
         image: Arc<ImageResource>,
         required_layout: Option<ImageLayout>,
         image_aspect: ImageAspectFlags
+    },
+    ValidateTransition {
+        image: Arc<ImageResource>,
+        sync: RequiredSync,
+        dst_layout: ImageLayout,
+    },
+    ValidateAttachmentUsage {
+        usage: ResourceUsage,
+        image: Arc<ImageResource>,
+        layout: ImageLayout,
     }
 }
 
@@ -430,7 +436,10 @@ pub enum DeviceCommand {
 
 impl DeviceCommand {
     /// Get usages for command, update last_used_in
-    pub fn usages<'a>(&'a self, submission_num: usize, swapchain_images: &'a SwapchainImages, framebuffer_sets: &'a HashMap<vk::RenderPass, FramebufferSet>) -> Box<dyn Iterator<Item=SpecificResourceUsage> + 'a> {
+    pub fn usages<'a>(&'a self, submission_num: usize,
+                      swapchain_images: &'a SwapchainImages,
+                      framebuffer_sets: &'a HashMap<vk::RenderPass, FramebufferSet>,
+    ) -> Box<dyn Iterator<Item=SpecificResourceUsage> + 'a> {
         match self {
             DeviceCommand::CopyBuffer {
                 src,
@@ -443,7 +452,7 @@ impl DeviceCommand {
                     [
                         SpecificResourceUsage::BufferUsage {
                             usage: ResourceUsage::new(
-                                Some(submission_num),
+                                submission_num,
                                 PipelineStageFlags::TRANSFER,
                                 AccessFlags::TRANSFER_READ,
                                 ),
@@ -454,7 +463,7 @@ impl DeviceCommand {
                         },
                         SpecificResourceUsage::BufferUsage {
                             usage: ResourceUsage::new(
-                                Some(submission_num),
+                                submission_num,
                                 PipelineStageFlags::TRANSFER,
                                 AccessFlags::TRANSFER_WRITE,
                             ),
@@ -477,7 +486,7 @@ impl DeviceCommand {
                     [
                         SpecificResourceUsage::BufferUsage {
                             usage: ResourceUsage::new(
-                                Some(submission_num),
+                                submission_num,
                                 PipelineStageFlags::TRANSFER,
                                 AccessFlags::TRANSFER_READ,
                             ),
@@ -488,7 +497,7 @@ impl DeviceCommand {
                         },
                         SpecificResourceUsage::ImageUsage {
                             usage: ResourceUsage::new(
-                                Some(submission_num),
+                                submission_num,
                                 PipelineStageFlags::TRANSFER,
                                 AccessFlags::TRANSFER_WRITE,
                             ),
@@ -504,7 +513,7 @@ impl DeviceCommand {
                 Box::new(iter::once(
                     SpecificResourceUsage::BufferUsage {
                         usage: ResourceUsage::new(
-                            Some(submission_num),
+                            submission_num,
                             PipelineStageFlags::TRANSFER,
                             AccessFlags::TRANSFER_WRITE,
                         ),
@@ -518,7 +527,7 @@ impl DeviceCommand {
                 Box::new(iter::once(
                     SpecificResourceUsage::ImageUsage {
                         usage: ResourceUsage::new(
-                            Some(submission_num),
+                            submission_num,
                             PipelineStageFlags::TRANSFER, // keep non-empty stage flag for execution dependency
                             AccessFlags::empty(),
                         ),
@@ -533,7 +542,7 @@ impl DeviceCommand {
                 Box::new(iter::once(
                     SpecificResourceUsage::ImageUsage {
                         usage: ResourceUsage::new(
-                            Some(submission_num),
+                            submission_num,
                             PipelineStageFlags::TRANSFER,
                             AccessFlags::TRANSFER_WRITE,
                         ),
@@ -548,7 +557,7 @@ impl DeviceCommand {
                 Box::new(iter::once(
                     SpecificResourceUsage::ImageUsage {
                         usage: ResourceUsage::new(
-                            Some(submission_num),
+                            submission_num,
                             PipelineStageFlags::TRANSFER,
                             AccessFlags::TRANSFER_WRITE,
                         ),
@@ -565,92 +574,76 @@ impl DeviceCommand {
             },
             DeviceCommand::RenderPassBegin { render_pass, framebuffer_index, .. } => {
                 render_pass.submission_usage.store(Some(submission_num));
-                // usages for attachments
-                let attachments = render_pass.attachments_desc();
-                let swapchain_desc = attachments.get_swapchain_desc();
-                let framebuffer_attachment = swapchain_images[*framebuffer_index as usize].clone();
-                let required_layout = if swapchain_desc.initial_layout == ImageLayout::UNDEFINED {
-                    None
-                }
-                else {
-                    Some(swapchain_desc.initial_layout)
-                };
-                let mut usages: SmallVec<[_; 4]> = smallvec![
-                    SpecificResourceUsage::ImageUsage {
-                        image: framebuffer_attachment,
-                        usage: ResourceUsage::new(
-                            Some(submission_num),
-                            PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
-                            AccessFlags::COLOR_ATTACHMENT_READ | AccessFlags::COLOR_ATTACHMENT_WRITE,
-                        ),
-                        required_layout,
-                        image_aspect: ImageAspectFlags::COLOR,
-                    }
-                    // render pass declared single subpass with some attachments
-                ];
+                let swapchain_attachment = swapchain_images[*framebuffer_index as usize].clone();
+                let framebuffer_attachments = &framebuffer_sets.get(&render_pass.render_pass)
+                    .expect("FramebufferSet must exist for render pass").framebuffers[*framebuffer_index as usize];
 
-                // Use iterator for non-swapchain attachments
-                if let Some(framebuffer_set) = framebuffer_sets.get(&render_pass.render_pass) {
-                    let framebuffer_data = &framebuffer_set.framebuffers[*framebuffer_index as usize];
+                let mut usages: SmallVec<[_; 3]> = smallvec![];
 
-                    for (_, slot, desc) in attachments.iter_non_swapchain_attachments() {
-                        let attachment_option = match slot {
-                            crate::resources::render_pass::AttachmentSlot::Depth => &framebuffer_data.depth_image,
-                            crate::resources::render_pass::AttachmentSlot::ColorMSAA => &framebuffer_data.color_image,
-                            crate::resources::render_pass::AttachmentSlot::Swapchain => unreachable!("Swapchain should not be in non-swapchain iterator"),
+                // Layout transitions for attachments
+                let attachment_desc = render_pass.attachments_desc();
+                let required_sync = render_pass.rp_begin_sync;
+                for (attachment_idx, _, desc, required_layout) in attachment_desc.iter_attachments() {
+                    if required_layout != desc.initial_layout {
+                        let image = if attachment_idx == 0 {
+                            swapchain_attachment.clone()
+                        }
+                        else {
+                            framebuffer_attachments.attachment(attachment_idx)
                         };
 
-                        if let Some(attachment) = attachment_option {
-                            match slot {
-                                crate::resources::render_pass::AttachmentSlot::Depth => {
-                                    let format = desc.format;
-                                    let contains_stencil = matches!(format, Format::S8_UINT | Format::D16_UNORM_S8_UINT | Format::D24_UNORM_S8_UINT | Format::D32_SFLOAT_S8_UINT);
-                                    let contains_depth = !matches!(format, Format::S8_UINT);
-                                    let mut aspect_mask = ImageAspectFlags::empty();
-                                    if contains_depth {
-                                        aspect_mask |= ImageAspectFlags::DEPTH
-                                    }
-                                    if contains_stencil {
-                                        aspect_mask |= ImageAspectFlags::STENCIL
-                                    }
-                                    let required_layout = if desc.initial_layout == ImageLayout::UNDEFINED {
-                                        None
-                                    }
-                                    else {
-                                        Some(desc.initial_layout)
-                                    };
-                                    usages.push(SpecificResourceUsage::ImageUsage {
-                                        image: attachment.clone(),
-                                        usage: ResourceUsage::new(
-                                            Some(submission_num),
-                                            PipelineStageFlags::EARLY_FRAGMENT_TESTS | PipelineStageFlags::LATE_FRAGMENT_TESTS,
-                                            AccessFlags::DEPTH_STENCIL_ATTACHMENT_READ | AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
-                                        ),
-                                        required_layout,
-                                        image_aspect: aspect_mask,
-                                    });
-                                },
-                                crate::resources::render_pass::AttachmentSlot::ColorMSAA => {
-                                    let required_layout = if desc.initial_layout == ImageLayout::UNDEFINED {
-                                        None
-                                    }
-                                    else {
-                                        Some(desc.initial_layout)
-                                    };
-                                    usages.push(SpecificResourceUsage::ImageUsage {
-                                        image: attachment.clone(),
-                                        usage: ResourceUsage::new(
-                                            Some(submission_num),
-                                            PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
-                                            AccessFlags::COLOR_ATTACHMENT_READ | AccessFlags::COLOR_ATTACHMENT_WRITE,
-                                        ),
-                                        required_layout,
-                                        image_aspect: ImageAspectFlags::COLOR,
-                                    });
-                                },
-                                crate::resources::render_pass::AttachmentSlot::Swapchain => unreachable!("Swapchain should not be in non-swapchain iterator"),
-                            }
+                        // validate layout transition from initial layout to required layout
+                        usages.push(SpecificResourceUsage::ValidateTransition {
+                            image: image.clone(),
+                            sync: required_sync,
+                            dst_layout: required_layout,
+                        });
+                    }
+                }
+
+                // Subpass usages
+                let subpass_usages = render_pass.subpass_usages.clone();
+                for (attachment_idx, _, desc, required_layout) in attachment_desc.iter_attachments() {
+                    let usage = subpass_usages.iter().find_map(|(idx, usage)| (*idx == attachment_idx).then_some(usage.clone())).unwrap();
+                    let image = if attachment_idx == 0 {
+                        swapchain_attachment.clone()
+                    }
+                    else {
+                        framebuffer_attachments.attachment(attachment_idx)
+                    };
+
+                    usages.push(SpecificResourceUsage::ValidateAttachmentUsage {
+                        usage,
+                        image,
+                        layout: required_layout,
+                    });
+                }
+
+                Box::new(usages.into_iter())
+            }
+            DeviceCommand::RenderPassEnd { render_pass, framebuffer_index } => {
+                let swapchain_attachment = swapchain_images[*framebuffer_index as usize].clone();
+                let framebuffer_attachments = &framebuffer_sets.get(&render_pass.render_pass)
+                    .expect("FramebufferSet must exist for render pass").framebuffers[*framebuffer_index as usize];
+
+                let mut usages: SmallVec<[_; 3]> = smallvec![];
+                let attachment_desc = render_pass.attachments_desc();
+                let required_sync = render_pass.rp_end_sync;
+                for (attachment_idx, _, desc, required_layout) in attachment_desc.iter_attachments() {
+                    if required_layout != desc.final_layout {
+                        let image = if attachment_idx == 0 {
+                            swapchain_attachment.clone()
                         }
+                        else {
+                            framebuffer_attachments.attachment(attachment_idx)
+                        };
+
+                        // validate layout transition from required_layout to final layout
+                        usages.push(SpecificResourceUsage::ValidateTransition {
+                            image: image.clone(),
+                            sync: required_sync,
+                            dst_layout: desc.final_layout,
+                        });
                     }
                 }
 
@@ -670,7 +663,7 @@ impl DeviceCommand {
                     usages.push(SpecificResourceUsage::BufferUsage {
                         buffer: AnyBuffer::Device(v_buf.buffer.clone()),
                         usage: ResourceUsage::new(
-                            Some(submission_num),
+                            submission_num,
                             PipelineStageFlags::VERTEX_INPUT,
                             AccessFlags::VERTEX_ATTRIBUTE_READ,
                         ),
@@ -686,7 +679,7 @@ impl DeviceCommand {
                                 usages.push(SpecificResourceUsage::BufferUsage {
                                     buffer: AnyBuffer::Device(buf.clone()),
                                     usage: ResourceUsage::new(
-                                        Some(submission_num),
+                                        submission_num,
                                         PipelineStageFlags::VERTEX_SHADER | PipelineStageFlags::FRAGMENT_SHADER,
                                         AccessFlags::UNIFORM_READ,
                                     ),
@@ -698,7 +691,7 @@ impl DeviceCommand {
                                 usages.push(SpecificResourceUsage::ImageUsage {
                                     image: image.clone(),
                                     usage: ResourceUsage::new(
-                                        Some(submission_num),
+                                        submission_num,
                                         PipelineStageFlags::FRAGMENT_SHADER,
                                         AccessFlags::SHADER_READ,
                                     ),
@@ -712,7 +705,7 @@ impl DeviceCommand {
                                 usages.push(SpecificResourceUsage::ImageUsage {
                                     image: image.clone(),
                                     usage: ResourceUsage::new(
-                                        Some(submission_num),
+                                        submission_num,
                                         PipelineStageFlags::FRAGMENT_SHADER,
                                         AccessFlags::SHADER_READ,
                                     ),
@@ -733,9 +726,6 @@ impl DeviceCommand {
                     pipeline.submission_usage.store(Some(submission_num))
                 }
                 Box::new(usages.into_iter())
-            }
-            DeviceCommand::RenderPassEnd { .. } => {
-                Box::new(iter::empty())
             }
         }
     }

@@ -21,14 +21,14 @@ use sparkles::external_events::ExternalEventsSource;
 use strum::IntoDiscriminant;
 use crate::extensions::calibrated_timestamps::CalibratedTimestamps;
 use crate::resources::image::ImageResource;
-use crate::resources::render_pass::{AttachmentSlot, FrameBufferAttachment, RenderPassResource};
+use crate::resources::render_pass::{AttachmentUsage, FrameBufferAttachment, RenderPassResource};
 use crate::resources::VulkanAllocator;
 use command_buffers::CommandBufferManager;
 use shared::{HostWaitedNum, SharedState};
 use crate::queue::memory_manager::MemoryManager;
 use crate::queue::queue_local::QueueLocalToken;
 use crate::queue::recording::{DeviceCommand, DrawCommand, RecordContext, SpecificResourceUsage};
-use crate::queue::semaphores::{SemaphoreManager, WaitSemaphoreRef, WaitSemaphoreStagesRef, WaitedOperation};
+use crate::queue::semaphores::{SemaphoreManager, WaitSemaphoreRef, WaitSemaphoreStagesRef, SemaphoreWaitOperation};
 use crate::resources::{LastResourceUsage, RequiredSync, ResourceUsage};
 use crate::swapchain_wrapper::SwapchainWrapper;
 use crate::VulkanInstance;
@@ -41,6 +41,30 @@ pub(crate) struct FramebufferData {
     pub(crate) framebuffer: vk::Framebuffer,
     pub(crate) depth_image: Option<Arc<ImageResource>>,
     pub(crate) color_image: Option<Arc<ImageResource>>,
+}
+
+impl FramebufferData {
+    pub(crate) fn attachment(&self, idx: usize) -> Arc<ImageResource> {
+        if idx == 1 {
+            if let Some(depth) = &self.depth_image {
+                depth.clone()
+            } else if let Some(color) = &self.color_image {
+                color.clone()
+            } else {
+                panic!("Framebuffer has no additional attachments");
+            }
+        }
+        else if idx == 2 {
+            if self.depth_image.is_some() && let Some(color) = &self.color_image {
+                color.clone()
+            } else {
+                panic!("Framebuffer has no color attachment");
+            }
+        }
+        else {
+            panic!("Invalid attachment index");
+        }
+    }
 }
 
 /// Set of framebuffers for a render pass
@@ -64,9 +88,6 @@ pub struct GraphicsQueue {
     semaphore_manager: SemaphoreManager,
     command_buffer_manager: CommandBufferManager,
 
-    memory_types: Vec<MemoryType>,
-    memory_heaps: Vec<MemoryHeap>,
-
     last_time_sync_tm: Option<Instant>,
     sparkles_gpu_channel: ExternalEventsSource,
 
@@ -78,6 +99,7 @@ pub struct GraphicsQueue {
     calibrated_timestamps: Option<CalibratedTimestamps>,
 
 
+    memory_manager: MemoryManager,
     // Last to be dropped
     instance: Arc<VulkanInstance>,
 }
@@ -118,21 +140,23 @@ impl GraphicsQueue {
             semaphore_manager: SemaphoreManager::new(device.clone()),
             command_buffer_manager: CommandBufferManager::new(device.clone(), queue_family_index),
 
-            memory_types,
-            memory_heaps,
-
             last_time_sync_tm: None,
             sparkles_gpu_channel,
             timestamp_pool,
             calibrated_timestamps,
+
+            memory_manager: MemoryManager::new(
+                device.clone(),
+                memory_types,
+                memory_heaps,
+            ),
         }
     }
 
     pub fn new_allocator(&self) -> VulkanAllocator {
         VulkanAllocator::new(
             self.instance.clone(),
-            self.memory_types.clone(),
-            self.memory_heaps.clone(),
+            self.memory_manager.clone(),
         )
     }
 
@@ -143,13 +167,6 @@ impl GraphicsQueue {
                 let swapchain_images = self.swapchain_wrapper.get_images();
                 let swapchain_image_count = swapchain_images.len();
                 let swapchain_extent = self.swapchain_wrapper.get_extent();
-
-                // Create a temporary MemoryManager for allocating images
-                let mut memory_manager = MemoryManager::new(
-                    self.device.clone(),
-                    self.memory_types.clone(),
-                    self.memory_heaps.clone(),
-                );
 
                 let attachments_desc = render_pass.attachments_desc();
                 let mut framebuffer_data_vec = smallvec![];
@@ -164,12 +181,15 @@ impl GraphicsQueue {
                     views.push(swapchain_images[framebuffer_index].image_view);
 
                     // Create depth/color images for this framebuffer
-                    for (_, slot, desc) in attachments_desc.iter_non_swapchain_attachments() {
+                    for (idx, slot, desc, _) in attachments_desc.iter_attachments() {
+                        if idx == 0 {
+                            continue; // skip swapchain attachment
+                        }
                         match slot {
-                            AttachmentSlot::Depth => {
+                            AttachmentUsage::Depth => {
                                 let image = Arc::new(ImageResource::new(
                                     &self.device,
-                                    &mut memory_manager,
+                                    &mut self.memory_manager,
                                     ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
                                     ImageCreateFlags::empty(),
                                     swapchain_extent.width,
@@ -180,10 +200,10 @@ impl GraphicsQueue {
                                 views.push(image.image_view);
                                 depth_image = Some(image);
                             },
-                            AttachmentSlot::ColorMSAA => {
+                            AttachmentUsage::Color | AttachmentUsage::Resolve => {
                                 let image = Arc::new(ImageResource::new(
                                     &self.device,
-                                    &mut memory_manager,
+                                    &mut self.memory_manager,
                                     ImageUsageFlags::COLOR_ATTACHMENT,
                                     ImageCreateFlags::empty(),
                                     swapchain_extent.width,
@@ -194,7 +214,6 @@ impl GraphicsQueue {
                                 views.push(image.image_view);
                                 color_image = Some(image);
                             },
-                            AttachmentSlot::Swapchain => unreachable!("Swapchain in non-swapchain iterator"),
                         }
                     }
 
@@ -484,21 +503,9 @@ impl GraphicsQueue {
         let mut wait_semaphore = None;
         if let Some(wait_sem) = wait_ref {
             let stage_flags = wait_sem.stage_flags;
-            let (sem, sem_waited_operations) = self.semaphore_manager.get_wait_semaphore(wait_sem, Some(submission_num));
+            let (sem, wait_operation) = self.semaphore_manager.get_wait_semaphore(wait_sem, Some(submission_num));
 
-            for waited_op in &sem_waited_operations {
-                if let WaitedOperation::SwapchainImageAcquired(image) = waited_op {
-                    // create usage with the same stage flags to create dependency chain with waited semaphore
-                    image.inner.get(&mut self.token).usages = LastResourceUsage::HasWrite {
-                        last_write: Some(ResourceUsage::new(None, stage_flags, AccessFlags::empty())),
-                        visible_for: AccessFlags::empty(),
-                    };
-                }
-            }
-            let waited_except_swapchain_image_acq = sem_waited_operations.into_iter().filter(|op| {
-                !matches!(op, WaitedOperation::SwapchainImageAcquired(_))
-            }).collect::<SmallVec<_>>();
-            wait_semaphore = Some((sem, stage_flags, waited_except_swapchain_image_acq));
+            wait_semaphore = Some((sem, stage_flags, wait_operation));
         }
 
         let cmd_buffer = self.command_buffer_manager.take_command_buffer(submission_num);
@@ -535,17 +542,19 @@ impl GraphicsQueue {
 
             // 1) accumulate barriers for all commands in the group
             for cmd in group.iter() {
+                if let DeviceCommand::RenderPassBegin {render_pass, framebuffer_index, ..} = cmd {
+                    // create framebuffers if not yet created
+                    let _ = self.get_or_create_framebuffers(render_pass);
+                }
                 for usage in cmd.usages(submission_num, self.swapchain_wrapper.get_images(), &self.framebuffers) {
                     match usage {
                         SpecificResourceUsage::BufferUsage {
                             usage,
                             buffer,
                         } => {
-                            let had_host_writes = buffer.has_host_writes();
-
                             // 1) update state if waited on host
                             let buffer_inner = buffer.buffer_inner().get(&mut self.token);
-                            buffer_inner.usages.on_host_waited(last_waited_submission, had_host_writes);
+                            buffer_inner.usages.on_host_waited(last_waited_submission);
 
                             // 2) Add new usage and get required memory synchronization state
                             let required_sync = buffer_inner.usages.add_usage(usage);
@@ -578,7 +587,7 @@ impl GraphicsQueue {
                             let prev_layout = image_inner.layout;
 
                             // 1) update state if waited on host
-                            image_inner.usages.on_host_waited(last_waited_submission, false);
+                            image_inner.usages.on_host_waited(last_waited_submission);
 
                             // 2) Add new usage and get required memory synchronization state
                             let need_layout_transition = required_layout.is_some_and(|required_layout| prev_layout == ImageLayout::GENERAL || required_layout != prev_layout);
@@ -591,7 +600,15 @@ impl GraphicsQueue {
                                     panic!("Missing required pipeline barrier between same image usages! Usage1: {:?}, Usage2: {:?}", required_sync, usage);
                                 }
 
-                                let required_sync = required_sync.unwrap_or(RequiredSync::default());
+                                let required_sync = required_sync.unwrap_or_else(|| {
+                                    // if only layout transition is needed, create minimal sync
+                                    let mut res = RequiredSync::default();
+
+                                    res.dst_access = usage.access_flags;
+                                    res.dst_stages = usage.stage_flags;
+
+                                    res
+                                });
 
                                 let mut barrier = ImageMemoryBarrier::default()
                                     .image(image.image)
@@ -631,36 +648,48 @@ impl GraphicsQueue {
                                 image_barriers.push(barrier);
                             }
                         }
-                    }
-                }
-                if let DeviceCommand::RenderPassEnd {render_pass, framebuffer_index} = cmd {
-                    // mark attachments as having a new layout
-                    let attachments_description = render_pass.attachments_desc();
+                        SpecificResourceUsage::ValidateTransition {
+                            image,
+                            dst_layout,
+                            sync
+                        } => {
+                            let image_inner = image.inner.get(&mut self.token);
+                            image_inner.usages.on_host_waited(last_waited_submission);
 
-                    let swapchain_image_final_layout = attachments_description.get_swapchain_desc().final_layout;
-                    let swapchain_images = self.swapchain_wrapper.get_images();
-                    let swapchain_image_inner = swapchain_images[*framebuffer_index as usize].inner.get(&mut self.token);
-                    swapchain_image_inner.layout = swapchain_image_final_layout;
+                            // 1) try reset presented usage from semaphore info
+                            if let Some((_, stages, operation)) = wait_semaphore
+                                && let SemaphoreWaitOperation::ImageAcquire(img) = operation
+                                && image.image == img
+                                && matches!(image_inner.usages, LastResourceUsage::Presented)
+                                && (stages == PipelineStageFlags::ALL_COMMANDS || sync.src_stages.contains(stages)) {
 
-                    // Get framebuffer data to access depth/color images
-                    if let Some(framebuffer_set) = self.framebuffers.get(&render_pass.render_pass) {
-                        let framebuffer_data = &framebuffer_set.framebuffers[*framebuffer_index as usize];
+                                image_inner.usages = LastResourceUsage::FenceWaited;
+                            }
 
-                        if let Some(depth_att_desc) = attachments_description.get_depth_attachment_desc() {
-                            let depth_image_final_layout = depth_att_desc.final_layout;
-
-                            if let Some(depth_image) = &framebuffer_data.depth_image {
-                                let depth_inner = depth_image.inner.get(&mut self.token);
-                                depth_inner.layout = depth_image_final_layout;
+                            // 2) apply sync + layout transition
+                            if image_inner.usages.validate_layout_transition(sync, submission_num) {
+                                image_inner.layout = dst_layout;
+                            }
+                            else {
+                                panic!("Render pass transition does not synchronize with previous usage! Required sync: {:?}, actual usage: {:?}",
+                                    sync,
+                                    image_inner.usages,
+                                );
                             }
                         }
 
-                        if let Some(color_attachment_desc) = attachments_description.get_color_attachment_desc() {
-                            let color_attachment_final_layout = color_attachment_desc.final_layout;
-
-                            if let Some(color_image) = &framebuffer_data.color_image {
-                                let color_inner = color_image.inner.get(&mut self.token);
-                                color_inner.layout = color_attachment_final_layout;
+                        SpecificResourceUsage::ValidateAttachmentUsage {
+                            image,
+                            usage,
+                            layout,
+                        } => {
+                            let image_inner = image.inner.get(&mut self.token);
+                            image_inner.usages.on_host_waited(last_waited_submission);
+                            if !image_inner.usages.validate_usage(usage) {
+                                panic!("Render pass attachment usage does not synchronize with previous usage! Required usage: {:?}, actual usage: {:?}",
+                                    usage,
+                                    image_inner.usages,
+                                );
                             }
                         }
                     }
@@ -669,6 +698,8 @@ impl GraphicsQueue {
 
             // 2) insert single barrier for entire group if needed
             if !buffer_barriers.is_empty() || !image_barriers.is_empty() {
+                assert!(!dst_stage_mask.is_empty(), "Source stage mask is empty for barrier!");
+
                 let src_stage_mask = if src_stage_mask == PipelineStageFlags::empty() {
                     PipelineStageFlags::TOP_OF_PIPE
                 } else {
@@ -876,10 +907,8 @@ impl GraphicsQueue {
 
         // handle optional signal semaphore
         if let Some(signal) = signal_ref {
-            let mut waited_operations = wait_semaphore.map(|(_, _, s)| s).unwrap_or(SmallVec::new());
             // add information about waiting for this submission to complete
-            waited_operations.push(WaitedOperation::Submission(submission_num, vk::PipelineStageFlags::ALL_COMMANDS));
-            let signal_semaphore = self.semaphore_manager.allocate_signal_semaphore(&signal, waited_operations);
+            let signal_semaphore = self.semaphore_manager.allocate_signal_semaphore(&signal, SemaphoreWaitOperation::SubmissionWait(submission_num));
             signal_semaphores = [signal_semaphore];
 
             submit_info = submit_info.signal_semaphores(&signal_semaphores);
@@ -907,7 +936,7 @@ impl GraphicsQueue {
     // Acquire next swapchain image with semaphore signaling
     pub fn acquire_next_image(&mut self) -> anyhow::Result<(u32, WaitSemaphoreRef, bool)> {
         let (signal_ref, wait_ref) = self.semaphore_manager.create_semaphore_pair();
-        let signal_semaphore = self.semaphore_manager.allocate_signal_semaphore(&signal_ref, smallvec![]);
+        let signal_semaphore = self.semaphore_manager.allocate_signal_semaphore(&signal_ref, SemaphoreWaitOperation::ImageAcquire(vk::Image::null()));
 
         let (index, is_suboptimal) = unsafe {
             self.swapchain_wrapper
@@ -920,12 +949,12 @@ impl GraphicsQueue {
                 )
                 .context("acquire_next_image")?
         };
-        let image = self.swapchain_wrapper.get_images()[index as usize].clone();
+        let image = self.swapchain_wrapper.get_images()[index as usize].image;
 
         #[cfg(feature = "recording-logs")]
         info!("Recording command AcquireNextImage (image_index = {})", index);
 
-        self.semaphore_manager.modify_waited_operations(&wait_ref, smallvec![WaitedOperation::SwapchainImageAcquired(image)]);
+        self.semaphore_manager.modify_wait_operation(&wait_ref, SemaphoreWaitOperation::ImageAcquire(image));
 
         Ok((index, wait_ref, is_suboptimal))
     }
@@ -936,30 +965,31 @@ impl GraphicsQueue {
         let wait_stages_ref = wait_ref.with_stages(PipelineStageFlags::ALL_COMMANDS);
 
         // Present operations don't have fence tracking, use None for untracked semaphore
-        let (wait_semaphore, waited_operations) = self.semaphore_manager.get_wait_semaphore(wait_stages_ref, None);
+        let (wait_semaphore, wait_operation) = self.semaphore_manager.get_wait_semaphore(wait_stages_ref, None);
         // ensure swapchain image is prepared and is in PRESENT layout
         let image = self.swapchain_wrapper.get_images()[image_index as usize].clone();
         let image_inner = image.inner.get(&mut self.token);
         if image_inner.layout != ImageLayout::GENERAL && image_inner.layout != ImageLayout::PRESENT_SRC_KHR {
             warn!("Image layout for presentable image must be PRESENT or GENERAL!");
         }
-        if let LastResourceUsage::HasWrite{last_write: Some(ResourceUsage {submission_num, ..}), ..} = &mut image_inner.usages {
-            if let Some(usage_sub_num) = submission_num {
-                let mut write_syncronized = false;
-                for waited_op in waited_operations {
-                    if let WaitedOperation::Submission(sub_num, stages) = waited_op {
-                        if sub_num >= *usage_sub_num {
-                            write_syncronized = true;
-                        }
-                    }
+        if let Some(submission_num) = image_inner.usages.last_write_submission_num() {
+            if let SemaphoreWaitOperation::SubmissionWait(sub_num) = wait_operation {
+                if sub_num >= *submission_num {
+                    image_inner.usages = LastResourceUsage::Presented;
                 }
-
-                if !write_syncronized {
-                    warn!("Found unsynchronized write to swapchain image before present! Last write submission: {}",
-                        usage_sub_num,
+                else {
+                    warn!("Present is not synchronized with last write to swapchain image! Last write submission: {}, present wait submission: {}",
+                        submission_num,
+                        sub_num,
                     );
                 }
             }
+            else {
+                panic!("Present wait operation must be SubmissionWait for swapchain images");
+            }
+        }
+        else {
+            image_inner.usages = LastResourceUsage::Presented;
         }
 
         #[cfg(feature = "recording-logs")]

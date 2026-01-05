@@ -17,6 +17,18 @@ pub struct MemoryManager {
     image_memory_requirements: HashMap<(Format, ImageTiling, ImageCreateFlags, ImageUsageFlags), u32>,
 }
 
+impl Clone for MemoryManager {
+    fn clone(&self) -> Self {
+        Self {
+            device: self.device.clone(),
+            memory_types: self.memory_types.clone(),
+            memory_heaps: self.memory_heaps.clone(),
+            buffer_memory_requirements: HashMap::new(),
+            image_memory_requirements: HashMap::new(),
+        }
+    }
+}
+
 impl MemoryManager {
     pub fn new(
         device: VkDeviceRef,

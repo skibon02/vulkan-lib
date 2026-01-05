@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use ash::vk;
 use ash::vk::{AccessFlags, BufferCreateFlags, BufferUsageFlags, DescriptorSetLayout, DescriptorSetLayoutBinding, DescriptorSetLayoutCreateInfo, DeviceSize, Format, ImageCreateFlags, ImageUsageFlags, PipelineStageFlags, SampleCountFlags, SamplerCreateInfo};
-use log::info;
+use log::{error, info};
 use slotmap::DefaultKey;
 use smallvec::SmallVec;
 use descriptor_pool::DescriptorSetAllocator;
@@ -45,12 +45,10 @@ pub struct VulkanAllocator {
 impl VulkanAllocator {
     pub(crate) fn new(
         instance: Arc<VulkanInstance>,
-        memory_types: Vec<vk::MemoryType>,
-        memory_heaps: Vec<vk::MemoryHeap>,
+        memory_manager: MemoryManager,
     ) -> Self {
         let device = instance.device.clone();
         let shared_state = instance.shared_state.clone();
-        let memory_manager = MemoryManager::new(device.clone(), memory_types, memory_heaps);
         let descriptor_set_allocator = DescriptorSetAllocator::new(device.clone(), shared_state.clone());
 
         Self {
@@ -133,12 +131,12 @@ impl VulkanAllocator {
         self.render_passes.push(res.clone());
         res
     }
-    pub fn new_pipeline(&mut self, render_pass: Arc<RenderPassResource>, pipeline_desc: GraphicsPipelineDesc) -> Arc<GraphicsPipelineResource> {
+    pub fn new_pipeline(&mut self, render_pass: Arc<RenderPassResource>, pipeline_desc: GraphicsPipelineDesc, with_depth_test: bool) -> Arc<GraphicsPipelineResource> {
         let descriptor_set_layouts = pipeline_desc.bindings.iter()
             .map(|bindings_desc| self.get_or_create_descriptor_set_layout(bindings_desc))
             .collect();
 
-        let res = Arc::new(GraphicsPipelineResource::new(&self.instance.device, render_pass, pipeline_desc, descriptor_set_layouts));
+        let res = Arc::new(GraphicsPipelineResource::new(&self.instance.device, render_pass, pipeline_desc, descriptor_set_layouts, with_depth_test));
         self.pipelines.push(res.clone());
 
         res
@@ -269,15 +267,22 @@ impl Drop for VulkanAllocator {
 }
 
 /// Event of specific resource usage
-#[derive(Copy, Clone, Debug, Default)]
+#[derive(Copy, Clone, Debug)]
 pub struct ResourceUsage {
-    pub submission_num: Option<usize>,
+    pub submission_num: usize,
     pub stage_flags: PipelineStageFlags,
     pub access_flags: AccessFlags,
 }
 
 impl ResourceUsage {
-    pub fn new(submission_num: Option<usize>, stage_flags: PipelineStageFlags, access_flags: AccessFlags) -> Self {
+    pub fn default(submission_num: usize) -> Self {
+        Self {
+            submission_num,
+            stage_flags: PipelineStageFlags::empty(),
+            access_flags: AccessFlags::empty(),
+        }
+    }
+    pub fn new(submission_num: usize, stage_flags: PipelineStageFlags, access_flags: AccessFlags) -> Self {
         // todo: validate access flags over stage flags
         Self {
             submission_num,
@@ -300,15 +305,6 @@ impl ResourceUsage {
     }
 }
 
-#[derive(Clone, Debug)]
-pub enum LastResourceUsage {
-    HasWrite {
-        last_write: Option<ResourceUsage>,
-        visible_for: AccessFlags,
-    },
-    FenceWaited
-}
-
 #[derive(Copy, Clone, Debug, Default)]
 pub struct RequiredSync {
     pub src_stages: PipelineStageFlags,
@@ -317,91 +313,169 @@ pub struct RequiredSync {
     pub dst_access: AccessFlags,
 }
 
+impl RequiredSync {
+    pub fn is_empty(&self) -> bool {
+        if self.src_stages.is_empty() && self.dst_stages.is_empty() && self.src_access.is_empty() && self.dst_access.is_empty() {
+            true
+        } else {
+            false
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub enum LastResourceUsage {
+    /// Has a write that is not yet available
+    HasWrite {
+        last_write: ResourceUsage,
+    },
+    /// Has available write, that can be visible for specific access flags
+    HasAvailableWrite {
+        submission_num: usize,
+        visible_for: AccessFlags,
+    },
+    /// All previous writes are available and visible to all accesses
+    FenceWaited,
+    /// Special state for swapchain image resource. No operations with this image is possible until acquire.
+    Presented,
+}
+
 impl LastResourceUsage {
     pub fn new() -> Self {
         Self::FenceWaited
     }
 
-    pub fn on_host_waited(&mut self, last_waited_num: HostWaitedNum, had_host_writes: bool) {
-        if let Self::HasWrite{ last_write, visible_for } = self {
-            if let Some(last_write_fr) = last_write
-                && let Some(submission_num) = last_write_fr.submission_num
-                && last_waited_num.num() >= submission_num {
-
-                *self = Self::FenceWaited;
-            }
-            else if last_write.is_none() {
-
-            }
+    pub fn last_write_submission_num(&mut self) -> Option<&mut usize> {
+        match self {
+            Self::HasWrite { last_write } => Some(&mut last_write.submission_num),
+            Self::HasAvailableWrite { submission_num, .. } => Some(submission_num),
+            Self::FenceWaited => None,
+            Self::Presented => None,
+        }
+    }
+    pub fn on_host_waited(&mut self, last_waited_num: HostWaitedNum) {
+        if self.last_write_submission_num().is_some_and(|u| last_waited_num.num() >= *u) {
+            *self = Self::FenceWaited;
         }
     }
 
     /// Add new usage, returning previous usage if a sync barrier is needed.
     /// Returns Some(previous_usage) if we need synchronization, None if no sync needed.
     pub fn add_usage(&mut self, new_usage: ResourceUsage) -> Option<RequiredSync> {
+        let mut res = RequiredSync::default();
+        
+        if matches!(self, Self::Presented) {
+            panic!("Trying to use a presented swapchain image before acquiring it!");
+        }
+        
+        // Visibility operation
         if let Self::HasWrite {
             last_write,
+        } = self {
+            res.src_stages = last_write.stage_flags;
+            res.src_access = last_write.access_flags;
+
+            *self = Self::HasAvailableWrite {
+                submission_num: last_write.submission_num,
+                visible_for: AccessFlags::empty(),
+            }
+        }
+
+
+        // Availability operation
+        if let Self::HasAvailableWrite {
+            submission_num,
             visible_for,
         } = self {
             let need_visible = new_usage.access_flags & !*visible_for;
-            if let Some(last_write_fr) = last_write {
-                let required_sync = RequiredSync {
-                    src_stages: last_write_fr.stage_flags,
-                    src_access: last_write_fr.access_flags,
-
-                    dst_stages: new_usage.stage_flags,
-                    dst_access: need_visible,
-                };
-
-                // Update visible_for
-                if new_usage.is_readonly() {
-                    *last_write = None;
-                    *visible_for |= new_usage.access_flags;
-                }
-                else {
-                    // Save new write
-                    *last_write_fr = new_usage;
-                    *visible_for = AccessFlags::empty();
-                }
-                Some(required_sync)
-            }
-            else {
-                if !new_usage.is_readonly() {
-                    *last_write = Some(new_usage);
-                    *visible_for = AccessFlags::empty();
-                }
-                if !need_visible.is_empty() {
-                    // Need sync for new read usages
-                    let required_sync = RequiredSync {
-                        src_stages: PipelineStageFlags::empty(),
-                        src_access: AccessFlags::empty(),
-
-                        dst_stages: new_usage.stage_flags,
-                        dst_access: need_visible,
-                    };
-
-                    if new_usage.is_readonly() {
-                        *visible_for |= new_usage.access_flags;
-                    }
-                    return Some(required_sync);
-                }
-
-                None
+            if !need_visible.is_empty() {
+                res.dst_stages = new_usage.stage_flags;
+                res.dst_access = need_visible;
+                *visible_for |= need_visible;
             }
         }
-        else {
-            if !new_usage.is_readonly() {
-                *self = LastResourceUsage::HasWrite {
-                    last_write: Some(new_usage),
-                    visible_for: AccessFlags::empty(),
-                };
-            }
 
-            None
+        // Update last usage
+        if !new_usage.is_readonly() {
+            *self = Self::HasWrite {
+                last_write: new_usage,
+            }
+        }
+
+        (!res.is_empty())
+            .then_some(res)
+    }
+
+    /// try adding usage without requiring new sync
+    pub fn validate_usage(&mut self, new_usage: ResourceUsage) -> bool {
+        match self {
+            Self::HasWrite { last_write } => {
+                // cannot add new usage without sync if there is a pending write
+                false
+            }
+            Self::HasAvailableWrite { visible_for, .. } => {
+                // check visibility
+                let need_visible = new_usage.access_flags & !*visible_for;
+                if need_visible.is_empty() {
+                    // all good, update last usage
+                    if !new_usage.is_readonly() {
+                        *self = Self::HasWrite {
+                            last_write: new_usage,
+                        }
+                    }
+                    true
+                } else {
+                    false
+                }
+            },
+            Self::FenceWaited => {
+                if !new_usage.is_readonly() {
+                    *self = Self::HasWrite {
+                        last_write: new_usage,
+                    }
+                }
+                true
+            },
+            Self::Presented => false,
         }
     }
 
-    pub fn is_none(&self) -> bool {
+    pub fn validate_layout_transition(&mut self, sync: RequiredSync, submission_num: usize) -> bool {
+        match self {
+            Self::HasWrite { last_write } => {
+                // perform availability operation
+                // todo: handle composition in stage flags
+                if (sync.src_stages == PipelineStageFlags::ALL_COMMANDS || sync.src_stages.contains(last_write.stage_flags))
+                    &&
+                    (sync.src_access == AccessFlags::MEMORY_WRITE || sync.src_access.contains(last_write.access_flags)){
+                    *self = Self::HasAvailableWrite {
+                        submission_num: last_write.submission_num,
+                        visible_for: sync.dst_access,
+                    };
+                    true
+                }
+                else {
+                    false
+                }
+            }
+            Self::HasAvailableWrite { visible_for, .. } => {
+                // perform visibility operation
+                *visible_for |= sync.dst_access;
+                true
+            },
+            Self::FenceWaited => {
+                // we got write from layout transition
+                *self = Self::HasAvailableWrite {
+                    submission_num,
+                    visible_for: sync.dst_access,
+                };
+                true
+            },
+            Self::Presented => false,
+        }
+    }
+
+    pub fn is_full_visible(&self) -> bool {
         matches!(self, Self::FenceWaited)
     }
 }

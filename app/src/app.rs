@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
 use std::thread;
@@ -11,11 +12,12 @@ use winit::event_loop::ActiveEventLoop;
 use winit::keyboard;
 use winit::keyboard::NamedKey;
 use winit::window::{Fullscreen, Window};
-use vulkan_lib::{VulkanInstance};
+use vulkan_lib::{vk, VulkanInstance};
 use crate::component::Component;
 use crate::layout::calculator::LayoutCalculator;
 use crate::render;
 use crate::render::RenderMessage;
+use crate::resources::get_resource;
 
 pub struct App {
     app_finished: bool,
@@ -47,7 +49,11 @@ impl App {
         let raw_display_handle = window.raw_display_handle().unwrap();
         let inner_size = window.inner_size();
 
-        let vulkan_renderer = VulkanInstance::new_for_handle(raw_window_handle, raw_display_handle, (inner_size.width, inner_size.height)).unwrap();
+        // try load resource
+        let font_data = get_resource(Path::join("fonts".as_ref(), "Ubuntu-Regular.ttf")).unwrap();
+
+        let api_version = vk::API_VERSION_1_1;
+        let vulkan_renderer = VulkanInstance::new_for_handle(raw_window_handle, raw_display_handle, (inner_size.width, inner_size.height), api_version).unwrap();
         let (render_task, render_tx, render_ready, resize_ready) = render::RenderTask::new(vulkan_renderer, inner_size);
         let render_jh = render_task.spawn();
         

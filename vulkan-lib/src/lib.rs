@@ -47,7 +47,7 @@ pub struct VulkanInstance {
 
 impl VulkanInstance {
     #[track_caller]
-    pub fn new_for_handle(window_handle: RawWindowHandle, display_handle: RawDisplayHandle, initial_size: (u32, u32)) -> anyhow::Result<GraphicsQueue> {
+    pub fn new_for_handle(window_handle: RawWindowHandle, display_handle: RawDisplayHandle, initial_size: (u32, u32), api_version: u32) -> anyhow::Result<GraphicsQueue> {
         let Ok(entry) = (unsafe { Entry::load() }) else {
             bail!("Failed to load Vulkan entry");
         };
@@ -55,7 +55,6 @@ impl VulkanInstance {
         let g = range_event_start!("[Vulkan] INIT");
         let app_name = CString::new("Hello Vulkan")?;
 
-        let api_version = vk::API_VERSION_1_0;
         let app_info = ApplicationInfo::default()
             .application_name(&app_name)
             .application_version(make_api_version(0, 1, 0, 0))

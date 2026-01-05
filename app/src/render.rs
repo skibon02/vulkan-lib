@@ -1,11 +1,12 @@
 use std::f64::consts::PI;
-use vulkan_lib::vk::{DescriptorType, Extent2D};
+use vulkan_lib::vk::{DescriptorType, Extent2D, Pipeline};
 use vulkan_lib::vk::{BufferCopy, ClearColorValue, ClearDepthStencilValue, ClearValue, Filter, ImageUsageFlags, PipelineStageFlags};
 use vulkan_lib::vk::{AttachmentDescription, AttachmentLoadOp, AttachmentStoreOp, BufferUsageFlags, Format, ImageLayout, SampleCountFlags};
 use vulkan_lib::shaders::layout::types::{float, GlslType};
 use vulkan_lib::shaders::layout::LayoutInfo;
 use vulkan_lib::shaders::layout::MemberMeta;
 use std::mem::offset_of;
+use std::path::Path;
 use vulkan_lib::shaders::layout::types::GlslTypeVariant;
 use smallvec::{smallvec, SmallVec};
 use std::sync::{mpsc, Arc};
@@ -74,7 +75,7 @@ descriptor_set! {
 
 fn load_font_texture(allocator: &mut VulkanAllocator) -> (StagingBufferRange, Arc<ImageResource>, Extent2D) {
     // load font
-    let font_data = get_resource("fonts/Ubuntu-Regular.ttf".into()).unwrap();
+    let font_data = get_resource(Path::join("fonts".as_ref(), "Ubuntu-Regular.ttf")).unwrap();
     let font = FontRef::from_index(&font_data, 0).unwrap();
 
     println!("attributes: {}", font.attributes());
@@ -158,7 +159,6 @@ impl RenderTask {
         let render_finished = Arc::new(AtomicBool::new(true));
         let resize_finished = Arc::new(AtomicBool::new(true));
 
-        // Create depth image for render pass
         (Self  {
             rx,
             vulkan_renderer,
@@ -173,6 +173,7 @@ impl RenderTask {
     pub fn spawn(mut self) -> JoinHandle<()> {
         thread::Builder::new().name("Render".into()).spawn(move || {
             info!("Render thread spawned!");
+
 
             let start_tm = Instant::now();
 
@@ -218,8 +219,8 @@ impl RenderTask {
                 .initial_layout(ImageLayout::UNDEFINED)
                 .final_layout(ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
 
-            let mut attachments_desc = AttachmentsDescription::new(swapchain_attachment)
-                .with_depth_attachment(depth_attachment);
+            let mut attachments_desc = AttachmentsDescription::new(swapchain_attachment, ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                .with_depth_attachment(depth_attachment, ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
 
             let pixel_perfect_sampler = allocator.new_sampler(|i| {
                 i
@@ -228,19 +229,17 @@ impl RenderTask {
             });
 
             if need_resolve {
-                // Add resolve attachment
+                // Add color attachment for MSAA
                 let color_attachment = AttachmentDescription::default()
                     .samples(msaa_samples)
-                    .load_op(AttachmentLoadOp::DONT_CARE)
+                    .load_op(AttachmentLoadOp::CLEAR)
                     .store_op(AttachmentStoreOp::DONT_CARE)
                     .initial_layout(ImageLayout::UNDEFINED)
                     .final_layout(ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
 
-                attachments_desc = attachments_desc.with_color_attachment(color_attachment);
+                attachments_desc = attachments_desc.with_color_attachment(color_attachment, ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
             }
 
-            // Depth/color images are now created automatically per-framebuffer in the queue
-            // This allows automatic handling of swapchain recreation with different extents
             let swapchain_format = self.vulkan_renderer.swapchain_format();
             let render_pass = allocator.new_render_pass(
                 attachments_desc.clone(),
@@ -259,7 +258,7 @@ impl RenderTask {
             });
 
             let pipeline_desc = GraphicsPipelineDesc::new(use_shader!("solid"), attributes, smallvec![GlobalDescriptorSet::bindings()]);
-            let pipeline = allocator.new_pipeline(render_pass.clone(), pipeline_desc);
+            let pipeline = allocator.new_pipeline(render_pass.clone(), pipeline_desc, false);
 
             let (font_staging, font_texture, font_size) = load_font_texture(&mut allocator);
 

@@ -1,7 +1,7 @@
 use std::cell::RefCell;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
-use jni::{JNIEnv, JavaVM};
+use jni::{AttachGuard, JNIEnv, JavaVM};
 use jni::objects::GlobalRef;
 use lazy_static::lazy_static;
 use log::info;

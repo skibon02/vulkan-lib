@@ -3,7 +3,7 @@ use std::ffi::{c_char, CStr};
 use std::slice;
 use std::sync::Arc;
 use ash::{vk, Entry};
-use ash::vk::{ApplicationInfo, DebugReportCallbackCreateInfoEXT, InstanceCreateInfo};
+use ash::vk::{ApplicationInfo, DebugReportCallbackCreateInfoEXT, InstanceCreateInfo, EXT_CALIBRATED_TIMESTAMPS_NAME};
 use log::{info, warn};
 use sparkles::range_event_start;
 use crate::wrappers::device::{VkDevice, VkDeviceRef};
@@ -120,9 +120,13 @@ impl CapabilitiesChecker {
     pub fn create_device(&mut self, instance: VkInstanceRef, physical_device: vk::PhysicalDevice, create_info: &mut vk::DeviceCreateInfo) -> anyhow::Result<VkDeviceRef> {
         let g = range_event_start!("[VulkanHelpers] Create device");
         let requested_extensions = unsafe {slice::from_raw_parts(create_info.pp_enabled_extension_names, create_info.enabled_extension_count as usize)};
-        let requested_extensions: Vec<_> = requested_extensions.iter()
+        let mut requested_extensions: Vec<_> = requested_extensions.iter()
             .map(|ext| unsafe { CStr::from_ptr(*ext) })
             .collect();
+
+        if requested_extensions.contains(&ash::ext::calibrated_timestamps::NAME) {
+            requested_extensions.push(ash::khr::get_physical_device_properties2::NAME);
+        }
 
         let supported_extensions = unsafe { instance.enumerate_device_extension_properties(physical_device)? };
 

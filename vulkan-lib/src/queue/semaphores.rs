@@ -9,18 +9,16 @@ use crate::queue::shared::HostWaitedNum;
 use crate::resources::image::ImageResource;
 use crate::wrappers::device::VkDeviceRef;
 
-pub(crate) type WaitedOperations = SmallVec<[WaitedOperation; 3]>;
-#[derive(Clone)]
-pub(crate) enum WaitedOperation {
-    Submission(usize, PipelineStageFlags),
-    // swapchain image index
-    SwapchainImageAcquired(Arc<ImageResource>),
+#[derive(Copy, Clone)]
+pub(crate) enum SemaphoreWaitOperation {
+    ImageAcquire(vk::Image),
+    SubmissionWait(usize),
 }
 enum SemaphoreSlot {
     Unallocated,
     Signaled{
         semaphore: vk::Semaphore,
-        waited_operations: WaitedOperations,
+        wait_operation: SemaphoreWaitOperation,
     },
     WaitScheduled {
         semaphore: vk::Semaphore,
@@ -92,7 +90,7 @@ impl SemaphoreManager {
     }
 
     /// Allocate a semaphore for signaling - must be called before wait
-    pub fn allocate_signal_semaphore(&mut self, signal_ref: &SignalSemaphoreRef, waited_operations: WaitedOperations) -> vk::Semaphore {
+    pub fn allocate_signal_semaphore(&mut self, signal_ref: &SignalSemaphoreRef, wait_operation: SemaphoreWaitOperation) -> vk::Semaphore {
         let semaphore = self.take_free_semaphore();
 
         let slot = self.slots.get_mut(signal_ref.key)
@@ -102,7 +100,7 @@ impl SemaphoreManager {
             SemaphoreSlot::Unallocated => {
                 *slot = SemaphoreSlot::Signaled{
                     semaphore,
-                    waited_operations,
+                    wait_operation
                 };
                 semaphore
             }
@@ -114,7 +112,7 @@ impl SemaphoreManager {
             }
         }
     }
-    pub fn modify_waited_operations(&mut self, wait_ref: &WaitSemaphoreRef, new_waited_operations: WaitedOperations) {
+    pub fn modify_wait_operation(&mut self, wait_ref: &WaitSemaphoreRef, new_waited_operations: SemaphoreWaitOperation) {
         let slot = self.slots.get_mut(wait_ref.key)
             .expect("Invalid wait semaphore reference");
 
@@ -122,7 +120,7 @@ impl SemaphoreManager {
             SemaphoreSlot::Signaled{semaphore, ..} => {
                 *slot = SemaphoreSlot::Signaled{
                     semaphore: *semaphore,
-                    waited_operations: new_waited_operations,
+                    wait_operation: new_waited_operations,
                 };
             }
             _ => panic!("Can only modify waited operations for signaled semaphores"),
@@ -130,14 +128,14 @@ impl SemaphoreManager {
     }
 
     /// Get semaphore to wait on and mark it as used in the given submission
-    pub fn get_wait_semaphore(&mut self, wait_ref: WaitSemaphoreStagesRef, used_in_submission: Option<usize>) -> (vk::Semaphore, WaitedOperations) {
+    pub fn get_wait_semaphore(&mut self, wait_ref: WaitSemaphoreStagesRef, used_in_submission: Option<usize>) -> (vk::Semaphore, SemaphoreWaitOperation) {
         let slot = self.slots.get_mut(wait_ref.key)
             .expect("Invalid wait semaphore reference");
 
         match slot {
-            SemaphoreSlot::Signaled{semaphore, waited_operations} => {
+            SemaphoreSlot::Signaled{semaphore, wait_operation} => {
                 let sem = *semaphore;
-                let waited_operations = waited_operations.clone();
+                let wait_operation = *wait_operation;
                 *slot = SemaphoreSlot::WaitScheduled {
                     semaphore: sem,
                     used_in_submission,
@@ -149,7 +147,7 @@ impl SemaphoreManager {
                     self.recycle_old_untracked();
                 }
 
-                (sem, waited_operations)
+                (sem, wait_operation)
             }
             _ => panic!("Semaphore must be signaled before waiting"),
         }

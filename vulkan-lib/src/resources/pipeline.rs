@@ -29,7 +29,7 @@ pub(crate) struct PipelineResourceInner {
 }
 
 impl GraphicsPipelineResource {
-    pub(crate) fn new(device: &VkDeviceRef, render_pass: Arc<RenderPassResource>, pipeline_desc: GraphicsPipelineDesc, descriptor_set_layouts: SmallVec<[DescriptorSetLayout; 4]>) -> Self {
+    pub(crate) fn new(device: &VkDeviceRef, render_pass: Arc<RenderPassResource>, pipeline_desc: GraphicsPipelineDesc, descriptor_set_layouts: SmallVec<[DescriptorSetLayout; 4]>, with_depth_test: bool) -> Self {
         let g = range_event_start!("Create pipeline");
 
         // 1. Create layout
@@ -61,7 +61,8 @@ impl GraphicsPipelineResource {
             .name(main_name);
 
         // pipeline parts
-        let msaa_samples = SampleCountFlags::TYPE_1; // no MSAA by default
+        let msaa_samples = render_pass.attachments_desc().get_color_attachment_desc().map(|d| d.0.samples)
+            .unwrap_or(SampleCountFlags::TYPE_1);
         let multisample_state = PipelineMultisampleStateCreateInfo::default()
             .rasterization_samples(msaa_samples);
         let dynamic_state = PipelineDynamicStateCreateInfo::default()
@@ -93,10 +94,15 @@ impl GraphicsPipelineResource {
         let color_blend = PipelineColorBlendStateCreateInfo::default()
             .attachments(&color_blend_attachment);
 
-        let depth_state = PipelineDepthStencilStateCreateInfo::default()
-            .depth_test_enable(true)
-            .depth_write_enable(true)
-            .depth_compare_op(CompareOp::LESS);
+        let depth_state = if with_depth_test {
+            PipelineDepthStencilStateCreateInfo::default()
+                .depth_test_enable(true)
+                .depth_write_enable(true)
+                .depth_compare_op(CompareOp::LESS)
+        }
+        else {
+            PipelineDepthStencilStateCreateInfo::default()
+        };
 
 
 
