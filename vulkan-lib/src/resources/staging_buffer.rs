@@ -19,6 +19,8 @@ pub struct StagingBufferRange {
     pub(crate) range: Range<u64>,
 }
 
+unsafe impl Send for StagingBufferRange {}
+
 impl StagingBufferRange {
     pub fn update(&mut self, f: impl FnOnce(&mut [u8])) {
         // Safety: owning StagingBufferRange guarantees unique access to this buffer range
@@ -26,6 +28,9 @@ impl StagingBufferRange {
             from_raw_parts_mut(self.buffer.mapped.add(self.range.start as usize), self.range.end as usize - self.range.start as usize)
         };
         f(data);
+    }
+    pub fn len(&self) -> usize {
+        (self.range.end - self.range.start) as usize
     }
 }
 

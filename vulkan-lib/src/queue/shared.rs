@@ -198,17 +198,17 @@ impl SharedState {
     }
 
 
-    pub fn take_free_fence(&self) -> vk::Fence {
+    pub(crate) fn take_free_fence(&self) -> vk::Fence {
         self.state.lock().take_free_fence()
     }
 
-    pub fn submitted_fence(&self, submission_num: usize, fence: vk::Fence) {
+    pub(crate) fn submitted_fence(&self, submission_num: usize, fence: vk::Fence) {
         self.state.lock().submitted_fence(submission_num, fence);
     }
 
-    pub fn wait_submission(&self, rel_sub_num: usize) -> HostWaitedNum {
+    pub fn wait_submission(&self, submission_num: usize) -> HostWaitedNum {
         let last_submitted_num = self.last_submission_num.load(Ordering::Relaxed);
-        let submission_num = last_submitted_num.saturating_sub(rel_sub_num);
+        let submission_num = submission_num.min(last_submitted_num);
         let g = range_event_start!("[Vulkan] Wait for fence");
         let fence_to_wait = self.state.lock().take_fence_to_wait(submission_num, &self.last_host_waited_submission);
         if let Some((num, fence)) = fence_to_wait {
@@ -225,11 +225,11 @@ impl SharedState {
         HostWaitedNum(submission_num)
     }
 
-    pub fn confirm_all_waited(&self, submission_num: usize) {
+    pub(crate) fn confirm_all_waited(&self, submission_num: usize) {
         self.state.lock().confirm_wait_fence(submission_num, &self.last_host_waited_submission);
     }
 
-    pub fn poll_completed_fences(&self) {
+    pub(crate) fn poll_completed_fences(&self) {
         self.state.lock().poll_completed_fences(&self.last_host_waited_submission);
     }
 

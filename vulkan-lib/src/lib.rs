@@ -39,8 +39,8 @@ pub(crate) fn try_get_instance() -> Option<Arc<VulkanInstance>> {
 pub struct VulkanInstance {
     debug_report: VkDebugReport,
     physical_device: PhysicalDevice,
-    device: VkDeviceRef,
     shared_state: SharedState,
+    device: VkDeviceRef,
 
     entry: Entry,
 }

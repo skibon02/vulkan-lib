@@ -1,23 +1,30 @@
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
-use std::thread;
+use std::{mem, thread};
+use std::slice::from_raw_parts;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 use log::{error, info, warn};
 use raw_window_handle::{HasRawDisplayHandle, HasRawWindowHandle};
 use sparkles::range_event_start;
-use winit::event::{ElementState, WindowEvent};
+use winit::event::{ElementState, MouseButton, TouchPhase, WindowEvent};
 use winit::event_loop::ActiveEventLoop;
 use winit::keyboard;
 use winit::keyboard::NamedKey;
 use winit::window::{Fullscreen, Window};
 use vulkan_lib::{vk, VulkanInstance};
+use vulkan_lib::queue::shared::SharedState;
+use vulkan_lib::resources::buffer::BufferResource;
+use vulkan_lib::resources::staging_buffer::StagingBufferResource;
+use vulkan_lib::resources::VulkanAllocator;
+use vulkan_lib::vk::{BufferCreateFlags, BufferUsageFlags};
 use crate::component::Component;
 use crate::layout::calculator::LayoutCalculator;
 use crate::render;
-use crate::render::RenderMessage;
+use crate::render::{RenderMessage, SolidAttributes};
 use crate::resources::get_resource;
+use crate::util::DoubleBuffered;
 
 pub struct App {
     app_finished: bool,
@@ -28,10 +35,17 @@ pub struct App {
     window: Window,
 
     // ui
+    cursor_pos: (f64, f64),
     component: Component,
     layout_calculator: LayoutCalculator,
 
     // Rendering thread
+    shared: SharedState,
+    instances: Vec<SolidAttributes>,
+    staging: StagingBufferResource,
+    instance_buffers: DoubleBuffered<Arc<BufferResource>>,
+
+    allocator: VulkanAllocator,
     render_tx: mpsc::Sender<RenderMessage>,
     render_thread: Option<JoinHandle<()>>,
     render_ready: Arc<AtomicBool>,
@@ -54,6 +68,8 @@ impl App {
 
         let api_version = vk::API_VERSION_1_1;
         let vulkan_renderer = VulkanInstance::new_for_handle(raw_window_handle, raw_display_handle, (inner_size.width, inner_size.height), api_version).unwrap();
+        let shared = vulkan_renderer.shared();
+        let mut allocator = vulkan_renderer.new_allocator();
         let (render_task, render_tx, render_ready, resize_ready) = render::RenderTask::new(vulkan_renderer, inner_size);
         let render_jh = render_task.spawn();
         
@@ -65,6 +81,12 @@ impl App {
         component.init(&mut layout_calculator);
         info!("Done!");
 
+        let instances = Vec::new();
+        let staging = allocator.new_staging_buffer(100_000);
+        let instance_buffers = DoubleBuffered::new(|| {
+            allocator.new_buffer(BufferUsageFlags::VERTEX_BUFFER | BufferUsageFlags::TRANSFER_DST, BufferCreateFlags::empty(), 100_000)
+        });
+
         Self {
             is_collapsed: false,
             app_finished: false,
@@ -72,8 +94,15 @@ impl App {
             
             component,
             layout_calculator,
+            cursor_pos: (0.0, 0.0),
 
             window,
+
+            instances,
+            staging,
+            instance_buffers,
+            shared,
+            allocator,
 
             render_tx,
             render_ready,
@@ -83,6 +112,32 @@ impl App {
             frame_cnt: 0,
             last_sec: Instant::now(),
         }
+    }
+    pub fn process_touch(&mut self, pos: (f64, f64)) {
+        self.instances.push(SolidAttributes {
+            pos: [pos.0 as i32, pos.1 as i32].into(),
+            size: [40, 40].into(),
+            d: 0.5.into()
+        });
+
+        let bytes_len = self.instances.len() * size_of::<SolidAttributes>();
+        if let Some(mut range) = self.staging.try_freeze(bytes_len) {
+            range.update(|r| {
+                let bytes = unsafe { from_raw_parts(self.instances.as_ptr() as *const u8, bytes_len) };
+                r[..bytes_len].copy_from_slice(bytes);
+            });
+            self.render_tx.send(RenderMessage::UpdateInstances {
+                staging: range,
+                buf: self.instance_buffers.current().clone()
+            }).unwrap();
+            self.instance_buffers.next_frame();
+        }
+        else {
+            error!("Cannot freeze bytes! skipping this one");
+            let last_waited = self.shared.last_host_waited_submission();
+            self.staging.try_unfreeze(last_waited).expect("Cannot unfreeze staging buffer -.-");
+        }
+        info!("Mouse clicked! {:?}", self.cursor_pos)
     }
     pub fn is_finished(&self) -> bool {
         self.app_finished
@@ -194,6 +249,24 @@ impl App {
                     });
                     self.is_collapsed = false;
                 }
+            }
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: MouseButton::Left,
+                ..
+            } => {
+                self.process_touch(self.cursor_pos);
+            }
+            WindowEvent::Touch(t) => {
+                if t.phase == TouchPhase::Started {
+                    self.process_touch((t.location.x, t.location.y))
+                }
+            }
+            WindowEvent::CursorMoved {
+                position,
+                ..
+            } => {
+                self.cursor_pos = (position.x, position.y);
             }
             _ => {
 

@@ -92,6 +92,12 @@ pub struct BufferRange {
     pub(crate) custom_range: Option<Range<usize>>
 }
 
+impl BufferRange {
+    pub fn len(&self) -> usize {
+        self.custom_range.as_ref().map(|r| r.end - r.start).unwrap_or(self.buffer.size())
+    }
+}
+
 fn prepare_buffer_copy(src: &AnyBufferRange, dst: &BufferRange) -> BufferCopy {
     let src_offset = src.offset();
 

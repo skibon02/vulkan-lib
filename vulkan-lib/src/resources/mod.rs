@@ -29,7 +29,6 @@ pub mod descriptor_pool;
 pub mod staging_buffer;
 
 pub struct VulkanAllocator {
-    instance: Arc<VulkanInstance>,
     memory_manager: MemoryManager,
     descriptor_set_layouts: HashMap<Vec<DescriptorSetLayoutBindingDesc>, DescriptorSetLayout>,
     descriptor_set_allocator: DescriptorSetAllocator,
@@ -40,6 +39,7 @@ pub struct VulkanAllocator {
     render_passes: Vec<Arc<RenderPassResource>>,
     pipelines: Vec<Arc<GraphicsPipelineResource>>,
     samplers: Vec<Arc<SamplerResource>>,
+    instance: Arc<VulkanInstance>,
 }
 
 impl VulkanAllocator {

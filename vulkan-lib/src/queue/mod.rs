@@ -159,6 +159,9 @@ impl GraphicsQueue {
             self.memory_manager.clone(),
         )
     }
+    pub fn shared(&self) -> SharedState {
+        self.instance.shared_state.clone()
+    }
 
     fn get_or_create_framebuffers(&mut self, render_pass: &Arc<RenderPassResource>) -> SmallVec<[vk::Framebuffer; 4]> {
         let framebuffer_set = self.framebuffers
@@ -377,10 +380,15 @@ impl GraphicsQueue {
         self.recycle_old_resources();
     }
 
-    pub fn wait_prev_submission(&mut self, rel_sub_num: usize) -> HostWaitedNum {
-        self.instance.shared_state.wait_submission(rel_sub_num)
+    pub fn wait_submission(&mut self, submission_num: usize) -> HostWaitedNum {
+        self.instance.shared_state.wait_submission(submission_num)
     }
 
+    pub fn wait_prev_submission(&mut self, rel_sub_num: usize) -> HostWaitedNum {
+        let last_submitted_num = self.instance.shared_state.last_submission_num();
+        let submission_num = last_submitted_num.saturating_sub(rel_sub_num);
+        self.instance.shared_state.wait_submission(submission_num)
+    }
     pub fn swapchain_image_count(&self) -> usize {
         self.swapchain_wrapper.get_images().len()
     }
@@ -406,20 +414,21 @@ impl GraphicsQueue {
         }
     }
 
-    pub fn record_device_commands<'a, F>(&'a mut self, wait_ref: Option<WaitSemaphoreStagesRef>, f: F)
+    pub fn record_device_commands<F>(&mut self, wait_ref: Option<WaitSemaphoreStagesRef>, f: F) -> usize
     where
         F: FnOnce(&mut RecordContext) {
-        self.record_device_commands_impl(f, wait_ref, None)
+        let sub_num = self.record_device_commands_impl(f, wait_ref, None);
+        sub_num
     }
 
-    pub fn record_device_commands_signal<'a, F>(&'a mut self, wait_ref: Option<WaitSemaphoreStagesRef>, f: F) -> WaitSemaphoreRef
+    pub fn record_device_commands_signal<F>(&mut self, wait_ref: Option<WaitSemaphoreStagesRef>, f: F) -> (WaitSemaphoreRef, usize)
     where
         F: FnOnce(&mut RecordContext) {
         let (signal_ref, new_wait_ref) = self.semaphore_manager.create_semaphore_pair();
 
-        self.record_device_commands_impl(f, wait_ref, Some(signal_ref));
+        let sub_num = self.record_device_commands_impl(f, wait_ref, Some(signal_ref));
 
-        new_wait_ref
+        (new_wait_ref, sub_num)
     }
 
     fn split_into_barrier_groups<'a>(commands: &'a [DeviceCommand]) -> Vec<&'a [DeviceCommand]> {
@@ -481,7 +490,7 @@ impl GraphicsQueue {
         groups
     }
 
-    fn record_device_commands_impl<'a, F>(&'a mut self, f: F, wait_ref: Option<WaitSemaphoreStagesRef>, signal_ref: Option<semaphores::SignalSemaphoreRef>)
+    fn record_device_commands_impl<F>(&mut self, f: F, wait_ref: Option<WaitSemaphoreStagesRef>, signal_ref: Option<semaphores::SignalSemaphoreRef>) -> usize
     where
         F: FnOnce(&mut RecordContext),
     {
@@ -494,7 +503,7 @@ impl GraphicsQueue {
         self.recycle_old_resources();
         let submission_num = self.instance.shared_state.increment_and_get_submission_num();
 
-        self.instance.shared_state.poll_completed_fences(); // fast check if any of previous submissions are finished
+        // fast check if any of previous submissions are finished
         let last_waited_submission = self.instance.shared_state.last_host_waited_submission();
         self.semaphore_manager.on_last_waited_submission(last_waited_submission); // recycle old semaphores
         self.command_buffer_manager.on_last_waited_submission(last_waited_submission); // recycle old command buffers
@@ -931,6 +940,8 @@ impl GraphicsQueue {
 
         // register fence
         self.instance.shared_state.submitted_fence(submission_num, fence);
+
+        submission_num
     }
 
     // Acquire next swapchain image with semaphore signaling
@@ -1012,6 +1023,7 @@ impl GraphicsQueue {
 
 impl Drop for GraphicsQueue {
     fn drop(&mut self) {
+        info!("Dropping graphics queue >.<");
         self.wait_idle();
     }
 }

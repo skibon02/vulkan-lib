@@ -23,6 +23,8 @@ use render_macro::define_layout;
 use vulkan_lib::{descriptor_set, use_shader};
 use vulkan_lib::vk::{BufferCreateFlags, ImageCreateFlags};
 use vulkan_lib::queue::GraphicsQueue;
+use vulkan_lib::queue::recording::BufferRange;
+use vulkan_lib::resources::buffer::BufferResource;
 use vulkan_lib::resources::image::ImageResource;
 use vulkan_lib::resources::pipeline::GraphicsPipelineDesc;
 use vulkan_lib::resources::render_pass::{AttachmentsDescription, FrameBufferAttachment};
@@ -36,6 +38,10 @@ pub enum RenderMessage {
     Redraw { bg_color: [f32; 3] },
     Resize { width: u32, height: u32 },
     Exit,
+    UpdateInstances {
+        staging: StagingBufferRange,
+        buf: Arc<BufferResource>,
+    },
 }
 
 pub struct RenderTask {
@@ -180,16 +186,14 @@ impl RenderTask {
             // Create allocator
             let mut allocator = self.vulkan_renderer.new_allocator();
 
-            const NUM_INSTANCES: u32 = 1;
             let bytes_per_instance = SolidAttributes::SIZE as u64;
-            let total_bytes = bytes_per_instance * NUM_INSTANCES as u64;
 
             // Create double-buffered staging buffers for instance data
             let staging_a = allocator.new_staging_buffer(
-                total_bytes,
+                bytes_per_instance,
             );
             let staging_b = allocator.new_staging_buffer(
-                total_bytes,
+                bytes_per_instance,
             );
 
             // Create render pass
@@ -253,7 +257,7 @@ impl RenderTask {
                 allocator.new_buffer(
                     BufferUsageFlags::VERTEX_BUFFER | BufferUsageFlags::TRANSFER_DST,
                     BufferCreateFlags::empty(),
-                    total_bytes,
+                    bytes_per_instance,
                 )
             });
 
@@ -297,9 +301,14 @@ impl RenderTask {
             let mut staging_global_range = global_staging.try_freeze(16).unwrap();
             staging_global_range.update(|data| data.copy_from_slice(global.as_bytes()));
 
-            self.vulkan_renderer.record_device_commands(None, |ctx| {
+            let initial_submission_number = self.vulkan_renderer.record_device_commands(None, |ctx| {
                 ctx.copy_buffer(staging_global_range, global_ds_buffer.full());
             });
+
+            // 1 frame in-flight
+            let mut last_frame_submission_num = initial_submission_number;
+            let mut pre_last_frame_submission_num = initial_submission_number;
+            let mut instance_buffer: Option<BufferRange> = None;
 
             loop {
                 let msg = self.rx.recv();
@@ -307,6 +316,7 @@ impl RenderTask {
                     info!("Render thread exiting due to channel close");
                     break;
                 };
+
                 match msg {
                     RenderMessage::Redraw { bg_color} => {
                         let g = range_event_start!("Render");
@@ -317,7 +327,7 @@ impl RenderTask {
                             };
 
                             let g = range_event_start!("Wait previous submission");
-                            let waited = self.vulkan_renderer.wait_prev_submission(1);
+                            let waited = self.vulkan_renderer.wait_submission(pre_last_frame_submission_num);
                             drop(g);
 
                             // Freeze a range from current staging buffer for vertex data
@@ -389,7 +399,7 @@ impl RenderTask {
                                 },
                             ];
 
-                            let present_wait_ref = self.vulkan_renderer.record_device_commands_signal(Some(acquire_wait_ref.with_stages(PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)), |ctx| {
+                            let (present_wait_ref, new_sub_num) = self.vulkan_renderer.record_device_commands_signal(Some(acquire_wait_ref.with_stages(PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)), |ctx| {
                                 if let Some(range) = global_range {
                                     ctx.copy_buffer(range, global_ds_buffer.full());
                                 }
@@ -399,9 +409,17 @@ impl RenderTask {
                                     ctx.bind_pipeline(pipeline.clone());
                                     ctx.bind_descriptor_set(0, descriptor_set.clone());
                                     ctx.bind_vertex_buffer(vertex_buffer.current().full());
-                                    ctx.draw(4, NUM_INSTANCES, 0, 0);
+                                    ctx.draw(4, 1, 0, 0);
+
+                                    if let Some(instance_buf) = &instance_buffer {
+                                        let instance_count = instance_buf.len() as u32 / bytes_per_instance as u32;
+                                        ctx.bind_vertex_buffer(instance_buf.clone());
+                                        ctx.draw(4, instance_count, 0, 0);
+                                    }
                                 })
                             });
+                            pre_last_frame_submission_num = last_frame_submission_num;
+                            last_frame_submission_num = new_sub_num;
 
                             let g = range_event_start!("Present");
                             if let Err(e) = self.vulkan_renderer.queue_present(image_index, present_wait_ref) {
@@ -418,6 +436,16 @@ impl RenderTask {
 
                         vertex_buffer.next_frame();
                         self.render_finished.store(true, Ordering::Release);
+                    }
+                    RenderMessage::UpdateInstances {
+                        buf,
+                        staging
+                    } => {
+                        self.vulkan_renderer.record_device_commands(None, |ctx| {
+                            let len = staging.len();
+                            ctx.copy_buffer(staging, buf.range(0..len));
+                            instance_buffer = Some(buf.range(0..len));
+                        });
                     }
                     RenderMessage::Resize { width, height } => {
                         let g = range_event_start!("Recreate Resize");
