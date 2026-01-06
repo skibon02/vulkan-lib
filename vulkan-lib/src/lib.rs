@@ -21,7 +21,7 @@ use crate::queue::shared::SharedState;
 
 mod wrappers;
 mod swapchain_wrapper;
-pub mod util;
+mod util;
 pub mod shaders;
 mod extensions;
 pub mod queue;

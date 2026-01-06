@@ -44,6 +44,10 @@ impl StagingBufferResource {
     pub fn try_unfreeze(&self, host_waited_num: HostWaitedNum) -> Option<()> {
         self.0.try_unfreeze(host_waited_num)
     }
+    
+    pub fn len(&self) -> usize {
+        self.0.size()
+    }
 }
 
 pub(crate) struct StagingBuffer {
@@ -127,9 +131,14 @@ impl StagingBuffer {
 
     #[must_use]
     pub fn try_unfreeze(self: &Arc<Self>, host_waited_num: HostWaitedNum) -> Option<()> {
+        let mut inner = self.frozen_len.lock().unwrap();
+        if *inner == 0 {
+            return Some(());
+        }
+
         if Arc::strong_count(self) == 2 && self.submission_usage.load().is_none_or(|num| host_waited_num.num() >= num) {
             // safe to unfreeze
-            *self.frozen_len.lock().unwrap() = 0;
+            *inner = 0;
             Some(())
         }
         else {

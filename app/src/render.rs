@@ -1,3 +1,5 @@
+mod frame_counter;
+
 use std::f64::consts::PI;
 use vulkan_lib::vk::{DescriptorType, Extent2D, Pipeline};
 use vulkan_lib::vk::{BufferCopy, ClearColorValue, ClearDepthStencilValue, ClearValue, Filter, ImageUsageFlags, PipelineStageFlags};
@@ -32,7 +34,7 @@ use vulkan_lib::resources::staging_buffer::StagingBufferRange;
 use vulkan_lib::resources::VulkanAllocator;
 use vulkan_lib::shaders::layout::types::{vec2, vec3, vec4, ivec2};
 use crate::resources::get_resource;
-use crate::util::DoubleBuffered;
+use crate::util::{DoubleBuffered, FrameCounter};
 
 pub enum RenderMessage {
     Redraw { bg_color: [f32; 3] },
@@ -180,7 +182,7 @@ impl RenderTask {
         thread::Builder::new().name("Render".into()).spawn(move || {
             info!("Render thread spawned!");
 
-
+            let frame_counter = FrameCounter::new();
             let start_tm = Instant::now();
 
             // Create allocator
@@ -251,9 +253,9 @@ impl RenderTask {
             );
 
             let attributes = SolidAttributes::get_attributes_configuration();
-
+            
             // Create double-buffered vertex buffers
-            let mut vertex_buffer = DoubleBuffered::new(|| {
+            let mut vertex_buffer = DoubleBuffered::new(&frame_counter, || {
                 allocator.new_buffer(
                     BufferUsageFlags::VERTEX_BUFFER | BufferUsageFlags::TRANSFER_DST,
                     BufferCreateFlags::empty(),
@@ -309,6 +311,8 @@ impl RenderTask {
             let mut last_frame_submission_num = initial_submission_number;
             let mut pre_last_frame_submission_num = initial_submission_number;
             let mut instance_buffer: Option<BufferRange> = None;
+            
+            let mut waited_submission = self.vulkan_renderer.shared().last_host_waited_submission();
 
             loop {
                 let msg = self.rx.recv();
@@ -326,15 +330,11 @@ impl RenderTask {
                                 float32: [bg_color[2], bg_color[1], bg_color[0], 1.0],
                             };
 
-                            let g = range_event_start!("Wait previous submission");
-                            let waited = self.vulkan_renderer.wait_submission(pre_last_frame_submission_num);
-                            drop(g);
-
                             // Freeze a range from current staging buffer for vertex data
-                            let vertex_staging = if staging_a.try_unfreeze(waited).is_some() {
+                            let vertex_staging = if staging_a.try_unfreeze(waited_submission).is_some() {
                                 &staging_a
                             }
-                            else if staging_b.try_unfreeze(waited).is_some() {
+                            else if staging_b.try_unfreeze(waited_submission).is_some() {
                                 &staging_b
                             } else {
                                 panic!("Both stagings were frozen!");
@@ -425,6 +425,10 @@ impl RenderTask {
                             if let Err(e) = self.vulkan_renderer.queue_present(image_index, present_wait_ref) {
                                 error!("Present error: {:?}", e);
                             }
+
+                            let g = range_event_start!("Wait previous submission");
+                            waited_submission = self.vulkan_renderer.wait_submission(pre_last_frame_submission_num);
+                            drop(g);
                         }
 
 
@@ -433,8 +437,8 @@ impl RenderTask {
                         }
                         
                         allocator.destroy_old_resources();
+                        frame_counter.increment_frame();
 
-                        vertex_buffer.next_frame();
                         self.render_finished.store(true, Ordering::Release);
                     }
                     RenderMessage::UpdateInstances {

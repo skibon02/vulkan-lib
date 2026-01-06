@@ -65,6 +65,10 @@ impl VulkanAllocator {
         }
     }
 
+    pub fn shared(&self) -> SharedState {
+        self.instance.shared_state.clone()
+    }
+
     pub fn allocate_descriptor_set(&mut self, bindings: &'static [DescriptorSetLayoutBindingDesc]) -> Arc<DescriptorSetResource> {
         let layout = self.get_or_create_descriptor_set_layout(bindings);
         let resource = self.descriptor_set_allocator.allocate_descriptor_set(layout, bindings);

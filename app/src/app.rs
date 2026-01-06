@@ -24,7 +24,7 @@ use crate::layout::calculator::LayoutCalculator;
 use crate::render;
 use crate::render::{RenderMessage, SolidAttributes};
 use crate::resources::get_resource;
-use crate::util::DoubleBuffered;
+use crate::util::{DoubleBuffered, FrameCounter, TrippleAutoStaging};
 
 pub struct App {
     app_finished: bool,
@@ -41,8 +41,10 @@ pub struct App {
 
     // Rendering thread
     shared: SharedState,
+    frame_counter: FrameCounter,
+    instances_updated: bool,
     instances: Vec<SolidAttributes>,
-    staging: StagingBufferResource,
+    staging: TrippleAutoStaging,
     instance_buffers: DoubleBuffered<Arc<BufferResource>>,
 
     allocator: VulkanAllocator,
@@ -82,8 +84,11 @@ impl App {
         info!("Done!");
 
         let instances = Vec::new();
-        let staging = allocator.new_staging_buffer(100_000);
-        let instance_buffers = DoubleBuffered::new(|| {
+
+        let frame_counter = FrameCounter::new();
+
+        let staging = TrippleAutoStaging::new(&frame_counter, &mut allocator);
+        let instance_buffers = DoubleBuffered::new(&frame_counter, || {
             allocator.new_buffer(BufferUsageFlags::VERTEX_BUFFER | BufferUsageFlags::TRANSFER_DST, BufferCreateFlags::empty(), 100_000)
         });
 
@@ -98,6 +103,8 @@ impl App {
 
             window,
 
+            frame_counter,
+            instances_updated: false,
             instances,
             staging,
             instance_buffers,
@@ -119,24 +126,7 @@ impl App {
             size: [40, 40].into(),
             d: 0.5.into()
         });
-
-        let bytes_len = self.instances.len() * size_of::<SolidAttributes>();
-        if let Some(mut range) = self.staging.try_freeze(bytes_len) {
-            range.update(|r| {
-                let bytes = unsafe { from_raw_parts(self.instances.as_ptr() as *const u8, bytes_len) };
-                r[..bytes_len].copy_from_slice(bytes);
-            });
-            self.render_tx.send(RenderMessage::UpdateInstances {
-                staging: range,
-                buf: self.instance_buffers.current().clone()
-            }).unwrap();
-            self.instance_buffers.next_frame();
-        }
-        else {
-            error!("Cannot freeze bytes! skipping this one");
-            let last_waited = self.shared.last_host_waited_submission();
-            self.staging.try_unfreeze(last_waited).expect("Cannot unfreeze staging buffer -.-");
-        }
+        self.instances_updated = true;
         info!("Mouse clicked! {:?}", self.cursor_pos)
     }
     pub fn is_finished(&self) -> bool {
@@ -197,7 +187,23 @@ impl App {
                     if !self.render_ready.swap(false, Ordering::Acquire) {
                         break 'handling;
                     }
-                    
+
+                    if self.instances_updated {
+                        self.instances_updated = false;
+
+                        // prepare new instances
+                        let bytes_len = self.instances.len() * size_of::<SolidAttributes>();
+                        let mut range = self.staging.allocate(&mut self.allocator, bytes_len);
+                        range.update(|r| {
+                            let bytes = unsafe { from_raw_parts(self.instances.as_ptr() as *const u8, bytes_len) };
+                            r[..bytes_len].copy_from_slice(bytes);
+                        });
+                        self.render_tx.send(RenderMessage::UpdateInstances {
+                            staging: range,
+                            buf: self.instance_buffers.current().clone()
+                        }).unwrap();
+                    }
+
                     // poll UI logic
                     self.component.poll(&mut self.layout_calculator);
 
@@ -208,6 +214,7 @@ impl App {
                     let elements = self.layout_calculator.get_elements();
                     // convert into primitive elements, fill instance buffer (text -> list of symbols, img/box -> rects)
 
+                    self.frame_counter.increment_frame();
                     let _ = self.render_tx.send(RenderMessage::Redraw {
                         bg_color: [0.7, 0.3, 0.9],
                     });
