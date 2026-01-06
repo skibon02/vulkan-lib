@@ -76,7 +76,9 @@ impl ApplicationHandler for WinitApp {
 
         window.request_redraw();
 
-        let app_state = App::new_winit(window);
+
+        let instances = self.app.take().map(|a| a.instances.clone());
+        let app_state = App::new_winit(window, instances.unwrap_or_default());
         self.app = Some(app_state);
     }
 

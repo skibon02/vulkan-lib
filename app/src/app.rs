@@ -42,7 +42,7 @@ pub struct App {
     shared: SharedState,
     frame_counter: FrameCounter,
     instances_updated: bool,
-    instances: Vec<SolidAttributes>,
+    pub instances: Vec<SolidAttributes>,
     staging: TrippleAutoStaging,
     instance_buffers: DoubleBuffered<Arc<BufferResource>>,
 
@@ -59,7 +59,7 @@ pub struct App {
 
 
 impl App {
-    pub fn new_winit(window: Window) -> App {
+    pub fn new_winit(window: Window, instances: Vec<SolidAttributes>) -> App {
         let raw_window_handle = window.raw_window_handle().unwrap();
         let raw_display_handle = window.raw_display_handle().unwrap();
         let inner_size = window.inner_size();
@@ -82,8 +82,6 @@ impl App {
         component.init(&mut layout_calculator);
         info!("Done!");
 
-        let instances = Vec::new();
-
         let frame_counter = FrameCounter::new();
 
         let staging = TrippleAutoStaging::new(&frame_counter, &mut allocator, 4096);
@@ -103,7 +101,7 @@ impl App {
             window,
 
             frame_counter,
-            instances_updated: false,
+            instances_updated: true,
             instances,
             staging,
             instance_buffers,
