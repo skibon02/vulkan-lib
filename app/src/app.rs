@@ -7,7 +7,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 use log::{error, info, warn};
 use raw_window_handle::{HasRawDisplayHandle, HasRawWindowHandle};
-use sparkles::range_event_start;
+use sparkles::{instant_event, range_event_start};
 use winit::event::{ElementState, MouseButton, TouchPhase, WindowEvent};
 use winit::event_loop::ActiveEventLoop;
 use winit::keyboard;
@@ -16,7 +16,6 @@ use winit::window::{Fullscreen, Window};
 use vulkan_lib::{vk, VulkanInstance};
 use vulkan_lib::queue::shared::SharedState;
 use vulkan_lib::resources::buffer::BufferResource;
-use vulkan_lib::resources::staging_buffer::StagingBufferResource;
 use vulkan_lib::resources::VulkanAllocator;
 use vulkan_lib::vk::{BufferCreateFlags, BufferUsageFlags};
 use crate::component::Component;
@@ -87,7 +86,7 @@ impl App {
 
         let frame_counter = FrameCounter::new();
 
-        let staging = TrippleAutoStaging::new(&frame_counter, &mut allocator);
+        let staging = TrippleAutoStaging::new(&frame_counter, &mut allocator, 4096);
         let instance_buffers = DoubleBuffered::new(&frame_counter, || {
             allocator.new_buffer(BufferUsageFlags::VERTEX_BUFFER | BufferUsageFlags::TRANSFER_DST, BufferCreateFlags::empty(), 100_000)
         });
@@ -122,12 +121,11 @@ impl App {
     }
     pub fn process_touch(&mut self, pos: (f64, f64)) {
         self.instances.push(SolidAttributes {
-            pos: [pos.0 as i32, pos.1 as i32].into(),
+            pos: [pos.0 as i32 - 20, pos.1 as i32 - 20].into(),
             size: [40, 40].into(),
             d: 0.5.into()
         });
         self.instances_updated = true;
-        info!("Mouse clicked! {:?}", self.cursor_pos)
     }
     pub fn is_finished(&self) -> bool {
         self.app_finished
@@ -190,6 +188,7 @@ impl App {
 
                     if self.instances_updated {
                         self.instances_updated = false;
+                        let g = range_event_start!("instance buffer prepare");
 
                         // prepare new instances
                         let bytes_len = self.instances.len() * size_of::<SolidAttributes>();
@@ -204,17 +203,18 @@ impl App {
                         }).unwrap();
                     }
 
-                    // poll UI logic
-                    self.component.poll(&mut self.layout_calculator);
-
-                    let size = self.window.inner_size();
-                    self.layout_calculator.calculate_layout(size.width, size.height);
-
-                    // take UI elements to render
-                    let elements = self.layout_calculator.get_elements();
+                    // // poll UI logic
+                    // self.component.poll(&mut self.layout_calculator);
+                    //
+                    // let size = self.window.inner_size();
+                    // self.layout_calculator.calculate_layout(size.width, size.height);
+                    //
+                    // // take UI elements to render
+                    // let elements = self.layout_calculator.get_elements();
                     // convert into primitive elements, fill instance buffer (text -> list of symbols, img/box -> rects)
 
                     self.frame_counter.increment_frame();
+                    instant_event!("Send redraw message");
                     let _ = self.render_tx.send(RenderMessage::Redraw {
                         bg_color: [0.7, 0.3, 0.9],
                     });
@@ -262,6 +262,7 @@ impl App {
                 button: MouseButton::Left,
                 ..
             } => {
+                instant_event!("Mouse button press");
                 self.process_touch(self.cursor_pos);
             }
             WindowEvent::Touch(t) => {

@@ -90,7 +90,7 @@ fn load_font_texture(allocator: &mut VulkanAllocator) -> (StagingBufferRange, Ar
 
     let mut context = ScaleContext::new();
     let mut scaler = context.builder(font)
-        .size(24.0)
+        .size(36.0)
         .build();
     let mut font_rnd = Render::new(&[
         // Color outline with the first palette
@@ -101,7 +101,7 @@ fn load_font_texture(allocator: &mut VulkanAllocator) -> (StagingBufferRange, Ar
         Source::Outline,
     ]);
     let glyph = font.charmap().map('ы');
-    let img = font_rnd.format(swash::zeno::Format::Subpixel)
+    let img = font_rnd.format(swash::zeno::Format::Alpha)
         .render(&mut scaler, glyph).unwrap();
 
     // let img_file = fs::File::create("output.png").unwrap();
@@ -132,7 +132,7 @@ fn load_font_texture(allocator: &mut VulkanAllocator) -> (StagingBufferRange, Ar
         ImageCreateFlags::empty(),
         img.placement.width,
         img.placement.height,
-        Format::R8G8B8A8_UNORM,
+        Format::R8_UNORM,
         SampleCountFlags::TYPE_1,
     );
 
@@ -253,7 +253,7 @@ impl RenderTask {
             );
 
             let attributes = SolidAttributes::get_attributes_configuration();
-            
+
             // Create double-buffered vertex buffers
             let mut vertex_buffer = DoubleBuffered::new(&frame_counter, || {
                 allocator.new_buffer(
@@ -272,7 +272,7 @@ impl RenderTask {
                 ctx.copy_buffer_to_image_full(
                     font_staging,
                     font_texture.clone(),
-                    4, // bytes_per_texel for RGBA8
+                    1, // bytes_per_texel for RGBA8
                 );
             });
 
@@ -311,7 +311,7 @@ impl RenderTask {
             let mut last_frame_submission_num = initial_submission_number;
             let mut pre_last_frame_submission_num = initial_submission_number;
             let mut instance_buffer: Option<BufferRange> = None;
-            
+
             let mut waited_submission = self.vulkan_renderer.shared().last_host_waited_submission();
 
             loop {
@@ -354,7 +354,7 @@ impl RenderTask {
                                 };
 
                                 *square = SolidAttributes {
-                                    pos: [x as i32, y as i32].into(),
+                                    pos: [x as i32 - font_size.width as i32 / 2, y as i32 - font_size.height as i32 / 2].into(),
                                     size: [font_size.width as i32, font_size.height as i32].into(),
                                     d: 0.5.into(),
                                 };
@@ -425,10 +425,10 @@ impl RenderTask {
                             if let Err(e) = self.vulkan_renderer.queue_present(image_index, present_wait_ref) {
                                 error!("Present error: {:?}", e);
                             }
+                            drop(g);
 
                             let g = range_event_start!("Wait previous submission");
                             waited_submission = self.vulkan_renderer.wait_submission(pre_last_frame_submission_num);
-                            drop(g);
                         }
 
 

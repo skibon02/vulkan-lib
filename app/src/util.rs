@@ -1,5 +1,6 @@
 use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use sparkles::range_event_start;
 use vulkan_lib::queue::shared::{HostWaitedNum, SharedState};
 use vulkan_lib::resources::staging_buffer::{StagingBufferRange, StagingBufferResource};
 use vulkan_lib::resources::VulkanAllocator;
@@ -68,17 +69,16 @@ pub struct TrippleAutoStaging {
 }
 
 impl TrippleAutoStaging {
-    pub fn new(frame_counter: &FrameCounter, allocator: &mut VulkanAllocator) -> Self {
-        let size = 128; // initial size
-        let s1 = vec![allocator.new_staging_buffer(size)];
-        let s2 = vec![allocator.new_staging_buffer(size)];
-        let s3 = vec![allocator.new_staging_buffer(size)];
+    pub fn new(frame_counter: &FrameCounter, allocator: &mut VulkanAllocator, initial_size: u64) -> Self {
+        let s1 = vec![allocator.new_staging_buffer(initial_size)];
+        let s2 = vec![allocator.new_staging_buffer(initial_size)];
+        let s3 = vec![allocator.new_staging_buffer(initial_size)];
 
         Self {
             s1,
             s2,
             s3,
-            
+
             shared_state: allocator.shared(),
             cur: 0,
             last_frame: 0,
@@ -88,6 +88,7 @@ impl TrippleAutoStaging {
     }
 
     fn try_switch_buffer(&mut self) {
+        let g = range_event_start!("Try switch staging buffer");
         let cur_frame = self.frame_counter.current_frame();
         if cur_frame > self.last_frame {
             self.last_frame = cur_frame;
@@ -101,7 +102,7 @@ impl TrippleAutoStaging {
                 2 => &mut self.s3,
                 _ => unreachable!(),
             };
-            
+
             for buffer in buffers {
                 if buffer.try_unfreeze(last_waited).is_none() {
                     panic!("Failed to unfreeze staging buffer");
@@ -119,21 +120,22 @@ impl TrippleAutoStaging {
             2 => &mut self.s3,
             _ => unreachable!(),
         };
-        
+
         for buffer in buffers.iter_mut() {
             if let Some(range) = buffer.try_freeze(size) {
                 return range;
             }
         }
-        
+
         // need to allocate a new buffer, keep allocating double the size until it fits
         let mut new_size = buffers.last().as_ref().unwrap().len();
         loop {
             new_size *= 2;
-            
+
+            let g = range_event_start!("Allocate new staging buffer, twice the size");
             let buffer = allocator.new_staging_buffer(new_size as u64);
             buffers.push(buffer);
-            
+
             if let Some(range) = buffers.last_mut().unwrap().try_freeze(size) {
                 return range;
             }
