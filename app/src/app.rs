@@ -201,14 +201,14 @@ impl App {
                         }).unwrap();
                     }
 
-                    // // poll UI logic
-                    // self.component.poll(&mut self.layout_calculator);
-                    //
-                    // let size = self.window.inner_size();
-                    // self.layout_calculator.calculate_layout(size.width, size.height);
-                    //
-                    // // take UI elements to render
-                    // let elements = self.layout_calculator.get_elements();
+                    // poll UI logic
+                    self.component.poll(&mut self.layout_calculator);
+
+                    let size = self.window.inner_size();
+                    self.layout_calculator.calculate_layout(size.width, size.height);
+
+                    // take UI elements to render
+                    let elements = self.layout_calculator.get_elements();
                     // convert into primitive elements, fill instance buffer (text -> list of symbols, img/box -> rects)
 
                     self.frame_counter.increment_frame();
@@ -216,6 +216,8 @@ impl App {
                     let _ = self.render_tx.send(RenderMessage::Redraw {
                         bg_color: [0.7, 0.3, 0.9],
                     });
+
+                    self.allocator.destroy_old_resources();
 
                     // handle fps
                     self.frame_cnt += 1;

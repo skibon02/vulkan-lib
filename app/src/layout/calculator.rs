@@ -40,8 +40,8 @@ pub struct ElementCalculated {
 
 #[derive(Copy, Clone)]
 pub enum Phase {
-    Phase1,
-    Phase2
+    ParametricSolve,
+    FixPass,
 }
 
 pub struct LayoutCalculator {
@@ -205,47 +205,49 @@ impl LayoutCalculator {
 
     }
 
-    fn process_child(&mut self, child_i: usize, parents: &[usize], phase: Phase) {
-        if matches!(phase, Phase::Phase1) {
+    fn handle_node(&mut self, child_i: usize, parents: &[usize], phase: Phase) {
+        if matches!(phase, Phase::FixPass) {
             self.process_child_p1(child_i, parents);
         }
     }
 
-    fn finalize_container(&mut self, container_i: usize, phase: Phase) {
-        if matches!(phase, Phase::Phase1) {
+    fn finalize_node(&mut self, container_i: usize, phase: Phase) {
+        if matches!(phase, Phase::ParametricSolve) {
             self.finalize_container_p1(container_i);
         }
     }
 
+
     pub fn calculate_layout(&mut self, width: u32, height: u32) {
+        // reset on each recalculation for now
         for el in self.calculated.iter_mut() {
             *el = Default::default();
         }
         // pass 1: min + self_dep calculation
-        self.dfs(Phase::Phase1);
-        // pass 2: calculate everything else
-        self.dfs(Phase::Phase2);
+        self.dfs(0, Phase::ParametricSolve);
     }
-    pub fn dfs(&mut self, phase: Phase) {
-        let mut parents = vec![0usize];
-        for i in 1..self.elements.len() {
-            let mut last_parent = parents[parents.len() - 1];
+    pub fn dfs(&mut self, first_element: usize, phase: Phase) {
+        let mut parents = vec![first_element];
+        self.handle_node(first_element, &[], phase);
+        for i in first_element+1..self.elements.len() {
+            let mut last_parent = *parents.last().unwrap();
             while self.elements[i].parent_i < last_parent as u32 {
-                self.finalize_container(last_parent, phase);
+                // we just left a container
+                self.finalize_node(last_parent, phase);
                 parents.pop();
-                last_parent = parents[parents.len() - 1];
+                if parents.is_empty() {
+                    return;
+                }
+                last_parent = *parents.last().unwrap();
             }
 
 
-            if last_parent + 1 == i && last_parent != 0 {
-                parents.push(last_parent);
-            }
-
-            self.process_child(i, &parents, phase);
+            self.handle_node(i, &parents, phase);
+            parents.push(i);
         }
 
         while let Some(parent) = parents.pop() {
-            self.finalize_container(parent, phase);
+            self.finalize_node(parent, phase);
         }
     }
 

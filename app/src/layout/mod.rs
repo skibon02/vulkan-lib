@@ -349,19 +349,37 @@ pub struct RowAttributes {
     pub main_size_mode: MainSizeMode,
     pub main_gap_mode: MainGapMode,
     pub main_align: XAlign,
+    /// Sets desire to stretch in cross axis to parent
+    pub cross_stretch: bool,
     pub separator_width: Option<Lu>,
     pub separator_fill: Fill,
     pub children_default: RowChildAttributes,
 }
 
-#[derive(Clone, Debug, Default, AttributeEnum)]
+#[derive(Clone, Debug, AttributeEnum)]
 pub struct ColAttributes {
     pub main_size_mode: MainSizeMode,
     pub main_gap_mode: MainGapMode,
     pub main_align: YAlign,
+    /// Sets desire to stretch in cross axis to parent
+    pub cross_stretch: bool,
     pub separator_width: Option<Lu>,
     pub separator_fill: Fill,
     pub children_default: ColChildAttributes,
+}
+
+impl Default for ColAttributes {
+    fn default() -> Self {
+        Self {
+            main_size_mode: MainSizeMode::default(),
+            main_gap_mode: MainGapMode::default(),
+            main_align: YAlign::default(),
+            cross_stretch: true,
+            separator_width: None,
+            separator_fill: Fill::default(),
+            children_default: ColChildAttributes::default(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, AttributeEnum)]
@@ -380,32 +398,24 @@ struct ChildAttributes {
 
 #[derive(Clone, Debug, AttributeEnum)]
 pub struct RowChildAttributes {
-    pub cross_stretch: bool,
     pub cross_align: YAlign,
-    pub cross_size: Option<Lu>,
 }
 impl Default for RowChildAttributes {
     fn default() -> Self {
         Self {
-            cross_stretch: true,
             cross_align: YAlign::default(),
-            cross_size: None,
         }
     }
 }
 
 #[derive(Clone, Debug, AttributeEnum)]
 pub struct ColChildAttributes {
-    pub cross_stretch: bool,
     pub cross_align: XAlign,
-    pub cross_size: Option<Lu>,
 }
 impl Default for ColChildAttributes {
     fn default() -> Self {
         Self {
-            cross_stretch: true,
             cross_align: XAlign::default(),
-            cross_size: None,
         }
     }
 }
@@ -415,8 +425,6 @@ pub struct StackChildAttributes {
     pub stretch_y: bool,
     pub align_x: XAlign,
     pub align_y: YAlign,
-    pub width: Option<Lu>,
-    pub height: Option<Lu>,
     pub self_dep_mode: SelfDepMode,
 }
 
@@ -427,8 +435,6 @@ impl Default for StackChildAttributes {
             stretch_y: true,
             align_x: XAlign::Center,
             align_y: YAlign::Center,
-            width: None,
-            height: None,
             self_dep_mode: SelfDepMode::FixAxis,
         }
     }
@@ -565,7 +571,7 @@ mod tests {
             AttributeValue::Col(ColValue::MainAlign(YAlign::Top)),
             AttributeValue::Stack(StackValue::SelfDepAxis(SelfDepAxis::YStretch)),
             // Self attributes (is_parent = false)
-            AttributeValue::RowChild(RowChildValue::CrossStretch(false), false),
+            AttributeValue::RowChild(RowChildValue::CrossAlign(YAlign::Top), false),
             AttributeValue::ColChild(ColChildValue::CrossAlign(XAlign::Left), false),
             AttributeValue::StackChild(StackChildValue::StretchX(false), false),
         ];
@@ -597,7 +603,7 @@ mod tests {
         // Check self_child attributes
         assert!(parsed.self_child.is_some());
         let self_child = parsed.self_child.unwrap();
-        assert_eq!(self_child.row.cross_stretch, false);
+        assert!(matches!(self_child.row.cross_align, YAlign::Top));
         assert!(matches!(self_child.col.cross_align, XAlign::Left));
         assert_eq!(self_child.stack.stretch_x, false);
     }
@@ -607,12 +613,12 @@ mod tests {
         // Test that parent flag properly distinguishes parent and self attributes
         let attr_values: AttributeValues = smallvec![
             // Parent attributes (is_parent = true) - go to container.children_default
-            AttributeValue::RowChild(RowChildValue::CrossStretch(false), true),
+            AttributeValue::RowChild(RowChildValue::CrossAlign(YAlign::Bottom), true),
             AttributeValue::ColChild(ColChildValue::CrossAlign(XAlign::Right), true),
             AttributeValue::StackChild(StackChildValue::AlignX(XAlign::Left), true),
             // Self attributes (is_parent = false) - go to self_child field
-            AttributeValue::RowChild(RowChildValue::CrossSize(Some(100)), false),
-            AttributeValue::ColChild(ColChildValue::CrossStretch(false), false),
+            AttributeValue::RowChild(RowChildValue::CrossAlign(YAlign::Top), false),
+            AttributeValue::ColChild(ColChildValue::CrossAlign(XAlign::Left), false),
             AttributeValue::StackChild(StackChildValue::StretchY(false), false),
         ];
 
@@ -621,7 +627,7 @@ mod tests {
         // Check parent attributes - should be in container.children_default
         assert!(parsed.row.is_some());
         let row = parsed.row.unwrap();
-        assert_eq!(row.children_default.cross_stretch, false);
+        assert!(matches!(row.children_default.cross_align, YAlign::Bottom));
 
         assert!(parsed.col.is_some());
         let col = parsed.col.unwrap();
@@ -634,8 +640,8 @@ mod tests {
         // Check self attributes
         assert!(parsed.self_child.is_some());
         let self_child = parsed.self_child.unwrap();
-        assert_eq!(self_child.row.cross_size, Some(100));
-        assert_eq!(self_child.col.cross_stretch, false);
+        assert!(matches!(self_child.row.cross_align, YAlign::Top));
+        assert!(matches!(self_child.col.cross_align, XAlign::Left));
         assert_eq!(self_child.stack.stretch_y, false);
     }
 }

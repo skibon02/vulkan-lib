@@ -1,6 +1,6 @@
 use std::time::Instant;
 use smallvec::smallvec;
-use crate::layout::{AttributeValue, ElementKind, ElementNodeRepr, MainGapMode, RowValue};
+use crate::layout::{AttributeValue, ElementKind, ElementNodeRepr, ImgValue, MainGapMode, RowValue, TextValue, XAlign};
 use crate::layout::calculator::LayoutCalculator;
 
 pub struct Component {
@@ -24,12 +24,12 @@ impl Component {
             ElementNodeRepr {
                 parent_i: 0,
                 element: ElementKind::Img,
-                attributes: smallvec![AttributeValue::Row(RowValue::MainGapMode(MainGapMode::Fixed(100)))],
+                attributes: smallvec![AttributeValue::Img(ImgValue::Resource(String::from("hello.png")))],
             },
             ElementNodeRepr {
                 parent_i: 0,
                 element: ElementKind::Text,
-                attributes: smallvec![AttributeValue::Row(RowValue::MainGapMode(MainGapMode::Fixed(100)))],
+                attributes: smallvec![AttributeValue::Text(TextValue::Oneline(true)), AttributeValue::Text(TextValue::TextAlignX(XAlign::Center))],
             },
         ]);
         self.start_tm = Instant::now();
