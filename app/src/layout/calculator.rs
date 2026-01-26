@@ -2,6 +2,9 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 use std::ops::{Deref, DerefMut};
+use log::{error, info, warn};
+use swash::FontRef;
+use swash::scale::{Render, ScaleContext, Source, StrikeWith};
 use crate::layout::{AttributeValue, Element, ElementKind, ElementNode, ElementNodeRepr, Lu, ParsedAttributes};
 use crate::resources::get_resource;
 use crate::util::read_image_from_bytes;
@@ -128,16 +131,24 @@ impl Images {
     fn load_image(&mut self, src: String) -> &ImageInfo {
         self.entry(src.clone())
             .or_insert_with(|| {
-                let Ok(img_bytes) = get_resource(Path::new("images").join(&src)) else {
-                    return ImageInfo {
-                        aspect: 1.0,
-                        src: ImageSource::OpenError,
-                    };
+                let img_bytes = match get_resource(Path::new("images").join(&src)) {
+                    Ok(bytes) => bytes,
+                    Err(e) => {
+                        warn!("Failed to load image resource '{}': {}", src, e);
+                        return ImageInfo {
+                            aspect: 1.0,
+                            src: ImageSource::OpenError,
+                        }
+                    }
                 };
-                let Ok((img, extent)) = read_image_from_bytes(img_bytes) else {
-                    return ImageInfo {
-                        aspect: 1.0,
-                        src: ImageSource::OpenError,
+                let (img, extent) = match read_image_from_bytes(img_bytes)  {
+                    Ok((img, extent)) => (img, extent),
+                    Err(e) => {
+                        error!("Failed to read image '{}': {}", src, e);
+                        return ImageInfo {
+                            aspect: 1.0,
+                            src: ImageSource::OpenError,
+                        }
                     }
                 };
                 // load image and calculate aspect ratio
@@ -164,6 +175,52 @@ impl DerefMut for Images {
 }
 
 pub struct Fonts(HashMap<String, FontInfo>);
+impl Fonts {
+    pub fn load_font(&mut self, name: String) -> &FontInfo {
+        self.entry(name.clone())
+            .or_insert_with(|| {
+                let font_data = match get_resource(Path::new("fonts").join(&name)) {
+                    Ok(bytes) => bytes,
+                    Err(e) => {
+                        error!("Failed to load font resource '{}': {}", name, e);
+                        return FontInfo {
+                            default_line_height: 16.0,
+                        }
+                    }
+                };
+                let font = match FontRef::from_index(&font_data, 0) {
+                    Some(font) => font,
+                    None => {
+                        error!("Failed to parse font '{}'", name);
+                        return FontInfo {
+                            default_line_height: 16.0,
+                        }
+                    }
+                };
+
+                info!("Loaded font '{}' with attributes: {:?}", name, font.attributes());
+                let mut context = ScaleContext::new();
+                let mut scaler = context.builder(font)
+                    .size(36.0)
+                    .build();
+                let mut font_rnd = Render::new(&[
+                    // Color outline with the first palette
+                    Source::ColorOutline(0),
+                    // Color bitmap with best fit selection mode
+                    Source::ColorBitmap(StrikeWith::BestFit),
+                    // Standard scalable outline
+                    Source::Outline,
+                ]);
+                let glyph = font.charmap().map('ы');
+                let img = font_rnd.format(swash::zeno::Format::Alpha)
+                    .render(&mut scaler, glyph).unwrap();
+
+                FontInfo {
+                    default_line_height: 16.0,
+                }
+            })
+    }
+}
 
 impl Deref for Fonts {
     type Target = HashMap<String, FontInfo>;
