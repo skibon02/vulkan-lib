@@ -7,6 +7,7 @@ pub mod calculator;
 generate_parsed_attributes!();
 
 /// Initial layout structure
+#[derive(Clone, Debug)]
 pub enum Element {
     Col(ColAttributes),
     Row(RowAttributes),
@@ -73,6 +74,7 @@ pub enum AttributeValue {
     General(GeneralValue),
 }
 
+#[derive(Clone, Debug)]
 pub struct ElementNode {
     parent_i: u32,
     next_sibling_i: Option<u32>,
