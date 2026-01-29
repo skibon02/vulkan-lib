@@ -260,6 +260,7 @@ pub enum SelfDepMode {
 
 /// LU = Layout Unit (pixel for now)
 pub type Lu = u32;
+const PX_PER_LU: u32 = 10;
 
 #[derive(Copy, Clone, Debug, AttributeEnum)]
 pub struct GeneralAttributes {
@@ -292,9 +293,18 @@ pub enum FontSize {
     Lu(Lu)
 }
 
+impl FontSize {
+    pub fn with_scale(self, scale: f32) -> f32 {
+        match self {
+            FontSize::Em(em) => em,
+            FontSize::Lu(lu) => lu as f32 * scale
+        }
+    }
+}
+
 #[derive(Clone, Debug, AttributeEnum)]
 pub struct TextAttributes {
-    pub oneline: bool,
+    pub preformat: bool,
     pub hide_overflow: bool,
     pub font_size: FontSize,
     pub font_weight: u16,
@@ -309,7 +319,7 @@ pub struct TextAttributes {
 impl Default for TextAttributes {
     fn default() -> Self {
         Self {
-            oneline: false,
+            preformat: false,
             hide_overflow: false,
             font_size: FontSize::Em(1.0),
             font_weight: 400,
@@ -456,11 +466,11 @@ mod tests {
         // Test From<Vec<*Value>> for *Attributes - should apply each value
         let text_attrs: TextAttributes = vec![
             TextValue::FontSize(FontSize::Em(1.0)),
-            TextValue::Oneline(true),
+            TextValue::Preformat(true),
             TextValue::FontWeight(700),
         ].into();
         assert_eq!(text_attrs.font_size, FontSize::Em(1.0));
-        assert_eq!(text_attrs.oneline, true);
+        assert_eq!(text_attrs.preformat, true);
         assert_eq!(text_attrs.font_weight, 700);
         // Other fields should be default
         assert_eq!(text_attrs.hide_overflow, false);
@@ -478,11 +488,11 @@ mod tests {
         let text_attrs: TextAttributes = vec![
             TextValue::FontSize(FontSize::Em(1.5)),
             TextValue::FontSize(FontSize::Em(2.0)),  // This should win
-            TextValue::Oneline(false),
-            TextValue::Oneline(true),   // This should win
+            TextValue::Preformat(false),
+            TextValue::Preformat(true),   // This should win
         ].into();
         assert_eq!(text_attrs.font_size, FontSize::Em(2.0));
-        assert_eq!(text_attrs.oneline, true);
+        assert_eq!(text_attrs.preformat, true);
     }
 
     #[test]
@@ -511,7 +521,7 @@ mod tests {
         let attr_values: AttributeValues = smallvec![
             AttributeValue::Text(TextValue::FontSize(FontSize::Em(1.0))),
             AttributeValue::General(GeneralValue::Opacity(0.9)),
-            AttributeValue::Text(TextValue::Oneline(true)),
+            AttributeValue::Text(TextValue::Preformat(true)),
             AttributeValue::Text(TextValue::FontWeight(600)),
             AttributeValue::General(GeneralValue::MarginX(10)),
             AttributeValue::General(GeneralValue::MarginY(5)),
@@ -523,7 +533,7 @@ mod tests {
         assert!(parsed.text.is_some());
         let text = parsed.text.unwrap();
         assert_eq!(text.font_size, FontSize::Em(1.0));
-        assert_eq!(text.oneline, true);
+        assert_eq!(text.preformat, true);
         assert_eq!(text.font_weight, 600);
         // Unset field should be default
         assert_eq!(text.hide_overflow, false);
@@ -544,10 +554,10 @@ mod tests {
         // Test that last value wins for duplicate fields
         let attr_values: AttributeValues = smallvec![
             AttributeValue::Text(TextValue::FontSize(FontSize::Em(1.0))),
-            AttributeValue::Text(TextValue::Oneline(false)),
+            AttributeValue::Text(TextValue::Preformat(false)),
             AttributeValue::Text(TextValue::FontSize(FontSize::Em(1.5))),  // Should overwrite previous
             AttributeValue::General(GeneralValue::Opacity(0.5)),
-            AttributeValue::Text(TextValue::Oneline(true)),   // Should overwrite previous
+            AttributeValue::Text(TextValue::Preformat(true)),   // Should overwrite previous
             AttributeValue::General(GeneralValue::Opacity(0.8)), // Should overwrite previous
         ];
 
@@ -555,7 +565,7 @@ mod tests {
 
         let text = parsed.text.unwrap();
         assert_eq!(text.font_size, FontSize::Em(1.5));  // Last value
-        assert_eq!(text.oneline, true);     // Last value
+        assert_eq!(text.preformat, true);     // Last value
 
         let general = parsed.general.unwrap();
         assert_eq!(general.opacity, 0.8);   // Last value

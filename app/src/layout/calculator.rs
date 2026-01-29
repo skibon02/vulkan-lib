@@ -5,38 +5,53 @@ use std::ops::{Deref, DerefMut};
 use log::{error, info, warn};
 use swash::FontRef;
 use swash::scale::{Render, ScaleContext, Source, StrikeWith};
-use crate::layout::{AttributeValue, Element, ElementKind, ElementNode, ElementNodeRepr, Lu, ParsedAttributes};
+use swash::shape::cluster::Glyph;
+use swash::shape::Direction;
+use swash::text::Script;
+use crate::layout::{AttributeValue, Element, ElementKind, ElementNode, ElementNodeRepr, Lu, ParsedAttributes, PX_PER_LU};
 use crate::resources::get_resource;
 use crate::util::read_image_from_bytes;
 
 #[derive(Clone, Debug)]
-#[derive(Default)]
 pub enum SelfDepKind {
-    #[default]
-    Free,
+    Free {stretch_x: bool, stretch_y: bool},
     HeightFromWidth,
     WidthFromHeight,
     Both
 }
 
-#[derive(Clone, Debug)]
+impl Default for SelfDepKind {
+    fn default() -> Self {
+        SelfDepKind::Free{stretch_x: true, stretch_y: true}
+    }
+}
+impl SelfDepKind {
+    pub fn is_free(&self) -> bool {
+        matches!(self, SelfDepKind::Free{..})
+    }
+
+    pub fn stretch_x(&self) -> Option<bool> {
+        match self {
+            SelfDepKind::Free{stretch_x, ..} => Some(*stretch_x),
+            SelfDepKind::Both | SelfDepKind::HeightFromWidth => Some(true),
+            SelfDepKind::WidthFromHeight => Some(false),
+        }
+    }
+
+    pub fn stretch_y(&self) -> Option<bool> {
+        match self {
+            SelfDepKind::Free{stretch_y, ..} => Some(*stretch_y),
+            SelfDepKind::Both | SelfDepKind::WidthFromHeight => Some(true),
+            SelfDepKind::HeightFromWidth => Some(false),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default)]
 struct ParametricSolveState {
     min_width: Lu,
     min_height: Lu,
     self_dep: SelfDepKind,
-    stretch_x: bool,
-    stretch_y: bool,
-}
-impl Default for ParametricSolveState {
-    fn default() -> Self {
-        ParametricSolveState {
-            min_width: 0,
-            min_height: 0,
-            self_dep: SelfDepKind::Free,
-            stretch_x: true,
-            stretch_y: true,
-        }
-    }
 }
 #[derive(Clone, Debug, Default)]
 struct DimFixState {
@@ -179,12 +194,14 @@ impl Fonts {
     pub fn load_font(&mut self, name: String) -> &FontInfo {
         self.entry(name.clone())
             .or_insert_with(|| {
+                static BASIC_FONT: &'static [u8] = include_bytes!("../../fonts/Basic-Regular.ttf");
                 let font_data = match get_resource(Path::new("fonts").join(&name)) {
                     Ok(bytes) => bytes,
                     Err(e) => {
                         error!("Failed to load font resource '{}': {}", name, e);
                         return FontInfo {
                             default_line_height: 16.0,
+                            font_raw: BASIC_FONT.to_vec(),
                         }
                     }
                 };
@@ -194,29 +211,16 @@ impl Fonts {
                         error!("Failed to parse font '{}'", name);
                         return FontInfo {
                             default_line_height: 16.0,
+                            font_raw: BASIC_FONT.to_vec(),
                         }
                     }
                 };
 
                 info!("Loaded font '{}' with attributes: {:?}", name, font.attributes());
-                let mut context = ScaleContext::new();
-                let mut scaler = context.builder(font)
-                    .size(36.0)
-                    .build();
-                let mut font_rnd = Render::new(&[
-                    // Color outline with the first palette
-                    Source::ColorOutline(0),
-                    // Color bitmap with best fit selection mode
-                    Source::ColorBitmap(StrikeWith::BestFit),
-                    // Standard scalable outline
-                    Source::Outline,
-                ]);
-                let glyph = font.charmap().map('ы');
-                let img = font_rnd.format(swash::zeno::Format::Alpha)
-                    .render(&mut scaler, glyph).unwrap();
 
                 FontInfo {
                     default_line_height: 16.0,
+                    font_raw: font_data,
                 }
             })
     }
@@ -252,6 +256,78 @@ impl DerefMut for Texts {
     }
 }
 
+impl Texts {
+    pub fn calculate_layout(&mut self, text_id: u32, font: &FontInfo, size: f32, width_constraint: Option<Lu>) -> TextInfo {
+        let mut text = self.get(&text_id)
+            .cloned()
+            .unwrap_or(TextInfo {
+                value: Arc::from(""),
+                layout_calculated: false,
+                text_height: 0,
+                text_width: 0,
+                glyphs: Vec::new(),
+            });
+
+        if text.layout_calculated {
+            return text;
+        }
+
+        let font = FontRef::from_index(&font.font_raw, 0).unwrap();
+
+        let mut context = swash::shape::ShapeContext::new();
+        let mut shaper = context.builder(font)
+            .script(Script::Common)
+            .direction(Direction::LeftToRight)
+            .size(size)
+            .build();
+
+
+        shaper.add_str(&text.value);
+
+        let metrics = shaper.metrics();
+        let width = metrics.max_width;
+        let line_height = metrics.ascent + metrics.descent + metrics.leading;
+        shaper.shape_with(|cluster| {
+            text.glyphs.extend_from_slice(cluster.glyphs);
+        });
+        text.text_width = (width * PX_PER_LU as f32) as Lu;
+        text.text_height = (line_height * PX_PER_LU as f32) as Lu;
+
+
+        // let mut context = ScaleContext::new();
+        // let mut scaler = context.builder(font)
+        //     .size(36.0)
+        //     .build();
+        // let mut font_rnd = Render::new(&[
+        //     // Color outline with the first palette
+        //     Source::ColorOutline(0),
+        //     // Color bitmap with best fit selection mode
+        //     Source::ColorBitmap(StrikeWith::BestFit),
+        //     // Standard scalable outline
+        //     Source::Outline,
+        // ]);
+
+        // let glyph = font.charmap().map('ы');
+        // let img = font_rnd.format(swash::zeno::Format::Alpha)
+        //     .render(&mut scaler, glyph).unwrap();
+        text
+    }
+
+    pub fn set_text(&mut self, text_id: u32, value: Arc<str>) {
+        self.insert(text_id, TextInfo {
+            value,
+            layout_calculated: false,
+            text_height: 0,
+            text_width: 0,
+            glyphs: Vec::new(),
+        });
+    }
+
+    pub fn remove_text(&mut self, text_id: u32) {
+        self.remove(&text_id);
+    }
+}
+
 pub struct LayoutCalculator {
     elements: Elements,
     calculated: Calculated,
@@ -272,6 +348,7 @@ pub struct ImageInfo {
 }
 
 pub struct FontInfo {
+    font_raw: Vec<u8>,
     default_line_height: f32,
 }
 
@@ -284,6 +361,10 @@ enum ControlFlow {
 #[derive(Clone)]
 pub struct TextInfo {
     value: Arc<str>,
+    layout_calculated: bool,
+    text_height: Lu,
+    text_width: Lu,
+    glyphs: Vec<Glyph>,
 }
 
 impl LayoutCalculator {
@@ -346,9 +427,11 @@ impl LayoutCalculator {
                     me_calc.parametric.self_dep = SelfDepKind::Both;
                 }
                 else {
-                    me_calc.parametric.self_dep = SelfDepKind::Free;
-                    me_calc.parametric.stretch_x = false;
-                    me_calc.parametric.stretch_y = false;
+                    me_calc.parametric.self_dep = SelfDepKind::Free{
+                        stretch_x: false,
+                        stretch_y: false,
+                    };
+
                     if let Some(width) = attrs.width {
                         me_calc.parametric.min_width = width;
                         me_calc.parametric.min_height = (width as f32 * img_info.aspect) as Lu;
@@ -363,12 +446,36 @@ impl LayoutCalculator {
                 }
             },
             Element::Box(attrs) => {
-                me_calc.parametric.self_dep = SelfDepKind::Free;
-                me_calc.parametric.stretch_x = true;
-                me_calc.parametric.stretch_y = true;
+                me_calc.parametric.self_dep = SelfDepKind::Free {
+                    stretch_x: true,
+                    stretch_y: true,
+                };
             }
             Element::Text(attrs) => {
-                
+                if attrs.preformat {
+                    // Solve layout for text without width constraints
+                    let font = self.fonts.load_font(attrs.font.clone());
+                    let size = attrs.font_size.with_scale(1.0);
+                    let text = self.texts.calculate_layout(i as u32, font, size, None);
+
+                    me_calc.parametric.min_height = text.text_height;
+
+                    me_calc.parametric.self_dep = SelfDepKind::Free {
+                        stretch_x: attrs.hide_overflow,
+                        stretch_y: false,
+                    };
+                }
+                else {
+                    if attrs.hide_overflow {
+                        me_calc.parametric.self_dep = SelfDepKind::Free {
+                            stretch_x: true,
+                            stretch_y: true,
+                        };
+                    }
+                    else {
+                        me_calc.parametric.self_dep = SelfDepKind::HeightFromWidth;
+                    }
+                }
             }
             _ => {}
         }

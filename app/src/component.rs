@@ -29,7 +29,7 @@ impl Component {
             ElementNodeRepr {
                 parent_i: 0,
                 element: ElementKind::Text,
-                attributes: smallvec![AttributeValue::Text(TextValue::Oneline(true)), AttributeValue::Text(TextValue::TextAlignX(XAlign::Center))],
+                attributes: smallvec![AttributeValue::Text(TextValue::Preformat(true)), AttributeValue::Text(TextValue::TextAlignX(XAlign::Center))],
             },
         ]);
         self.start_tm = Instant::now();
