@@ -1,49 +1,159 @@
+use std::cmp::max;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 use std::ops::{Deref, DerefMut};
 use log::{error, info, warn};
 use swash::FontRef;
-use swash::scale::{Render, ScaleContext, Source, StrikeWith};
+use swash::scale::{ScaleContext, Source, StrikeWith};
 use swash::shape::cluster::Glyph;
 use swash::shape::Direction;
 use swash::text::Script;
-use crate::layout::{AttributeValue, Element, ElementKind, ElementNode, ElementNodeRepr, Lu, ParsedAttributes, PX_PER_LU};
+use crate::layout::{AttributeValue, Element, ElementKind, ElementNode, ElementNodeRepr, Lu, MainGapMode, MainSizeMode, ParsedAttributes, SelfDepAxis, PX_PER_LU};
 use crate::resources::get_resource;
 use crate::util::read_image_from_bytes;
 
+const ZERO_LENGTH_GUARD: Lu = 20;
+
+pub enum FixAxis {
+    FixWidth,
+    FixHeight,
+    NormalFix,
+}
+
+
+#[derive(Clone, Debug, Default)]
+pub enum SideParametricKind {
+    Fixed,
+    #[default]
+    Stretchable,
+    Dependent,
+}
+
 #[derive(Clone, Debug)]
-pub enum SelfDepKind {
-    Free {stretch_x: bool, stretch_y: bool},
-    HeightFromWidth,
-    WidthFromHeight,
-    Both
+pub enum ParametricKind {
+    Normal {
+        width: SideParametricKind,
+        height: SideParametricKind,
+    },
+    SelfDepBoth {
+        stretch: bool
+    }
 }
 
-impl Default for SelfDepKind {
+impl Default for ParametricKind {
     fn default() -> Self {
-        SelfDepKind::Free{stretch_x: true, stretch_y: true}
+        ParametricKind::Normal {
+            width: SideParametricKind::default(),
+            height: SideParametricKind::default(),
+        }
     }
 }
-impl SelfDepKind {
-    pub fn is_free(&self) -> bool {
-        matches!(self, SelfDepKind::Free{..})
-    }
 
-    pub fn stretch_x(&self) -> Option<bool> {
-        match self {
-            SelfDepKind::Free{stretch_x, ..} => Some(*stretch_x),
-            SelfDepKind::Both | SelfDepKind::HeightFromWidth => Some(true),
-            SelfDepKind::WidthFromHeight => Some(false),
+impl ParametricKind {
+    pub fn width_to_height() -> Self {
+        ParametricKind::Normal {
+            width: SideParametricKind::Stretchable,
+            height: SideParametricKind::Dependent,
         }
     }
 
-    pub fn stretch_y(&self) -> Option<bool> {
-        match self {
-            SelfDepKind::Free{stretch_y, ..} => Some(*stretch_y),
-            SelfDepKind::Both | SelfDepKind::WidthFromHeight => Some(true),
-            SelfDepKind::HeightFromWidth => Some(false),
+    pub fn height_to_width() -> Self {
+        ParametricKind::Normal {
+            width: SideParametricKind::Dependent,
+            height: SideParametricKind::Stretchable,
         }
+    }
+
+    pub fn fixed() -> Self {
+        ParametricKind::Normal {
+            width: SideParametricKind::Fixed,
+            height: SideParametricKind::Fixed,
+        }
+    }
+    pub fn can_fix_width(&self) -> bool {
+        match self {
+            ParametricKind::Normal { width, .. } => matches!(width, SideParametricKind::Stretchable),
+            ParametricKind::SelfDepBoth { .. } => true,
+        }
+    }
+
+    pub fn can_fix_height(&self) -> bool {
+        match self {
+            ParametricKind::Normal { height, .. } => matches!(height, SideParametricKind::Stretchable),
+            ParametricKind::SelfDepBoth { .. } => true,
+        }
+    }
+
+    pub fn is_unidir_selfdep(&self) -> bool {
+        match self {
+            ParametricKind::Normal { width, height } => {
+                matches!(width, SideParametricKind::Dependent) | matches!(height, SideParametricKind::Dependent)
+            }
+            ParametricKind::SelfDepBoth { .. } => false,
+        }
+    }
+
+    pub fn disable_stretch_x(&mut self) -> Option<FixAxis> {
+        match self {
+            ParametricKind::Normal { width, height } => {
+                if matches!(width, SideParametricKind::Stretchable) {
+                    *width = SideParametricKind::Fixed;
+                    match height {
+                        SideParametricKind::Dependent => {
+                            // need fix
+                            *height = SideParametricKind::Fixed;
+                            Some(FixAxis::FixHeight)
+                        }
+                        SideParametricKind::Fixed => {
+                            Some(FixAxis::NormalFix)
+                        }
+                        SideParametricKind::Stretchable => {
+                            None
+                        }
+                    }
+                } else {
+                    None
+                }
+            }
+            ParametricKind::SelfDepBoth { stretch } => {
+                *stretch = false;
+                None
+            }
+        }
+    }
+
+    pub fn disable_stretch_y(&mut self) -> Option<FixAxis> {
+        match self {
+            ParametricKind::Normal { width, height } => {
+                if matches!(height, SideParametricKind::Stretchable) {
+                    *height = SideParametricKind::Fixed;
+                    match width {
+                        SideParametricKind::Dependent => {
+                            // need fix
+                            *width = SideParametricKind::Fixed;
+                            Some(FixAxis::FixWidth)
+                        }
+                        SideParametricKind::Fixed => {
+                            Some(FixAxis::NormalFix)
+                        }
+                        SideParametricKind::Stretchable => {
+                            None
+                        }
+                    }
+                } else {
+                    None
+                }
+            }
+            ParametricKind::SelfDepBoth { stretch } => {
+                *stretch = false;
+                None
+            }
+        }
+    }
+
+    pub fn is_both(&self) -> bool {
+        matches!(self, ParametricKind::SelfDepBoth{..})
     }
 }
 
@@ -51,7 +161,7 @@ impl SelfDepKind {
 struct ParametricSolveState {
     min_width: Lu,
     min_height: Lu,
-    self_dep: SelfDepKind,
+    kind: ParametricKind,
 }
 #[derive(Clone, Debug, Default)]
 struct DimFixState {
@@ -70,8 +180,10 @@ struct PosFixState {
 #[derive(Clone, Debug, Default)]
 struct ElementSizes {
     parametric: ParametricSolveState,
+    post_parametric: ParametricSolveState,
     dim_fix: DimFixState,
     pos_fix: PosFixState,
+    has_problems: bool,
 }
 
 pub struct ElementCalculated {
@@ -412,24 +524,22 @@ impl LayoutCalculator {
         self.elements[element_id as usize].apply(attr);
     }
 
-    /// resources
-
-
+    /// Phase 1: Parametric solve (dfs)
     fn parametric_solve(&mut self, i: usize) {
         // let (me, ref children) = self.elements.children(i);
         let me = &mut self.elements[i];
-        let me_calc = &mut self.calculated[i];
         match &me.element {
             Element::Img(attrs) => {
+                let me_calc = &mut self.calculated[i];
                 let name = attrs.resource.clone();
                 let img_info = self.images.load_image(name);
                 if attrs.height.is_none() && attrs.width.is_none() {
-                    me_calc.parametric.self_dep = SelfDepKind::Both;
+                    me_calc.parametric.kind = ParametricKind::SelfDepBoth { stretch: true };
                 }
                 else {
-                    me_calc.parametric.self_dep = SelfDepKind::Free{
-                        stretch_x: false,
-                        stretch_y: false,
+                    me_calc.parametric.kind = ParametricKind::Normal {
+                        width: SideParametricKind::Fixed,
+                        height: SideParametricKind::Fixed,
                     };
 
                     if let Some(width) = attrs.width {
@@ -446,12 +556,14 @@ impl LayoutCalculator {
                 }
             },
             Element::Box(attrs) => {
-                me_calc.parametric.self_dep = SelfDepKind::Free {
-                    stretch_x: true,
-                    stretch_y: true,
+                let me_calc = &mut self.calculated[i];
+                me_calc.parametric.kind = ParametricKind::Normal {
+                    width: SideParametricKind::Stretchable,
+                    height: SideParametricKind::Stretchable,
                 };
             }
             Element::Text(attrs) => {
+                let me_calc = &mut self.calculated[i];
                 if attrs.preformat {
                     // Solve layout for text without width constraints
                     let font = self.fonts.load_font(attrs.font.clone());
@@ -460,35 +572,129 @@ impl LayoutCalculator {
 
                     me_calc.parametric.min_height = text.text_height;
 
-                    me_calc.parametric.self_dep = SelfDepKind::Free {
-                        stretch_x: attrs.hide_overflow,
-                        stretch_y: false,
+                    me_calc.parametric.kind = ParametricKind::Normal {
+                        width: if attrs.hide_overflow { SideParametricKind::Stretchable } else { SideParametricKind::Fixed },
+                        height: SideParametricKind::Fixed,
                     };
                 }
                 else {
+                    // Deferred layout calculation until width is known
                     if attrs.hide_overflow {
-                        me_calc.parametric.self_dep = SelfDepKind::Free {
-                            stretch_x: true,
-                            stretch_y: true,
+                        me_calc.parametric.kind = ParametricKind::Normal {
+                            width: SideParametricKind::Stretchable,
+                            height: SideParametricKind::Stretchable,
                         };
                     }
                     else {
-                        me_calc.parametric.self_dep = SelfDepKind::HeightFromWidth;
+                        me_calc.parametric.kind = ParametricKind::width_to_height();
                     }
                 }
+            }
+            Element::Row(attrs) => {
+                let grow_en = matches!(attrs.main_size_mode, MainSizeMode::EqualWidth);
+                let gap_en = matches!(attrs.main_gap_mode, MainGapMode::Around | MainGapMode::Between);
+                let cross_stretch_en = attrs.cross_stretch;
+                let (me, children) = self.elements.children(i);
+                self.calculated[i].has_problems = false;
+
+                let has_selfdepx = grow_en && children.clone().any(|(j, _)| !self.calculated[j].post_parametric.kind.can_fix_height() && self.calculated[j].post_parametric.kind.is_unidir_selfdep());
+                let has_selfdepy = children.clone().any(|(j, _)| !self.calculated[j].post_parametric.kind.can_fix_width() && self.calculated[j].post_parametric.kind.is_unidir_selfdep());
+                let main_axis_x = if has_selfdepx && has_selfdepy {
+                    self.calculated[i].has_problems = true;
+                    // Error case: stretchable selfdepX and selfdepY cannot exist in the same container!
+                    true
+                } else if has_selfdepx {
+
+                    true
+                } else if has_selfdepy {
+                    false
+                } else {
+                    true
+                };
             }
             _ => {}
         }
     }
+    fn fix_axis_subtree(&mut self, i: usize, need_fix: FixAxis) {
+        let mut length = match need_fix {
+            FixAxis::FixWidth => self.calculated[i].post_parametric.min_width,
+            FixAxis::FixHeight => self.calculated[i].post_parametric.min_height,
+            FixAxis::NormalFix => self.calculated[i].post_parametric.min_width,
+        };
+        if length == 0 {
+            length = ZERO_LENGTH_GUARD;
+            self.calculated[i].has_problems = true;
+        }
+        match need_fix {
+            FixAxis::FixWidth => {
+                // fix width for selfdepx/selfdepboth subtree rooted at i
+            }
+            FixAxis::FixHeight => {
+                // fix height for selfdepy/selfdepboth subtree rooted at i
+            }
+            FixAxis::NormalFix => {
+                let width = length;
+                let height = self.calculated[i].post_parametric.min_height;
+                if height == 0 {
+                    length = ZERO_LENGTH_GUARD;
+                    self.calculated[i].has_problems = true;
+                }
+
+
+            }
+        }
+    }
     fn apply_general_attrs(&mut self, i: usize) {
+        self.calculated[i].post_parametric = self.calculated[i].parametric.clone();
+        self.calculated[i].post_parametric.min_width = max(self.elements[i].general_attributes.min_width, self.calculated[i].post_parametric.min_width);
+        self.calculated[i].post_parametric.min_height = max(self.elements[i].general_attributes.min_height, self.calculated[i].post_parametric.min_height);
+        if self.elements[i].general_attributes.nostretch_x {
+            if let Some(need_fix) = self.calculated[i].post_parametric.kind.disable_stretch_x() {
+                self.fix_axis_subtree(i, need_fix);
+            }
+        }
+        if self.elements[i].general_attributes.nostretch_y {
+            if let Some(need_fix) = self.calculated[i].post_parametric.kind.disable_stretch_y() {
+                self.fix_axis_subtree(i, need_fix);
+            }
+        }
+
+        if let ParametricKind::SelfDepBoth {stretch} = self.calculated[i].post_parametric.kind {
+            match self.elements[i].general_attributes.self_dep_axis {
+                SelfDepAxis::HeightFromWidth => {
+                    // transform to selfdepx
+                    if stretch {
+                        self.calculated[i].post_parametric.kind = ParametricKind::width_to_height();
+                    }
+                    else {
+                        self.calculated[i].post_parametric.kind = ParametricKind::fixed();
+                        self.fix_axis_subtree(i, FixAxis::FixWidth);
+                    }
+                }
+                SelfDepAxis::WidthFromHeight => {
+                    // transform to selfdepy
+                    if stretch {
+                        self.calculated[i].post_parametric.kind = ParametricKind::height_to_width();
+                    }
+                    else {
+                        self.calculated[i].post_parametric.kind = ParametricKind::fixed();
+                        self.fix_axis_subtree(i, FixAxis::FixHeight);
+                    }
+                }
+                SelfDepAxis::Both => {}
+            }
+
+        }
     }
 
     fn handle_node(&mut self, i: usize, parents: &[usize], phase: Phase) -> ControlFlow {
-        if matches!(phase, Phase::FixPass) {
-            ControlFlow::Continue
-        }
-        else {
-            ControlFlow::Continue
+        match phase {
+            Phase::ParametricSolve => {
+                ControlFlow::Continue
+            }
+            Phase::FixPass => {
+                ControlFlow::Continue
+            }
         }
     }
 

@@ -228,7 +228,6 @@ impl Default for Fill {
 
 #[derive(Copy, Clone, Debug, Default)]
 pub enum MainSizeMode {
-    EqualGrow,
     #[default]
     EqualWidth,
     Min
@@ -245,9 +244,10 @@ pub enum MainGapMode {
 
 #[derive(Copy, Clone, Debug, Default)]
 pub enum SelfDepAxis {
+    HeightFromWidth,
+    WidthFromHeight,
     #[default]
-    XStretch,
-    YStretch
+    Both
 }
 
 #[derive(Copy, Clone, Debug, Default)]
@@ -270,6 +270,7 @@ pub struct GeneralAttributes {
     pub nostretch_y: bool,
     pub margin_x: Lu,
     pub margin_y: Lu,
+    pub self_dep_axis: SelfDepAxis,
     pub opacity: f32,
 }
 
@@ -283,6 +284,7 @@ impl Default for GeneralAttributes {
             margin_x: 0,
             margin_y: 0,
             opacity: 1.0,
+            self_dep_axis: SelfDepAxis::default(),
         }
     }
 }
@@ -396,7 +398,6 @@ impl Default for ColAttributes {
 
 #[derive(Clone, Debug, Default, AttributeEnum)]
 pub struct StackAttributes {
-    pub self_dep_axis: SelfDepAxis,
     pub children_default: StackChildAttributes,
 }
 
@@ -579,9 +580,8 @@ mod tests {
             AttributeValue::Text(TextValue::FontSize(FontSize::Em(1.0))),
             AttributeValue::Img(ImgValue::Width(Some(100))),
             AttributeValue::Box(BoxValue::RoundCorners(Some(5))),
-            AttributeValue::Row(RowValue::MainSizeMode(MainSizeMode::EqualGrow)),
+            AttributeValue::Row(RowValue::MainSizeMode(MainSizeMode::EqualWidth)),
             AttributeValue::Col(ColValue::MainAlign(YAlign::Top)),
-            AttributeValue::Stack(StackValue::SelfDepAxis(SelfDepAxis::YStretch)),
             // Self attributes (is_parent = false)
             AttributeValue::RowChild(RowChildValue::CrossAlign(YAlign::Top), false),
             AttributeValue::ColChild(ColChildValue::CrossAlign(XAlign::Left), false),
@@ -604,13 +604,10 @@ mod tests {
         assert_eq!(parsed.box_attr.unwrap().round_corners, Some(5));
 
         assert!(parsed.row.is_some());
-        assert!(matches!(parsed.row.unwrap().main_size_mode, MainSizeMode::EqualGrow));
+        assert!(matches!(parsed.row.unwrap().main_size_mode, MainSizeMode::EqualWidth));
 
         assert!(parsed.col.is_some());
         assert!(matches!(parsed.col.unwrap().main_align, YAlign::Top));
-
-        assert!(parsed.stack.is_some());
-        assert!(matches!(parsed.stack.unwrap().self_dep_axis, SelfDepAxis::YStretch));
 
         // Check self_child attributes
         assert!(parsed.self_child.is_some());
