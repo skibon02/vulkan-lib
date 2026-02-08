@@ -1,15 +1,16 @@
 use std::cmp::max;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 use std::ops::{Deref, DerefMut};
 use log::{error, info, warn};
-use swash::FontRef;
+use swash::{FontRef, GlyphId};
 use swash::scale::{ScaleContext, Source, StrikeWith};
+use swash::scale::image::Image;
 use swash::shape::cluster::Glyph;
 use swash::shape::Direction;
 use swash::text::Script;
-use crate::layout::{AttributeValue, Element, ElementKind, ElementNode, ElementNodeRepr, Lu, MainGapMode, MainSizeMode, ParsedAttributes, SelfDepAxis, PX_PER_LU};
+use crate::layout::{AttributeValue, Element, ElementKind, ElementNode, ElementNodeRepr, FontFamily, Lu, MainGapMode, MainSizeMode, ParsedAttributes, SelfDepAxis, PX_PER_LU};
 use crate::resources::get_resource;
 use crate::util::read_image_from_bytes;
 
@@ -301,45 +302,53 @@ impl DerefMut for Images {
     }
 }
 
-pub struct Fonts(HashMap<String, FontInfo>);
+pub struct Fonts(HashMap<FontFamily, FontInfo>);
 impl Fonts {
-    pub fn load_font(&mut self, name: String) -> &FontInfo {
+    pub fn load_font(&mut self, name: FontFamily) -> &mut FontInfo {
         self.entry(name.clone())
             .or_insert_with(|| {
+
                 static BASIC_FONT: &'static [u8] = include_bytes!("../../fonts/Basic-Regular.ttf");
-                let font_data = match get_resource(Path::new("fonts").join(&name)) {
-                    Ok(bytes) => bytes,
-                    Err(e) => {
-                        error!("Failed to load font resource '{}': {}", name, e);
-                        return FontInfo {
-                            default_line_height: 16.0,
-                            font_raw: BASIC_FONT.to_vec(),
+                let default_font = FontInfo {
+                    default_line_height: 16.0,
+                    font_raw: BASIC_FONT.to_vec(),
+                    sizes: HashMap::new(),
+                };
+                let font_data = match name.clone() {
+                    FontFamily::Default => {
+                        BASIC_FONT.to_vec()
+                    }
+                    FontFamily::Named(name) => {
+                        match get_resource(Path::new("fonts").join(&*name.clone())) {
+                            Ok(bytes) => bytes,
+                            Err(e) => {
+                                error!("Failed to load font resource '{}': {}", name, e);
+                                return default_font;
+                            }
                         }
                     }
                 };
                 let font = match FontRef::from_index(&font_data, 0) {
                     Some(font) => font,
                     None => {
-                        error!("Failed to parse font '{}'", name);
-                        return FontInfo {
-                            default_line_height: 16.0,
-                            font_raw: BASIC_FONT.to_vec(),
-                        }
+                        error!("Failed to parse font '{:?}'", name);
+                        return default_font;
                     }
                 };
 
-                info!("Loaded font '{}' with attributes: {:?}", name, font.attributes());
+                info!("Loaded font '{:?}' with attributes: {:?}", name, font.attributes());
 
                 FontInfo {
                     default_line_height: 16.0,
                     font_raw: font_data,
+                    sizes: HashMap::new(),
                 }
             })
     }
 }
 
 impl Deref for Fonts {
-    type Target = HashMap<String, FontInfo>;
+    type Target = HashMap<FontFamily, FontInfo>;
 
     fn deref(&self) -> &Self::Target {
         &self.0
@@ -369,41 +378,70 @@ impl DerefMut for Texts {
 }
 
 impl Texts {
-    pub fn calculate_layout(&mut self, text_id: u32, font: &FontInfo, size: f32, width_constraint: Option<Lu>) -> TextInfo {
-        let mut text = self.get(&text_id)
-            .cloned()
-            .unwrap_or(TextInfo {
-                value: Arc::from(""),
-                layout_calculated: false,
-                text_height: 0,
-                text_width: 0,
-                glyphs: Vec::new(),
-            });
+    /// calculate glyphs placement for text and font.
+    /// After this call, width and height are guaranteed to be valid
+    pub fn calculate_layout(&mut self, text_id: u32,
+                            font: &mut FontInfo, font_name: FontFamily, size: f32, width_constraint: Option<Lu>) -> &mut TextInfo {
+        let text = self.entry(text_id)
+            .or_default();
 
-        if text.layout_calculated {
+        let new_cache = TextInfoCache::new(font_name.clone(), size, width_constraint);
+        if text.calculated_cache.as_ref() == Some(&new_cache) {
             return text;
         }
+        text.calculated_cache = Some(new_cache);
 
+        // <- need to recalculate glyphs layout
         let font = FontRef::from_index(&font.font_raw, 0).unwrap();
 
         let mut context = swash::shape::ShapeContext::new();
-        let mut shaper = context.builder(font)
-            .script(Script::Common)
-            .direction(Direction::LeftToRight)
-            .size(size)
-            .build();
+        let mut y_pos = 0.0;
+        let mut glyphs = Vec::new();
+        let mut font_glyphs = HashSet::new();
+        let mut max_width = 0.0;
+        for line in text.value.lines() {
+            let mut shaper = context.builder(font)
+                .script(Script::Common)
+                .direction(Direction::LeftToRight)
+                .size(size)
+                .build();
+
+            shaper.add_str(line);
+
+            let metrics = shaper.metrics();
+            let line_height = metrics.ascent + metrics.descent + metrics.leading;
+            let mut x_pos = 0.0;
+            shaper.shape_with(|cluster| {
+                for g in cluster.glyphs {
+                    glyphs.push(TextGlyph {
+                        font: font_name.clone(),
+                        glyph: g.id,
+                        x: x_pos + g.x,
+                        y: y_pos + g.y,
+                    });
+
+                    font_glyphs.insert(g.id);
+
+                    x_pos += g.advance;
+                    if let Some(max_w) = width_constraint && x_pos * PX_PER_LU as f32 > max_w as f32 {
+                        y_pos += line_height;
+                    }
+                }
+            });
 
 
-        shaper.add_str(&text.value);
+            if x_pos > max_width {
+                max_width = x_pos;
+            }
+            y_pos += line_height;
+        }
 
-        let metrics = shaper.metrics();
-        let width = metrics.max_width;
-        let line_height = metrics.ascent + metrics.descent + metrics.leading;
-        shaper.shape_with(|cluster| {
-            text.glyphs.extend_from_slice(cluster.glyphs);
-        });
-        text.text_width = (width * PX_PER_LU as f32) as Lu;
-        text.text_height = (line_height * PX_PER_LU as f32) as Lu;
+
+
+        text.text_width = (max_width * PX_PER_LU as f32) as Lu;
+        text.text_height = (y_pos * PX_PER_LU as f32) as Lu;
+        text.glyphs = glyphs;
+        text.fonts.insert(font_name.clone(), font_glyphs);
 
 
         // let mut context = ScaleContext::new();
@@ -426,13 +464,11 @@ impl Texts {
     }
 
     pub fn set_text(&mut self, text_id: u32, value: Arc<str>) {
-        self.insert(text_id, TextInfo {
-            value,
-            layout_calculated: false,
-            text_height: 0,
-            text_width: 0,
-            glyphs: Vec::new(),
-        });
+        let mut entry = self.entry(text_id).or_default();
+        if entry.value != value {
+            entry.value = value;
+            entry.calculated_cache = None;
+        }
     }
 
     pub fn remove_text(&mut self, text_id: u32) {
@@ -462,6 +498,19 @@ pub struct ImageInfo {
 pub struct FontInfo {
     font_raw: Vec<u8>,
     default_line_height: f32,
+    sizes: HashMap<f32, FontSizeInfo>
+}
+
+impl FontInfo {
+    /// Ensure all provided glyphs are rendered in `size`, return rendered glyphs
+    pub fn render(&mut self, size: f32, glyphs: impl Iterator<Item=GlyphId>) -> &mut FontSizeInfo {
+        todo!()
+    }
+}
+
+pub struct FontSizeInfo {
+    // map of rendered glyphs for fixed size
+    rendered_glyphs: HashMap<GlyphId, Image>,
 }
 
 #[derive(PartialEq, PartialOrd)]
@@ -471,12 +520,40 @@ enum ControlFlow {
 }
 
 #[derive(Clone)]
+pub struct TextGlyph {
+    font: FontFamily,
+    glyph: GlyphId,
+    x: f32,
+    y: f32,
+}
+
+#[derive(Clone, PartialEq)]
+pub struct TextInfoCache {
+    font: FontFamily,
+    font_size: f32,
+    width_constraint: Option<Lu>,
+}
+
+impl TextInfoCache {
+    pub fn new(font: FontFamily, font_size: f32, width_constraint: Option<Lu>) -> Self {
+        Self {
+            font,
+            font_size,
+            width_constraint
+        }
+    }
+}
+
+
+#[derive(Clone, Default)]
 pub struct TextInfo {
     value: Arc<str>,
-    layout_calculated: bool,
+    // true -> width,height,glyphs are valid for value
+    calculated_cache: Option<TextInfoCache>,
     text_height: Lu,
     text_width: Lu,
-    glyphs: Vec<Glyph>,
+    glyphs: Vec<TextGlyph>,
+    fonts: HashMap<FontFamily, HashSet<GlyphId>>, // additional information which fonts and glyphs are used
 }
 
 impl LayoutCalculator {
@@ -568,9 +645,12 @@ impl LayoutCalculator {
                     // Solve layout for text without width constraints
                     let font = self.fonts.load_font(attrs.font.clone());
                     let size = attrs.font_size.with_scale(1.0);
-                    let text = self.texts.calculate_layout(i as u32, font, size, None);
 
+                    let text = self.texts.calculate_layout(i as u32, font, attrs.font.clone(), size, None);
                     me_calc.parametric.min_height = text.text_height;
+                    if !attrs.hide_overflow {
+                        me_calc.parametric.min_width = text.text_width;
+                    }
 
                     me_calc.parametric.kind = ParametricKind::Normal {
                         width: if attrs.hide_overflow { SideParametricKind::Stretchable } else { SideParametricKind::Fixed },

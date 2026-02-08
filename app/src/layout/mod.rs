@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use smallvec::{SmallVec, smallvec};
 use ui_macro::{AttributeEnum, generate_parsed_attributes};
 
@@ -304,13 +305,25 @@ impl FontSize {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum FontFamily {
+    Named(Arc<str>),
+    Default,
+}
+
 #[derive(Clone, Debug, AttributeEnum)]
 pub struct TextAttributes {
+    /// Disable automatic line breaks, make height fixed
     pub preformat: bool,
+    /// preformat=true:
+    ///     hide right overflow without additional line breaks
+    /// preformat=false:
+    ///     free stretching,
+    ///     insert "..." if text is not fully fit to the parent-dependent container size
     pub hide_overflow: bool,
     pub font_size: FontSize,
     pub font_weight: u16,
-    pub font: String,
+    pub font: FontFamily,
     pub text_align_x: XAlign,
     pub text_align_y: YAlign,
     pub line_height: Option<Lu>,
@@ -325,7 +338,7 @@ impl Default for TextAttributes {
             hide_overflow: false,
             font_size: FontSize::Em(1.0),
             font_weight: 400,
-            font: String::new(),
+            font: FontFamily::Default,
             line_height: None,
             text_align_x: XAlign::default(),
             text_align_y: YAlign::default(),
