@@ -19,7 +19,6 @@ const ZERO_LENGTH_GUARD: Lu = 20;
 pub enum FixAxis {
     FixWidth,
     FixHeight,
-    NormalFix,
 }
 
 
@@ -72,85 +71,97 @@ impl ParametricKind {
             height: SideParametricKind::Fixed,
         }
     }
-    pub fn can_fix_width(&self) -> bool {
+
+    pub fn is_height_to_width(&self) -> bool {
         match self {
-            ParametricKind::Normal { width, .. } => matches!(width, SideParametricKind::Stretchable),
+            ParametricKind::Normal { height: SideParametricKind::Stretchable, width: SideParametricKind::Dependent } => false,
             ParametricKind::SelfDepBoth { .. } => true,
+            _ => false
         }
     }
 
-    pub fn can_fix_height(&self) -> bool {
+    pub fn is_width_to_height(&self) -> bool {
         match self {
-            ParametricKind::Normal { height, .. } => matches!(height, SideParametricKind::Stretchable),
+            ParametricKind::Normal { width: SideParametricKind::Stretchable, height: SideParametricKind::Dependent } => false,
             ParametricKind::SelfDepBoth { .. } => true,
+            _ => false
         }
     }
 
-    pub fn is_unidir_selfdep(&self) -> bool {
+    pub fn is_width_stretch(&self) -> bool {
         match self {
-            ParametricKind::Normal { width, height } => {
-                matches!(width, SideParametricKind::Dependent) | matches!(height, SideParametricKind::Dependent)
-            }
-            ParametricKind::SelfDepBoth { .. } => false,
+            ParametricKind::Normal { width: SideParametricKind::Stretchable, .. } => true,
+            ParametricKind::SelfDepBoth { stretch } => *stretch,
+            _ => false
         }
     }
 
-    pub fn disable_stretch_x(&mut self) -> Option<FixAxis> {
+    pub fn is_height_stretch(&self) -> bool {
         match self {
-            ParametricKind::Normal { width, height } => {
+            ParametricKind::Normal { height: SideParametricKind::Stretchable, .. } => true,
+            ParametricKind::SelfDepBoth { stretch } => *stretch,
+            _ => false
+        }
+    }
+
+    pub fn disable_stretch_x(&mut self, force_fix: bool) -> Option<FixAxis> {
+        match self {
+            ParametricKind::Normal { width, .. } => {
                 if matches!(width, SideParametricKind::Stretchable) {
                     *width = SideParametricKind::Fixed;
-                    match height {
-                        SideParametricKind::Dependent => {
-                            // need fix
-                            *height = SideParametricKind::Fixed;
-                            Some(FixAxis::FixHeight)
-                        }
-                        SideParametricKind::Fixed => {
-                            Some(FixAxis::NormalFix)
-                        }
-                        SideParametricKind::Stretchable => {
-                            None
-                        }
-                    }
+                    Some(FixAxis::FixWidth)
                 } else {
                     None
                 }
             }
             ParametricKind::SelfDepBoth { stretch } => {
-                *stretch = false;
-                None
+                if force_fix {
+                    *self = ParametricKind::Normal {
+                        width: SideParametricKind::Fixed,
+                        height: SideParametricKind::Dependent,
+                    };
+                    Some(FixAxis::FixWidth)
+                }
+                else {
+                    *stretch = false;
+                    None
+                }
             }
         }
     }
 
-    pub fn disable_stretch_y(&mut self) -> Option<FixAxis> {
+    pub fn disable_stretch_y(&mut self, force_fix: bool) -> Option<FixAxis> {
         match self {
-            ParametricKind::Normal { width, height } => {
+            ParametricKind::Normal { height, .. } => {
                 if matches!(height, SideParametricKind::Stretchable) {
                     *height = SideParametricKind::Fixed;
-                    match width {
-                        SideParametricKind::Dependent => {
-                            // need fix
-                            *width = SideParametricKind::Fixed;
-                            Some(FixAxis::FixWidth)
-                        }
-                        SideParametricKind::Fixed => {
-                            Some(FixAxis::NormalFix)
-                        }
-                        SideParametricKind::Stretchable => {
-                            None
-                        }
-                    }
+                    Some(FixAxis::FixHeight)
                 } else {
                     None
                 }
             }
             ParametricKind::SelfDepBoth { stretch } => {
-                *stretch = false;
-                None
+                if force_fix {
+                    *self = ParametricKind::Normal {
+                        width: SideParametricKind::Dependent,
+                        height: SideParametricKind::Fixed,
+                    };
+                    Some(FixAxis::FixHeight)
+                }
+                else {
+                    *stretch = false;
+                    None
+                }
             }
         }
+    }
+
+    pub fn is_x_fixed(&self) -> bool {
+        matches!(self, ParametricKind::Normal { width: SideParametricKind::Fixed, .. })
+    }
+
+    pub fn is_y_fixed(&self) -> bool {
+        matches!(self, ParametricKind::Normal { height: SideParametricKind::Fixed, .. })
     }
 
     pub fn is_both(&self) -> bool {
@@ -185,6 +196,25 @@ struct ElementSizes {
     dim_fix: DimFixState,
     pos_fix: PosFixState,
     has_problems: bool,
+}
+
+impl ElementSizes {
+    pub fn min_width(&self) -> Lu {
+        if self.dim_fix.dim_fixed {
+            self.dim_fix.width
+        }
+        else {
+            self.post_parametric.min_width
+        }
+    }
+    pub fn min_height(&self) -> Lu {
+        if self.dim_fix.dim_fixed {
+            self.dim_fix.height
+        }
+        else {
+            self.post_parametric.min_height
+        }
+    }
 }
 
 pub struct ElementCalculated {
@@ -677,50 +707,79 @@ impl LayoutCalculator {
                 let (me, children) = self.elements.children(i);
                 self.calculated[i].has_problems = false;
 
-                let has_selfdepx = grow_en && children.clone().any(|(j, _)| !self.calculated[j].post_parametric.kind.can_fix_height() && self.calculated[j].post_parametric.kind.is_unidir_selfdep());
-                let has_selfdepy = children.clone().any(|(j, _)| !self.calculated[j].post_parametric.kind.can_fix_width() && self.calculated[j].post_parametric.kind.is_unidir_selfdep());
-                let main_axis_x = if has_selfdepx && has_selfdepy {
+                let has_selfdepx = grow_en && children.clone().any(|(j, _)| self.calculated[j].post_parametric.kind.is_height_to_width());
+                let has_selfdepy = children.clone().any(|(j, _)| !self.calculated[j].post_parametric.kind.is_width_to_height());
+                if has_selfdepx && has_selfdepy {
                     self.calculated[i].has_problems = true;
                     // Error case: stretchable selfdepX and selfdepY cannot exist in the same container!
-                    true
-                } else if has_selfdepx {
 
-                    true
+                } else if has_selfdepx {
+                    // first handle x axis: handle stretch case
+                    let mut total_min_width = 0;
+                    let mut max_height = 0;
+                    for (j, el) in children.clone() {
+                        let min_width = self.calculated[j].min_width();
+                        total_min_width += min_width;
+                        if self.calculated[j].parametric.kind.is_both() {
+                            self.calculated[j].parametric.kind = ParametricKind::width_to_height();
+                        }
+
+                        let min_height = self.calculated[j].min_height();
+                        if min_height > max_height {
+                            max_height = min_height;
+                        }
+                    }
+
+                    self.calculated[i].parametric.min_width = total_min_width;
                 } else if has_selfdepy {
-                    false
                 } else {
-                    true
-                };
+                }
             }
             _ => {}
         }
     }
-    fn fix_axis_subtree(&mut self, i: usize, need_fix: FixAxis) {
-        let mut length = match need_fix {
-            FixAxis::FixWidth => self.calculated[i].post_parametric.min_width,
-            FixAxis::FixHeight => self.calculated[i].post_parametric.min_height,
-            FixAxis::NormalFix => self.calculated[i].post_parametric.min_width,
-        };
+
+    fn process_self_dep(&mut self, i: usize, axis: FixAxis) {
+
+    }
+
+    /// Must be called after disable_stretch_x/y returned Some(_)
+    /// Can make element dep_fixed
+    fn fix_axis_subtree(&mut self, i: usize, mut length: Lu, fix_axis: FixAxis) {
         if length == 0 {
             length = ZERO_LENGTH_GUARD;
             self.calculated[i].has_problems = true;
         }
-        match need_fix {
+        match fix_axis {
             FixAxis::FixWidth => {
-                // fix width for selfdepx/selfdepboth subtree rooted at i
+                self.calculated[i].dim_fix.width = length;
+                match self.calculated[i].post_parametric.kind {
+                    ParametricKind::Normal { height: SideParametricKind::Dependent, ..} => {
+                        self.process_self_dep(i, fix_axis);
+                        // fully fixed
+                        self.calculated[i].dim_fix.dim_fixed = true;
+                    }
+                    ParametricKind::Normal { height: SideParametricKind::Fixed, ..} => {
+                        // fully fixed
+                        self.calculated[i].dim_fix.dim_fixed = true;
+                    }
+                    _ => {}
+                }
             }
             FixAxis::FixHeight => {
-                // fix height for selfdepy/selfdepboth subtree rooted at i
-            }
-            FixAxis::NormalFix => {
-                let width = length;
-                let height = self.calculated[i].post_parametric.min_height;
-                if height == 0 {
-                    length = ZERO_LENGTH_GUARD;
-                    self.calculated[i].has_problems = true;
+                self.calculated[i].dim_fix.height = length;
+                match self.calculated[i].post_parametric.kind {
+                    ParametricKind::Normal { width: SideParametricKind::Dependent, ..} => {
+                        self.process_self_dep(i, fix_axis);
+                        // fully fixed
+                        self.calculated[i].dim_fix.dim_fixed = true;
+                    }
+                    ParametricKind::Normal { width: SideParametricKind::Fixed, ..} => {
+                        // fully fixed
+                        self.calculated[i].dim_fix.dim_fixed = true;
+                    }
+                    _ => {}
                 }
-
-
             }
         }
     }
@@ -729,13 +788,13 @@ impl LayoutCalculator {
         self.calculated[i].post_parametric.min_width = max(self.elements[i].general_attributes.min_width, self.calculated[i].post_parametric.min_width);
         self.calculated[i].post_parametric.min_height = max(self.elements[i].general_attributes.min_height, self.calculated[i].post_parametric.min_height);
         if self.elements[i].general_attributes.nostretch_x {
-            if let Some(need_fix) = self.calculated[i].post_parametric.kind.disable_stretch_x() {
-                self.fix_axis_subtree(i, need_fix);
+            if let Some(need_fix) = self.calculated[i].post_parametric.kind.disable_stretch_x(false) {
+                self.fix_axis_subtree(i, self.calculated[i].post_parametric.min_width, need_fix);
             }
         }
         if self.elements[i].general_attributes.nostretch_y {
-            if let Some(need_fix) = self.calculated[i].post_parametric.kind.disable_stretch_y() {
-                self.fix_axis_subtree(i, need_fix);
+            if let Some(need_fix) = self.calculated[i].post_parametric.kind.disable_stretch_y(false) {
+                self.fix_axis_subtree(i, self.calculated[i].post_parametric.min_height, need_fix);
             }
         }
 
@@ -747,8 +806,8 @@ impl LayoutCalculator {
                         self.calculated[i].post_parametric.kind = ParametricKind::width_to_height();
                     }
                     else {
-                        self.calculated[i].post_parametric.kind = ParametricKind::fixed();
-                        self.fix_axis_subtree(i, FixAxis::FixWidth);
+                        self.calculated[i].post_parametric.kind.disable_stretch_x(true);
+                        self.fix_axis_subtree(i, self.calculated[i].post_parametric.min_width, FixAxis::FixWidth);
                     }
                 }
                 SelfDepAxis::WidthFromHeight => {
@@ -757,8 +816,8 @@ impl LayoutCalculator {
                         self.calculated[i].post_parametric.kind = ParametricKind::height_to_width();
                     }
                     else {
-                        self.calculated[i].post_parametric.kind = ParametricKind::fixed();
-                        self.fix_axis_subtree(i, FixAxis::FixHeight);
+                        self.calculated[i].post_parametric.kind.disable_stretch_y(true);
+                        self.fix_axis_subtree(i, self.calculated[i].post_parametric.min_height, FixAxis::FixHeight);
                     }
                 }
                 SelfDepAxis::Both => {}
