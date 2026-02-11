@@ -22,7 +22,7 @@ pub enum FixAxis {
 }
 
 
-#[derive(Clone, Debug, Default)]
+#[derive(Copy, Clone, Debug, Default)]
 pub enum SideParametricKind {
     Fixed,
     #[default]
@@ -30,7 +30,7 @@ pub enum SideParametricKind {
     Dependent,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Copy)]
 pub enum ParametricKind {
     Normal {
         width: SideParametricKind,
@@ -714,15 +714,53 @@ impl LayoutCalculator {
                     // Error case: stretchable selfdepX and selfdepY cannot exist in the same container!
 
                 } else if has_selfdepx {
+                    // get rid of selfdepboth
+                    for (j, el) in children.clone() {
+                        if self.calculated[j].parametric.kind.is_both() {
+                            self.calculated[j].parametric.kind = ParametricKind::width_to_height();
+                        }
+                    }
+                    if grow_en {
+                        // fast path: fix selfdepx elements by min width
+                        let mut total_min_width = 0;
+                        let mut max_height = 0;
+                        for (j, el) in children.clone() {
+                            let (width, height) = if self.calculated[j].dim_fix.dim_fixed {
+                                (self.calculated[j].dim_fix.width, self.calculated[j].dim_fix.height)
+                            }
+                            else {
+                                match self.calculated[j].post_parametric.kind {
+                                    ParametricKind::Normal { width, height } => {
+                                        match width {
+                                            SideParametricKind::Fixed => {
+
+                                            }
+                                            SideParametricKind::Stretchable => {
+
+                                            }
+                                            SideParametricKind::Dependent => unreachable!(),
+                                        }
+                                    }
+                                    ParametricKind::SelfDepBoth { stretch } => {
+
+                                    }
+                                }
+                            };
+                            total_min_width += width;
+                            if height > max_height {
+                                max_height = height;
+                            }
+                        }
+
+                        self.calculated[i].parametric.min_width = total_min_width;
+                        self.calculated[i].parametric.min_height = max_height;
+                    }
                     // first handle x axis: handle stretch case
                     let mut total_min_width = 0;
                     let mut max_height = 0;
                     for (j, el) in children.clone() {
                         let min_width = self.calculated[j].min_width();
                         total_min_width += min_width;
-                        if self.calculated[j].parametric.kind.is_both() {
-                            self.calculated[j].parametric.kind = ParametricKind::width_to_height();
-                        }
 
                         let min_height = self.calculated[j].min_height();
                         if min_height > max_height {
@@ -731,6 +769,7 @@ impl LayoutCalculator {
                     }
 
                     self.calculated[i].parametric.min_width = total_min_width;
+                    self.calculated[i].parametric.min_height = max_height;
                 } else if has_selfdepy {
                 } else {
                 }
