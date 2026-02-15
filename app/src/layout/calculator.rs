@@ -183,8 +183,6 @@ struct DimFixState {
 }
 #[derive(Clone, Debug, Default)]
 struct PosFixState {
-    // pub rel_pos_x: Lu,
-    // pub rel_pos_y: Lu,
     pos_x: Lu,
     pos_y: Lu,
 }
@@ -193,6 +191,7 @@ struct PosFixState {
 struct ElementSizes {
     parametric: ParametricSolveState,
     post_parametric: ParametricSolveState,
+    parent_parametric: ParametricSolveState,
     dim_fix: DimFixState,
     pos_fix: PosFixState,
     has_problems: bool,
