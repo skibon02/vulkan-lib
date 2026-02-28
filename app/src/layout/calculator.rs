@@ -574,6 +574,8 @@ impl LayoutCalculator {
 
     /// Phase 1.1: Parametric solve (dfs)
     /// fill in *.parametric, probably make subtree fix
+    /// fill in all children.parent_parametric (if not fixed), probably make subtree fix
+    /// Call guarantee: children are post-general solved or fixed. Current element is not solved
     fn parametric_solve(&mut self, i: usize) {
         // let (me, ref children) = self.elements.children(i);
         let me = &mut self.elements[i];
@@ -722,7 +724,7 @@ impl LayoutCalculator {
 
     /// Phase 1.2: Apply general attributes
     /// fill in *.post_parametric, probably make subtree fix
-    /// Call guarantee: parametric is not fixed
+    /// Call guarantee: parametric solved, not fixed
     fn apply_general_attrs(&mut self, i: usize) {
         self.calculated[i].post_parametric = self.calculated[i].parametric.clone();
         self.calculated[i].post_parametric.min_width = max(self.elements[i].general_attributes.min_width, self.calculated[i].post_parametric.min_width);
@@ -777,29 +779,11 @@ impl LayoutCalculator {
         }
     }
 
-    /// Phase 1.3: Apply parent constraints
-    /// fill in *.parent_parametric, probably make subtree fix
-    /// Call guarantee: post parametric is not fixed
-    fn apply_parent_constraints(&mut self, i: usize) {
-        self.calculated[i].parent_parametric = self.calculated[i].post_parametric.clone();
-        let (me, children) = self.elements.children(i);
-        match &mut me.element {
-            Element::Row(attrs) => {
-                let grow_en = matches!(attrs.main_size_mode, MainSizeMode::EqualWidth);
-                if !grow_en {
-                    // fix width for all children
-                    for (j, children) in children.clone() {
-                        // if self.calculated[j].
-                    }
-                }
+    /// Phase 2: Normal flow subtree fix.
+    /// Call guarantee: fix dimensions are provided for element i, matching parametric solve ranges.
+    /// Result: specify fix dimensions for all direct children, maybe update some internal positioning information.
+    fn fix_subtree(&mut self, i: usize) {
 
-                let cross_stretch_en = attrs.cross_stretch;
-                if !cross_stretch_en {
-                    // fix height for all children
-                }
-            }
-            _ => {}
-        }
     }
 
     /// Fix element axis subtree with length guard. Recursively spawn DFS if fully fix.
