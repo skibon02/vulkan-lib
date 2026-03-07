@@ -248,11 +248,11 @@ pub enum SelfDepAxis {
     HeightFromWidth,
     WidthFromHeight,
     #[default]
-    Both
+    Auto
 }
 
 #[derive(Copy, Clone, Debug, Default)]
-pub enum SelfDepMode {
+pub enum ProportionalMode {
     #[default]
     FixAxis,
     Cover,
@@ -447,21 +447,19 @@ impl Default for ColChildAttributes {
 }
 #[derive(Clone, Debug, AttributeEnum)]
 pub struct StackChildAttributes {
-    pub stretch_x: bool,
-    pub stretch_y: bool,
     pub align_x: XAlign,
     pub align_y: YAlign,
-    pub self_dep_mode: SelfDepMode,
+    pub proportional_mode: ProportionalMode,
+    pub self_dep_axis: SelfDepAxis,
 }
 
 impl Default for StackChildAttributes {
     fn default() -> Self {
         Self {
-            stretch_x: true,
-            stretch_y: true,
             align_x: XAlign::Center,
             align_y: YAlign::Center,
-            self_dep_mode: SelfDepMode::FixAxis,
+            proportional_mode: ProportionalMode::FixAxis,
+            self_dep_axis: SelfDepAxis::default(),
         }
     }
 }
@@ -598,7 +596,6 @@ mod tests {
             // Self attributes (is_parent = false)
             AttributeValue::RowChild(RowChildValue::CrossAlign(YAlign::Top), false),
             AttributeValue::ColChild(ColChildValue::CrossAlign(XAlign::Left), false),
-            AttributeValue::StackChild(StackChildValue::StretchX(false), false),
         ];
 
         let parsed: ParsedAttributes = attr_values.into();
@@ -627,7 +624,6 @@ mod tests {
         let self_child = parsed.self_child.unwrap();
         assert!(matches!(self_child.row.cross_align, YAlign::Top));
         assert!(matches!(self_child.col.cross_align, XAlign::Left));
-        assert_eq!(self_child.stack.stretch_x, false);
     }
 
     #[test]
@@ -641,7 +637,6 @@ mod tests {
             // Self attributes (is_parent = false) - go to self_child field
             AttributeValue::RowChild(RowChildValue::CrossAlign(YAlign::Top), false),
             AttributeValue::ColChild(ColChildValue::CrossAlign(XAlign::Left), false),
-            AttributeValue::StackChild(StackChildValue::StretchY(false), false),
         ];
 
         let parsed: ParsedAttributes = attr_values.into();
@@ -664,6 +659,5 @@ mod tests {
         let self_child = parsed.self_child.unwrap();
         assert!(matches!(self_child.row.cross_align, YAlign::Top));
         assert!(matches!(self_child.col.cross_align, XAlign::Left));
-        assert_eq!(self_child.stack.stretch_y, false);
     }
 }

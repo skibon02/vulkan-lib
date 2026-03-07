@@ -14,6 +14,8 @@ use crate::layout::{AttributeValue, Element, ElementKind, ElementNode, ElementNo
 use crate::resources::get_resource;
 use crate::util::read_image_from_bytes;
 
+mod elements;
+
 const ZERO_LENGTH_GUARD: Lu = 20;
 
 pub enum FixAxis {
@@ -44,7 +46,8 @@ pub enum ParametricKind {
         height: SideParametricKind,
     },
     SelfDepBoth {
-        stretch: bool
+        stretch: bool,
+        proportional: bool,
     }
 }
 
@@ -279,7 +282,7 @@ impl Fonts {
         self.entry(name.clone())
             .or_insert_with(|| {
 
-                static BASIC_FONT: &'static [u8] = include_bytes!("../../fonts/Basic-Regular.ttf");
+                static BASIC_FONT: &'static [u8] = include_bytes!("../../../fonts/Basic-Regular.ttf");
                 let default_font = FontInfo {
                     default_line_height: 16.0,
                     font_raw: BASIC_FONT.to_vec(),
@@ -577,148 +580,32 @@ impl LayoutCalculator {
     /// fill in all children.parent_parametric (if not fixed), probably make subtree fix
     /// Call guarantee: children are post-general solved or fixed. Current element is not solved
     fn parametric_solve(&mut self, i: usize) {
-        // let (me, ref children) = self.elements.children(i);
         let me = &mut self.elements[i];
         match &me.element {
             Element::Img(attrs) => {
-                let me_calc = &mut self.calculated[i];
-                let name = attrs.resource.clone();
-                let img_info = self.images.load_image(name);
-                if attrs.height.is_none() && attrs.width.is_none() {
-                    me_calc.parametric.kind = ParametricKind::SelfDepBoth { stretch: true };
-                }
-                else {
-                    me_calc.parametric.kind = ParametricKind::Normal {
-                        width: SideParametricKind::Fixed,
-                        height: SideParametricKind::Fixed,
-                    };
-
-                    if let Some(width) = attrs.width {
-                        me_calc.parametric.min_width = width;
-                        me_calc.parametric.min_height = (width as f32 * img_info.aspect) as Lu;
-                    }
-                    else if let Some(height) = attrs.height {
-                        me_calc.parametric.min_height = height;
-                        me_calc.parametric.min_width = (height as f32 / img_info.aspect) as Lu;
-                    }
-                    else {
-                        unreachable!()
-                    }
-
-                    // set dim fixed
-                    me_calc.post_parametric = me_calc.parametric.clone();
-                    me_calc.parent_parametric = me_calc.parametric.clone();
-                    me_calc.dim_fix.width = Some(me_calc.parametric.min_width);
-                    me_calc.dim_fix.height = Some(me_calc.parametric.min_height);
-                    me_calc.dim_fix.processed = true;
-                }
+                self.calculated[i].parametric = elements::img::parametric_solve(attrs, &mut self.images);
             },
             Element::Box(attrs) => {
-                let me_calc = &mut self.calculated[i];
-                me_calc.parametric.kind = ParametricKind::Normal {
-                    width: SideParametricKind::Stretchable,
-                    height: SideParametricKind::Stretchable,
-                };
+                self.calculated[i].parametric = elements::box_el::parametric_solve(attrs);
             }
             Element::Text(attrs) => {
-                let me_calc = &mut self.calculated[i];
-                if attrs.preformat {
-                    // Solve layout for text without width constraints
-                    let font = self.fonts.load_font(attrs.font.clone());
-                    let size = attrs.font_size.with_scale(1.0);
-
-                    let text = self.texts.calculate_layout(i as u32, font, attrs.font.clone(), size, None);
-                    me_calc.parametric.min_height = text.text_height;
-                    if !attrs.hide_overflow {
-                        me_calc.parametric.min_width = text.text_width;
-                    }
-
-                    me_calc.parametric.kind = ParametricKind::Normal {
-                        width: if attrs.hide_overflow { SideParametricKind::Stretchable } else { SideParametricKind::Fixed },
-                        height: SideParametricKind::Fixed,
-                    };
-                }
-                else {
-                    // Deferred layout calculation until width is known
-                    if attrs.hide_overflow {
-                        me_calc.parametric.kind = ParametricKind::Normal {
-                            width: SideParametricKind::Stretchable,
-                            height: SideParametricKind::Stretchable,
-                        };
-                    }
-                    else {
-                        me_calc.parametric.kind = ParametricKind::width_to_height();
-                    }
-                }
-
-                if me_calc.parametric.kind.is_fixed() {
-                    // set dim fixed
-                    me_calc.post_parametric = me_calc.parametric.clone();
-                    me_calc.parent_parametric = me_calc.parametric.clone();
-                    me_calc.dim_fix.width = Some(me_calc.parametric.min_width);
-                    me_calc.dim_fix.height = Some(me_calc.parametric.min_height);
-                    me_calc.dim_fix.processed = true;
-                }
+                self.calculated[i].parametric = elements::text::parametric_solve(attrs, i, &mut self.fonts, &mut self.texts)
             }
             Element::Row(attrs) => {
-                // let grow_en = matches!(attrs.main_size_mode, MainSizeMode::EqualWidth);
-                // let gap_en = matches!(attrs.main_gap_mode, MainGapMode::Around | MainGapMode::Between);
-                // let cross_stretch_en = attrs.cross_stretch;
-                // let (me, children) = self.elements.children(i);
-                // self.calculated[i].has_problems = false;
-                //
-                // let has_selfdepx = grow_en && children.clone().any(|(j, _)| self.calculated[j].post_parametric.kind.is_height_to_width());
-                // let has_selfdepy = children.clone().any(|(j, _)| !self.calculated[j].post_parametric.kind.is_width_to_height());
-                // if has_selfdepx && has_selfdepy {
-                //     self.calculated[i].has_problems = true;
-                //     // Error case: stretchable selfdepX and selfdepY cannot exist in the same container!
-                //
-                // } else if has_selfdepx {
-                //     // get rid of selfdepboth
-                //     for (j, el) in children.clone() {
-                //         if self.calculated[j].parametric.kind.is_both() {
-                //             self.calculated[j].parametric.kind = ParametricKind::width_to_height();
-                //         }
-                //     }
-                //     if grow_en {
-                //         // fast path: fix selfdepx elements by min width
-                //         let mut total_min_width = 0;
-                //         let mut max_height = 0;
-                //         for (j, el) in children.clone() {
-                //             let (width, height) = if self.calculated[j].dim_fix.dim_fixed {
-                //                 (self.calculated[j].dim_fix.width, self.calculated[j].dim_fix.height)
-                //             }
-                //             else {
-                //             };
-                //             total_min_width += width;
-                //             if height > max_height {
-                //                 max_height = height;
-                //             }
-                //         }
-                //
-                //         self.calculated[i].parametric.min_width = total_min_width;
-                //         self.calculated[i].parametric.min_height = max_height;
-                //     }
-                //     // first handle x axis: handle stretch case
-                //     let mut total_min_width = 0;
-                //     let mut max_height = 0;
-                //     for (j, el) in children.clone() {
-                //         let min_width = self.calculated[j].min_width();
-                //         total_min_width += min_width;
-                //
-                //         let min_height = self.calculated[j].min_height();
-                //         if min_height > max_height {
-                //             max_height = min_height;
-                //         }
-                //     }
-                //
-                //     self.calculated[i].parametric.min_width = total_min_width;
-                //     self.calculated[i].parametric.min_height = max_height;
-                // } else if has_selfdepy {
-                // } else {
-                // }
+                self.calculated[i].parametric = elements::row::parametric_solve(attrs);
             }
-            _ => {}
+            Element::Col(attrs) => {
+                
+            }
+            Element::Stack(attrs) => {
+                
+            }
+        }
+        if self.calculated[i].parametric.kind.is_fixed() {
+            // set dim fixed
+            self.calculated[i].dim_fix.width = Some(self.calculated[i].parametric.min_width);
+            self.calculated[i].dim_fix.height = Some(self.calculated[i].parametric.min_height);
+            self.calculated[i].dim_fix.processed = true;
         }
     }
 
@@ -774,7 +661,7 @@ impl LayoutCalculator {
                         }
                     }
                 }
-                SelfDepAxis::Both => {}
+                SelfDepAxis::Auto => {}
             }
         }
     }
@@ -901,7 +788,6 @@ impl LayoutCalculator {
             if self.calculated[i].post_parametric.kind.is_fixed() {
                 return;
             }
-            self.apply_parent_constraints(i);
         }
     }
 
