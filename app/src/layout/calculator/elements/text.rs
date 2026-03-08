@@ -1,5 +1,7 @@
 use crate::layout::{BoxAttributes, TextAttributes};
-use crate::layout::calculator::{Fonts, ParametricKind, ParametricSolveState, SideParametricKind, Texts};
+use crate::layout::calculator::{Fonts, ParametricKind, SideParametricKind};
+use crate::layout::calculator::components::element_sizes::ParametricSolveState;
+use crate::layout::calculator::components::text::Texts;
 
 pub fn parametric_solve(attrs: &TextAttributes, i: usize, fonts: &mut Fonts, texts: &mut Texts) -> ParametricSolveState {
     let mut res = ParametricSolveState::default();
@@ -11,9 +13,9 @@ pub fn parametric_solve(attrs: &TextAttributes, i: usize, fonts: &mut Fonts, tex
         let size = attrs.font_size.with_scale(1.0);
 
         let text = texts.calculate_layout(i as u32, font, attrs.font.clone(), size, None);
-        res.min_height = text.text_height;
+        res.min_height = text.height();
         if !attrs.hide_overflow {
-            res.min_width = text.text_width;
+            res.min_width = text.width();
         }
 
         res.kind = ParametricKind::Normal {

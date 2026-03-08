@@ -1,20 +1,14 @@
 use std::cmp::max;
-use std::collections::{HashMap, HashSet};
-use std::path::Path;
-use std::sync::Arc;
-use std::ops::{Deref, DerefMut};
-use log::{error, info, warn};
-use swash::{FontRef, GlyphId};
-use swash::scale::{ScaleContext, Source, StrikeWith};
-use swash::scale::image::Image;
-use swash::shape::cluster::Glyph;
-use swash::shape::Direction;
-use swash::text::Script;
-use crate::layout::{AttributeValue, Element, ElementKind, ElementNode, ElementNodeRepr, FontFamily, Lu, MainGapMode, MainSizeMode, ParsedAttributes, SelfDepAxis, PX_PER_LU};
-use crate::resources::get_resource;
-use crate::util::read_image_from_bytes;
+use std::collections::{HashMap};
+use crate::layout::{AttributeValue, Element, ElementKind, ElementNode, ElementNodeRepr, Lu, ParsedAttributes, SelfDepAxis};
+use crate::layout::calculator::components::element_sizes::{Calculated, ParametricKind};
+use crate::layout::calculator::components::elements::Elements;
+use crate::layout::calculator::components::font::Fonts;
+use crate::layout::calculator::components::image::Images;
+use crate::layout::calculator::components::text::Texts;
 
 mod elements;
+mod components;
 
 const ZERO_LENGTH_GUARD: Lu = 20;
 
@@ -39,127 +33,6 @@ pub enum ParametricStage {
     ParentParametric,
 }
 
-#[derive(Clone, Debug, Copy)]
-pub enum ParametricKind {
-    Normal {
-        width: SideParametricKind,
-        height: SideParametricKind,
-    },
-    SelfDepBoth {
-        stretch: bool,
-        proportional: bool,
-    }
-}
-
-impl Default for ParametricKind {
-    fn default() -> Self {
-        ParametricKind::Normal {
-            width: SideParametricKind::default(),
-            height: SideParametricKind::default(),
-        }
-    }
-}
-
-impl ParametricKind {
-    pub fn width_to_height() -> Self {
-        ParametricKind::Normal {
-            width: SideParametricKind::Stretchable,
-            height: SideParametricKind::Dependent,
-        }
-    }
-
-    pub fn height_to_width() -> Self {
-        ParametricKind::Normal {
-            width: SideParametricKind::Dependent,
-            height: SideParametricKind::Stretchable,
-        }
-    }
-
-    pub fn fixed() -> Self {
-        ParametricKind::Normal {
-            width: SideParametricKind::Fixed,
-            height: SideParametricKind::Fixed,
-        }
-    }
-
-    pub fn is_height_to_width(&self) -> bool {
-        match self {
-            ParametricKind::Normal { height: SideParametricKind::Stretchable, width: SideParametricKind::Dependent } => false,
-            ParametricKind::SelfDepBoth { .. } => true,
-            _ => false
-        }
-    }
-
-    pub fn is_width_to_height(&self) -> bool {
-        match self {
-            ParametricKind::Normal { width: SideParametricKind::Stretchable, height: SideParametricKind::Dependent } => false,
-            ParametricKind::SelfDepBoth { .. } => true,
-            _ => false
-        }
-    }
-
-    pub fn is_fixed(&self) -> bool {
-        matches!(self, ParametricKind::Normal { width: SideParametricKind::Fixed | SideParametricKind::Dependent, height: SideParametricKind::Fixed | SideParametricKind::Dependent })
-    }
-
-    pub fn is_width_stretch(&self) -> bool {
-        match self {
-            ParametricKind::Normal { width: SideParametricKind::Stretchable, .. } => true,
-            ParametricKind::SelfDepBoth { stretch } => *stretch,
-            _ => false
-        }
-    }
-
-    pub fn is_height_stretch(&self) -> bool {
-        match self {
-            ParametricKind::Normal { height: SideParametricKind::Stretchable, .. } => true,
-            ParametricKind::SelfDepBoth { stretch } => *stretch,
-            _ => false
-        }
-    }
-
-    pub fn is_selfdep_both(&self) -> bool {
-        matches!(self, ParametricKind::SelfDepBoth{..})
-    }
-}
-
-#[derive(Clone, Debug, Default)]
-struct ParametricSolveState {
-    min_width: Lu,
-    min_height: Lu,
-    kind: ParametricKind,
-}
-#[derive(Clone, Debug, Default)]
-struct DimFixState {
-    height: Option<Lu>,
-    width: Option<Lu>,
-    processed: bool,
-}
-#[derive(Clone, Debug, Default)]
-struct PosFixState {
-    pos_x: Lu,
-    pos_y: Lu,
-}
-
-#[derive(Clone, Debug, Default)]
-struct ElementSizes {
-    parametric: ParametricSolveState,
-    post_parametric: ParametricSolveState,
-    parent_parametric: ParametricSolveState,
-    dim_fix: DimFixState,
-    pos_fix: PosFixState,
-    has_problems: bool,
-}
-
-impl ElementSizes {
-    pub fn parametric(&mut self, stage: ParametricStage) -> &mut ParametricSolveState {
-        match stage {
-            ParametricStage::Parametric => &mut self.parametric,
-            ParametricStage::PostParametric => &mut self.post_parametric,
-            ParametricStage::ParentParametric => &mut self.parent_parametric,
-        }
-    }
-}
 
 pub struct ElementCalculated {
     id: u32,
@@ -174,280 +47,12 @@ pub enum Phase {
     FixPass,
 }
 
-pub struct Elements(Vec<ElementNode>);
-
-impl Elements {
-    fn children(&mut self, i: usize) -> (&mut ElementNode, impl Iterator<Item = (usize, &ElementNode)> + Clone + '_) {
-        let (before, after) = self.0.split_at_mut(i + 1);
-        let parent = &mut before[i];
-        let after_ref: &[ElementNode] = after;
-
-        let mut next_i = after_ref.get(0)
-            .is_some_and(|e| e.parent_i == i as u32)
-            .then(|| i + 1);
-
-        let children_iter = std::iter::from_fn(move || {
-            let child_i = next_i?;
-            let offset = child_i - i - 1;
-            let node = &after_ref[offset];
-            next_i = node.next_sibling_i.map(|n| n as usize);
-            Some((child_i, node))
-        });
-
-        (parent, children_iter)
-    }
-}
-
-impl Deref for Elements {
-    type Target = Vec<ElementNode>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl DerefMut for Elements {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
-    }
-}
-
-struct Calculated(Vec<ElementSizes>);
-
-impl Deref for Calculated {
-    type Target = Vec<ElementSizes>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl DerefMut for Calculated {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
-    }
-}
-
-pub struct Images(HashMap<String, ImageInfo>);
-impl Images {
-    fn load_image(&mut self, src: String) -> &ImageInfo {
-        self.entry(src.clone())
-            .or_insert_with(|| {
-                let img_bytes = match get_resource(Path::new("images").join(&src)) {
-                    Ok(bytes) => bytes,
-                    Err(e) => {
-                        warn!("Failed to load image resource '{}': {}", src, e);
-                        return ImageInfo {
-                            aspect: 1.0,
-                            src: ImageSource::OpenError,
-                        }
-                    }
-                };
-                let (img, extent) = match read_image_from_bytes(img_bytes)  {
-                    Ok((img, extent)) => (img, extent),
-                    Err(e) => {
-                        error!("Failed to read image '{}': {}", src, e);
-                        return ImageInfo {
-                            aspect: 1.0,
-                            src: ImageSource::OpenError,
-                        }
-                    }
-                };
-                // load image and calculate aspect ratio
-                ImageInfo {
-                    aspect: extent.height as f32 / extent.width as f32,
-                    src: ImageSource::Bytes(img),
-                }
-            })
-    }
-}
-
-impl Deref for Images {
-    type Target = HashMap<String, ImageInfo>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl DerefMut for Images {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
-    }
-}
-
-pub struct Fonts(HashMap<FontFamily, FontInfo>);
-impl Fonts {
-    pub fn load_font(&mut self, name: FontFamily) -> &mut FontInfo {
-        self.entry(name.clone())
-            .or_insert_with(|| {
-
-                static BASIC_FONT: &'static [u8] = include_bytes!("../../../fonts/Basic-Regular.ttf");
-                let default_font = FontInfo {
-                    default_line_height: 16.0,
-                    font_raw: BASIC_FONT.to_vec(),
-                    sizes: HashMap::new(),
-                };
-                let font_data = match name.clone() {
-                    FontFamily::Default => {
-                        BASIC_FONT.to_vec()
-                    }
-                    FontFamily::Named(name) => {
-                        match get_resource(Path::new("fonts").join(&*name.clone())) {
-                            Ok(bytes) => bytes,
-                            Err(e) => {
-                                error!("Failed to load font resource '{}': {}", name, e);
-                                return default_font;
-                            }
-                        }
-                    }
-                };
-                let font = match FontRef::from_index(&font_data, 0) {
-                    Some(font) => font,
-                    None => {
-                        error!("Failed to parse font '{:?}'", name);
-                        return default_font;
-                    }
-                };
-
-                info!("Loaded font '{:?}' with attributes: {:?}", name, font.attributes());
-
-                FontInfo {
-                    default_line_height: 16.0,
-                    font_raw: font_data,
-                    sizes: HashMap::new(),
-                }
-            })
-    }
-}
-
-impl Deref for Fonts {
-    type Target = HashMap<FontFamily, FontInfo>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl DerefMut for Fonts {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
-    }
-}
-
-pub struct Texts(HashMap<u32, TextInfo>);
-
-impl Deref for Texts {
-    type Target = HashMap<u32, TextInfo>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl DerefMut for Texts {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
-    }
-}
-
-impl Texts {
-    /// calculate glyphs placement for text and font.
-    /// After this call, width and height are guaranteed to be valid
-    pub fn calculate_layout(&mut self, text_id: u32,
-                            font: &mut FontInfo, font_name: FontFamily, size: f32, width_constraint: Option<Lu>) -> &mut TextInfo {
-        let text = self.entry(text_id)
-            .or_default();
-
-        let new_cache = TextInfoCache::new(font_name.clone(), size, width_constraint);
-        if text.calculated_cache.as_ref() == Some(&new_cache) {
-            return text;
-        }
-        text.calculated_cache = Some(new_cache);
-
-        // <- need to recalculate glyphs layout
-        let font = FontRef::from_index(&font.font_raw, 0).unwrap();
-
-        let mut context = swash::shape::ShapeContext::new();
-        let mut y_pos = 0.0;
-        let mut glyphs = Vec::new();
-        let mut font_glyphs = HashSet::new();
-        let mut max_width = 0.0;
-        for line in text.value.lines() {
-            let mut shaper = context.builder(font)
-                .script(Script::Common)
-                .direction(Direction::LeftToRight)
-                .size(size)
-                .build();
-
-            shaper.add_str(line);
-
-            let metrics = shaper.metrics();
-            let line_height = metrics.ascent + metrics.descent + metrics.leading;
-            let mut x_pos = 0.0;
-            shaper.shape_with(|cluster| {
-                for g in cluster.glyphs {
-                    glyphs.push(TextGlyph {
-                        font: font_name.clone(),
-                        glyph: g.id,
-                        x: x_pos + g.x,
-                        y: y_pos + g.y,
-                    });
-
-                    font_glyphs.insert(g.id);
-
-                    x_pos += g.advance;
-                    if let Some(max_w) = width_constraint && x_pos * PX_PER_LU as f32 > max_w as f32 {
-                        y_pos += line_height;
-                    }
-                }
-            });
 
 
-            if x_pos > max_width {
-                max_width = x_pos;
-            }
-            y_pos += line_height;
-        }
-
-
-
-        text.text_width = (max_width * PX_PER_LU as f32) as Lu;
-        text.text_height = (y_pos * PX_PER_LU as f32) as Lu;
-        text.glyphs = glyphs;
-        text.fonts.insert(font_name.clone(), font_glyphs);
-
-
-        // let mut context = ScaleContext::new();
-        // let mut scaler = context.builder(font)
-        //     .size(36.0)
-        //     .build();
-        // let mut font_rnd = Render::new(&[
-        //     // Color outline with the first palette
-        //     Source::ColorOutline(0),
-        //     // Color bitmap with best fit selection mode
-        //     Source::ColorBitmap(StrikeWith::BestFit),
-        //     // Standard scalable outline
-        //     Source::Outline,
-        // ]);
-
-        // let glyph = font.charmap().map('ы');
-        // let img = font_rnd.format(swash::zeno::Format::Alpha)
-        //     .render(&mut scaler, glyph).unwrap();
-        text
-    }
-
-    pub fn set_text(&mut self, text_id: u32, value: Arc<str>) {
-        let mut entry = self.entry(text_id).or_default();
-        if entry.value != value {
-            entry.value = value;
-            entry.calculated_cache = None;
-        }
-    }
-
-    pub fn remove_text(&mut self, text_id: u32) {
-        self.remove(&text_id);
-    }
+#[derive(PartialEq, PartialOrd)]
+enum ControlFlow {
+    Continue,
+    SkipChildren,
 }
 
 pub struct LayoutCalculator {
@@ -456,78 +61,6 @@ pub struct LayoutCalculator {
     images: Images,
     fonts: Fonts,
     texts: Texts
-}
-
-pub enum ImageSource {
-    Bytes(Vec<u8>),
-    OpenError,
-}
-
-pub struct ImageInfo {
-    // calculated as height / width
-    aspect: f32,
-    src: ImageSource,
-}
-
-pub struct FontInfo {
-    font_raw: Vec<u8>,
-    default_line_height: f32,
-    sizes: HashMap<f32, FontSizeInfo>
-}
-
-impl FontInfo {
-    /// Ensure all provided glyphs are rendered in `size`, return rendered glyphs
-    pub fn render(&mut self, size: f32, glyphs: impl Iterator<Item=GlyphId>) -> &mut FontSizeInfo {
-        todo!()
-    }
-}
-
-pub struct FontSizeInfo {
-    // map of rendered glyphs for fixed size
-    rendered_glyphs: HashMap<GlyphId, Image>,
-}
-
-#[derive(PartialEq, PartialOrd)]
-enum ControlFlow {
-    Continue,
-    SkipChildren,
-}
-
-#[derive(Clone)]
-pub struct TextGlyph {
-    font: FontFamily,
-    glyph: GlyphId,
-    x: f32,
-    y: f32,
-}
-
-#[derive(Clone, PartialEq)]
-pub struct TextInfoCache {
-    font: FontFamily,
-    font_size: f32,
-    width_constraint: Option<Lu>,
-}
-
-impl TextInfoCache {
-    pub fn new(font: FontFamily, font_size: f32, width_constraint: Option<Lu>) -> Self {
-        Self {
-            font,
-            font_size,
-            width_constraint
-        }
-    }
-}
-
-
-#[derive(Clone, Default)]
-pub struct TextInfo {
-    value: Arc<str>,
-    // true -> width,height,glyphs are valid for value
-    calculated_cache: Option<TextInfoCache>,
-    text_height: Lu,
-    text_width: Lu,
-    glyphs: Vec<TextGlyph>,
-    fonts: HashMap<FontFamily, HashSet<GlyphId>>, // additional information which fonts and glyphs are used
 }
 
 impl LayoutCalculator {
@@ -595,17 +128,17 @@ impl LayoutCalculator {
                 self.calculated[i].parametric = elements::row::parametric_solve(attrs);
             }
             Element::Col(attrs) => {
-                
+                self.calculated[i].parametric = elements::col::parametric_solve(attrs);
             }
             Element::Stack(attrs) => {
-                
+                self.calculated[i].parametric = elements::stack::parametric_solve(attrs);
             }
         }
         if self.calculated[i].parametric.kind.is_fixed() {
             // set dim fixed
-            self.calculated[i].dim_fix.width = Some(self.calculated[i].parametric.min_width);
-            self.calculated[i].dim_fix.height = Some(self.calculated[i].parametric.min_height);
-            self.calculated[i].dim_fix.processed = true;
+            let parametric = self.calculated[i].parametric;
+            self.calculated[i].dim_fix.set_width(parametric.min_width);
+            self.calculated[i].dim_fix.set_height(parametric.min_height);
         }
     }
 
@@ -699,7 +232,7 @@ impl LayoutCalculator {
                     panic!("Assertion failed! width subtree fix called on selfdepboth with stretch enabled!")
                 }
 
-                calculated.dim_fix.width = Some(length);
+                calculated.dim_fix.set_width(length);
                 match &mut calculated.parametric(parametric_stage).kind {
                     ParametricKind::Normal {
                         width,
@@ -736,7 +269,7 @@ impl LayoutCalculator {
                     panic!("Assertion failed! height subtree fix called on selfdepboth with stretch enabled!")
                 }
 
-                calculated.dim_fix.height = Some(length);
+                calculated.dim_fix.set_height(length);
                 match &mut calculated.parametric(parametric_stage).kind {
                     ParametricKind::Normal {
                         width,
@@ -842,124 +375,5 @@ impl LayoutCalculator {
 
     pub fn get_elements(&self) -> Vec<ElementCalculated> {
         vec![]
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::layout::{Element, GeneralAttributes, ChildAttributes};
-
-    fn make_test_node(parent_i: u32, next_sibling_i: Option<u32>) -> ElementNode {
-        ElementNode {
-            parent_i,
-            next_sibling_i,
-            element: Element::Box(Default::default()),
-            general_attributes: GeneralAttributes::default(),
-            self_child_attributes: ChildAttributes::default(),
-        }
-    }
-
-    #[test]
-    fn test_children_no_children() {
-        let mut elements = Elements(vec![
-            make_test_node(0, None),
-        ]);
-
-        let (parent, mut iter) = elements.children(0);
-        assert_eq!(parent.parent_i, 0);
-        assert!(iter.next().is_none());
-    }
-
-    #[test]
-    fn test_children_single_child() {
-        let mut elements = Elements(vec![
-            make_test_node(0, None),      // parent at index 0
-            make_test_node(0, None),      // child at index 1
-        ]);
-
-        let (parent, mut iter) = elements.children(0);
-        assert_eq!(parent.parent_i, 0);
-
-        let (idx, child) = iter.next().unwrap();
-        assert_eq!(idx, 1);
-        assert_eq!(child.parent_i, 0);
-        assert!(iter.next().is_none());
-    }
-
-    #[test]
-    fn test_children_multiple_children() {
-        let mut elements = Elements(vec![
-            make_test_node(0, None),      // parent at index 0
-            make_test_node(0, Some(2)),   // child 1 at index 1
-            make_test_node(0, Some(3)),   // child 2 at index 2
-            make_test_node(0, None),      // child 3 at index 3
-        ]);
-
-        let (parent, mut iter) = elements.children(0);
-        assert_eq!(parent.parent_i, 0);
-
-        let (idx, child) = iter.next().unwrap();
-        assert_eq!(idx, 1);
-        assert_eq!(child.parent_i, 0);
-
-        let (idx, child) = iter.next().unwrap();
-        assert_eq!(idx, 2);
-        assert_eq!(child.parent_i, 0);
-
-        let (idx, child) = iter.next().unwrap();
-        assert_eq!(idx, 3);
-        assert_eq!(child.parent_i, 0);
-
-        assert!(iter.next().is_none());
-    }
-
-    #[test]
-    fn test_children_with_different_parent() {
-        let mut elements = Elements(vec![
-            make_test_node(0, None),      // parent at index 0
-            make_test_node(1, None),      // not a child of 0 (different parent)
-        ]);
-
-        let (parent, mut iter) = elements.children(0);
-        assert_eq!(parent.parent_i, 0);
-
-        assert!(iter.next().is_none());
-    }
-
-    #[test]
-    fn test_children_iterator_is_cloneable() {
-        let mut elements = Elements(vec![
-            make_test_node(0, None),      // parent at index 0
-            make_test_node(0, Some(2)),   // child 1 at index 1
-            make_test_node(0, None),      // child 2 at index 2
-        ]);
-
-        let (_parent, iter) = elements.children(0);
-        let mut iter1 = iter.clone();
-        let mut iter2 = iter.clone();
-
-        assert_eq!(iter1.next().unwrap().0, 1);
-        assert_eq!(iter1.next().unwrap().0, 2);
-        assert!(iter1.next().is_none());
-
-        assert_eq!(iter2.next().unwrap().0, 1);
-        assert_eq!(iter2.next().unwrap().0, 2);
-        assert!(iter2.next().is_none());
-    }
-
-    #[test]
-    fn test_children_parent_mutation() {
-        let mut elements = Elements(vec![
-            make_test_node(0, None),
-            make_test_node(0, None),
-        ]);
-
-        let (parent, mut iter) = elements.children(0);
-        parent.parent_i = 99;
-
-        let (_idx, child) = iter.next().unwrap();
-        assert_eq!(child.parent_i, 0);
-        assert_eq!(parent.parent_i, 99);
     }
 }

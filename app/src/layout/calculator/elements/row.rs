@@ -1,5 +1,5 @@
 use crate::layout::{BoxAttributes, RowAttributes};
-use crate::layout::calculator::ParametricSolveState;
+use crate::layout::calculator::components::element_sizes::ParametricSolveState;
 
 pub fn parametric_solve(attrs: &RowAttributes) -> ParametricSolveState {
     let mut res = ParametricSolveState::default();
