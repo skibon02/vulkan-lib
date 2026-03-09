@@ -1,4 +1,4 @@
-use crate::layout::calculator::{Images, ParametricKind, SideParametricKind};
+use crate::layout::calculator::{Images, ParametricKindState, SideParametricKind};
 use crate::layout::{ImgAttributes, Lu};
 use crate::layout::calculator::components::element_sizes::ParametricSolveState;
 
@@ -8,10 +8,10 @@ pub fn parametric_solve(attrs: &ImgAttributes, images: &mut Images) -> Parametri
     let name = attrs.resource.clone();
     let img_info = images.load_image(name);
     if attrs.height.is_none() && attrs.width.is_none() {
-        res.kind = ParametricKind::SelfDepBoth { stretch: true };
+        res.state = ParametricKindState::SelfDepBoth;
     }
     else {
-        res.kind = ParametricKind::Normal {
+        res.state = ParametricKindState::Normal {
             width: SideParametricKind::Fixed,
             height: SideParametricKind::Fixed,
         };

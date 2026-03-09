@@ -37,85 +37,86 @@ impl ElementSizes {
     }
 }
 #[derive(Clone, Debug, Copy)]
-pub enum ParametricKind {
+pub enum ParametricKindState {
     Normal {
         width: SideParametricKind,
         height: SideParametricKind,
     },
-    SelfDepBoth {
-        stretch: bool,
-    }
+    SelfDepBoth,
 }
 
-impl Default for ParametricKind {
+#[derive(Clone, Debug, Copy, PartialEq)]
+pub enum ParametricKind {
+    NotFixed,
+    Fixed,
+    WidthToHeight,
+    HeightToWidth,
+    SelfDepBoth,
+}
+
+impl Default for ParametricKindState {
     fn default() -> Self {
-        ParametricKind::Normal {
+        ParametricKindState::Normal {
             width: SideParametricKind::default(),
             height: SideParametricKind::default(),
         }
     }
 }
 
-impl ParametricKind {
+impl ParametricKindState {
     pub fn width_to_height() -> Self {
-        ParametricKind::Normal {
+        ParametricKindState::Normal {
             width: SideParametricKind::Stretchable,
             height: SideParametricKind::Dependent,
         }
     }
 
     pub fn height_to_width() -> Self {
-        ParametricKind::Normal {
+        ParametricKindState::Normal {
             width: SideParametricKind::Dependent,
             height: SideParametricKind::Stretchable,
         }
     }
 
     pub fn fixed() -> Self {
-        ParametricKind::Normal {
+        ParametricKindState::Normal {
             width: SideParametricKind::Fixed,
             height: SideParametricKind::Fixed,
         }
     }
 
-    pub fn is_height_to_width(&self) -> bool {
-        match self {
-            ParametricKind::Normal { height: SideParametricKind::Stretchable, width: SideParametricKind::Dependent } => false,
-            ParametricKind::SelfDepBoth { .. } => true,
-            _ => false
-        }
-    }
-
-    pub fn is_width_to_height(&self) -> bool {
-        match self {
-            ParametricKind::Normal { width: SideParametricKind::Stretchable, height: SideParametricKind::Dependent } => false,
-            ParametricKind::SelfDepBoth { .. } => true,
-            _ => false
-        }
-    }
-
     pub fn is_fixed(&self) -> bool {
-        matches!(self, ParametricKind::Normal { width: SideParametricKind::Fixed | SideParametricKind::Dependent, height: SideParametricKind::Fixed | SideParametricKind::Dependent })
+        matches!(self, ParametricKindState::Normal { width: SideParametricKind::Fixed | SideParametricKind::Dependent, height: SideParametricKind::Fixed | SideParametricKind::Dependent })
     }
 
     pub fn is_width_stretch(&self) -> bool {
         match self {
-            ParametricKind::Normal { width: SideParametricKind::Stretchable, .. } => true,
-            ParametricKind::SelfDepBoth { stretch } => *stretch,
+            ParametricKindState::Normal { width: SideParametricKind::Stretchable, .. } => true,
+            ParametricKindState::SelfDepBoth => true,
             _ => false
         }
     }
 
     pub fn is_height_stretch(&self) -> bool {
         match self {
-            ParametricKind::Normal { height: SideParametricKind::Stretchable, .. } => true,
-            ParametricKind::SelfDepBoth { stretch } => *stretch,
+            ParametricKindState::Normal { height: SideParametricKind::Stretchable, .. } => true,
+            ParametricKindState::SelfDepBoth => true,
             _ => false
         }
     }
 
-    pub fn is_selfdep_both(&self) -> bool {
-        matches!(self, ParametricKind::SelfDepBoth{..})
+    pub fn kind(&self) -> ParametricKind {
+        match self {
+            ParametricKindState::Normal { width, height } => {
+                match (width, height) {
+                    (SideParametricKind::Fixed, SideParametricKind::Fixed) => ParametricKind::Fixed,
+                    (SideParametricKind::Stretchable, SideParametricKind::Dependent) => ParametricKind::WidthToHeight,
+                    (SideParametricKind::Dependent, SideParametricKind::Stretchable) => ParametricKind::HeightToWidth,
+                    _ => ParametricKind::NotFixed,
+                }
+            },
+            ParametricKindState::SelfDepBoth => ParametricKind::SelfDepBoth,
+        }
     }
 }
 
@@ -123,7 +124,7 @@ impl ParametricKind {
 pub struct ParametricSolveState {
     pub min_width: Lu,
     pub min_height: Lu,
-    pub kind: ParametricKind,
+    pub state: ParametricKindState,
 }
 #[derive(Clone, Debug, Default)]
 pub struct DimFixState {

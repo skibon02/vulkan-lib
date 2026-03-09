@@ -4,3 +4,7 @@ pub mod text;
 pub mod row;
 pub mod col;
 pub mod stack;
+
+pub enum ParametricSolveChildResult {
+
+}

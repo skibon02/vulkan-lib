@@ -1,7 +1,7 @@
 use std::cmp::max;
 use std::collections::{HashMap};
 use crate::layout::{AttributeValue, Element, ElementKind, ElementNode, ElementNodeRepr, Lu, ParsedAttributes, SelfDepAxis};
-use crate::layout::calculator::components::element_sizes::{Calculated, ParametricKind};
+use crate::layout::calculator::components::element_sizes::{Calculated, ParametricKind, ParametricKindState};
 use crate::layout::calculator::components::elements::Elements;
 use crate::layout::calculator::components::font::Fonts;
 use crate::layout::calculator::components::image::Images;
@@ -134,7 +134,7 @@ impl LayoutCalculator {
                 self.calculated[i].parametric = elements::stack::parametric_solve(attrs);
             }
         }
-        if self.calculated[i].parametric.kind.is_fixed() {
+        if self.calculated[i].parametric.state.is_fixed() {
             // set dim fixed
             let parametric = self.calculated[i].parametric;
             self.calculated[i].dim_fix.set_width(parametric.min_width);
@@ -150,7 +150,7 @@ impl LayoutCalculator {
         self.calculated[i].post_parametric.min_width = max(self.elements[i].general_attributes.min_width, self.calculated[i].post_parametric.min_width);
         self.calculated[i].post_parametric.min_height = max(self.elements[i].general_attributes.min_height, self.calculated[i].post_parametric.min_height);
         if self.elements[i].general_attributes.nostretch_x {
-            if let ParametricKind::SelfDepBoth {stretch} = &mut self.calculated[i].post_parametric.kind {
+            if self.calculated[i].post_parametric.state.kind() == ParametricKind::SelfDepBoth {
                 *stretch = true;
             }
             else if self.try_fix_axis_subtree(i, None, FixAxis::FixWidth, ParametricStage::PostParametric) {
@@ -159,7 +159,7 @@ impl LayoutCalculator {
             }
         }
         if self.elements[i].general_attributes.nostretch_y {
-            if let ParametricKind::SelfDepBoth {stretch} = &mut self.calculated[i].post_parametric.kind {
+            if self.calculated[i].post_parametric.state.kind() == ParametricKind::SelfDepBoth {
                 *stretch = true;
             }
             else if self.try_fix_axis_subtree(i, None, FixAxis::FixHeight, ParametricStage::PostParametric) {
@@ -168,12 +168,12 @@ impl LayoutCalculator {
             }
         }
 
-        if let ParametricKind::SelfDepBoth {stretch} = self.calculated[i].post_parametric.kind {
+        if self.calculated[i].post_parametric.state.kind() == ParametricKind::SelfDepBoth {
             match self.elements[i].general_attributes.self_dep_axis {
                 SelfDepAxis::HeightFromWidth => {
                     if stretch {
                         // <- nostretch_x is not enabled, transform to selfdepx
-                        self.calculated[i].post_parametric.kind = ParametricKind::width_to_height();
+                        self.calculated[i].post_parametric.state = ParametricKindState::width_to_height();
                     }
                     else {
                         // cannot stay selfdepx with stretch disabled - subtree fix
@@ -185,7 +185,7 @@ impl LayoutCalculator {
                 SelfDepAxis::WidthFromHeight => {
                     if stretch {
                         // <- nostretch_y is not enabled, transform to selfdepy
-                        self.calculated[i].post_parametric.kind = ParametricKind::height_to_width();
+                        self.calculated[i].post_parametric.state = ParametricKindState::height_to_width();
                     }
                     else {
                         // cannot stay selfdepy with stretch disabled - subtree fix
@@ -224,17 +224,17 @@ impl LayoutCalculator {
         }
         match fix_axis {
             FixAxis::FixWidth => {
-                if matches!(calculated.parametric(parametric_stage).kind, ParametricKind::Normal { width: SideParametricKind::Dependent | SideParametricKind::Fixed, .. }) {
+                if matches!(calculated.parametric(parametric_stage).state, ParametricKindState::Normal { width: SideParametricKind::Dependent | SideParametricKind::Fixed, .. }) {
                     return false
                 }
 
-                if matches!(calculated.parametric(parametric_stage).kind, ParametricKind::SelfDepBoth { stretch: true }) {
-                    panic!("Assertion failed! width subtree fix called on selfdepboth with stretch enabled!")
+                if calculated.parametric(parametric_stage).state.kind() == ParametricKind::SelfDepBoth {
+                    panic!("Assertion failed! width subtree fix called on selfdepboth!")
                 }
 
                 calculated.dim_fix.set_width(length);
-                match &mut calculated.parametric(parametric_stage).kind {
-                    ParametricKind::Normal {
+                match &mut calculated.parametric(parametric_stage).state {
+                    ParametricKindState::Normal {
                         width,
                         height
                     } => {
@@ -248,10 +248,10 @@ impl LayoutCalculator {
                             true
                         }
                     }
-                    ParametricKind::SelfDepBoth {
+                    ParametricKindState::SelfDepBoth {
                         ..
                     } => {
-                        calculated.parametric(parametric_stage).kind = ParametricKind::Normal {
+                        calculated.parametric(parametric_stage).state = ParametricKindState::Normal {
                             width: SideParametricKind::Fixed,
                             height: SideParametricKind::Dependent,
                         };
@@ -262,16 +262,16 @@ impl LayoutCalculator {
                 }
             }
             FixAxis::FixHeight => {
-                if matches!(calculated.parametric(parametric_stage).kind, ParametricKind::Normal { height: SideParametricKind::Dependent | SideParametricKind::Fixed, .. }) {
+                if matches!(calculated.parametric(parametric_stage).state, ParametricKindState::Normal { height: SideParametricKind::Dependent | SideParametricKind::Fixed, .. }) {
                     return false
                 }
-                if matches!(calculated.parametric(parametric_stage).kind, ParametricKind::SelfDepBoth { stretch: true }) {
+                if calculated.parametric(parametric_stage).state.kind() == ParametricKind::SelfDepBoth {
                     panic!("Assertion failed! height subtree fix called on selfdepboth with stretch enabled!")
                 }
 
                 calculated.dim_fix.set_height(length);
-                match &mut calculated.parametric(parametric_stage).kind {
-                    ParametricKind::Normal {
+                match &mut calculated.parametric(parametric_stage).state {
+                    ParametricKindState::Normal {
                         width,
                         height
                     } => {
@@ -284,10 +284,10 @@ impl LayoutCalculator {
                             true
                         }
                     }
-                    ParametricKind::SelfDepBoth {
+                    ParametricKindState::SelfDepBoth {
                         ..
                     } => {
-                        calculated.parametric(parametric_stage).kind = ParametricKind::Normal {
+                        calculated.parametric(parametric_stage).state = ParametricKindState::Normal {
                             width: SideParametricKind::Dependent,
                             height: SideParametricKind::Fixed,
                         };
@@ -314,11 +314,11 @@ impl LayoutCalculator {
     fn finalize_node(&mut self, i: usize, phase: Phase) {
         if matches!(phase, Phase::ParametricSolve) {
             self.parametric_solve(i);
-            if self.calculated[i].parametric.kind.is_fixed() {
+            if self.calculated[i].parametric.state.is_fixed() {
                 return;
             }
             self.apply_general_attrs(i);
-            if self.calculated[i].post_parametric.kind.is_fixed() {
+            if self.calculated[i].post_parametric.state.is_fixed() {
                 return;
             }
         }

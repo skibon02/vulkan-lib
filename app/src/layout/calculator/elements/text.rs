@@ -1,5 +1,5 @@
 use crate::layout::{BoxAttributes, TextAttributes};
-use crate::layout::calculator::{Fonts, ParametricKind, SideParametricKind};
+use crate::layout::calculator::{Fonts, ParametricKindState, SideParametricKind};
 use crate::layout::calculator::components::element_sizes::ParametricSolveState;
 use crate::layout::calculator::components::text::Texts;
 
@@ -18,7 +18,7 @@ pub fn parametric_solve(attrs: &TextAttributes, i: usize, fonts: &mut Fonts, tex
             res.min_width = text.width();
         }
 
-        res.kind = ParametricKind::Normal {
+        res.state = ParametricKindState::Normal {
             width: if attrs.hide_overflow { SideParametricKind::Stretchable } else { SideParametricKind::Fixed },
             height: SideParametricKind::Fixed,
         };
@@ -26,13 +26,13 @@ pub fn parametric_solve(attrs: &TextAttributes, i: usize, fonts: &mut Fonts, tex
     else {
         // Deferred layout calculation until width is known
         if attrs.hide_overflow {
-            res.kind = ParametricKind::Normal {
+            res.state = ParametricKindState::Normal {
                 width: SideParametricKind::Stretchable,
                 height: SideParametricKind::Stretchable,
             };
         }
         else {
-            res.kind = ParametricKind::width_to_height();
+            res.state = ParametricKindState::width_to_height();
         }
     }
 
