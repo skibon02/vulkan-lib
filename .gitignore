@@ -1,4 +1,6 @@
 target
 app/shaders/compiled
 app/trace
+.toolchain
+.direnv
 trace

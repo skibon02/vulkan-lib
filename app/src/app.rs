@@ -202,13 +202,13 @@ impl App {
                     }
 
                     // poll UI logic
-                    self.component.poll(&mut self.layout_calculator);
+                    //self.component.poll(&mut self.layout_calculator);
 
                     let size = self.window.inner_size();
-                    self.layout_calculator.calculate_layout(size.width, size.height);
+                    //self.layout_calculator.calculate_layout(size.width, size.height);
 
                     // take UI elements to render
-                    let elements = self.layout_calculator.get_elements();
+                    //let elements = self.layout_calculator.get_elements();
                     // convert into primitive elements, fill instance buffer (text -> list of symbols, img/box -> rects)
 
                     self.frame_counter.increment_frame();
