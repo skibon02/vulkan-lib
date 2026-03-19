@@ -10,7 +10,7 @@ use crate::layout::calculator::components::text::Texts;
 mod elements;
 mod components;
 
-const ZERO_LENGTH_GUARD: Lu = 20;
+const ZERO_LENGTH_GUARD: Lu = 200;
 
 pub enum FixAxis {
     FixWidth,
@@ -18,16 +18,17 @@ pub enum FixAxis {
 }
 
 
-#[derive(Copy, Clone, Debug, Default)]
+#[derive(Copy, Clone, Debug, Default, PartialEq)]
 pub enum SideParametricKind {
     Fixed,
     #[default]
-    Stretchable,
+    Free,
     Dependent,
 }
 
-#[derive(Clone, Debug, Copy)]
+#[derive(Default, Clone, Debug, Copy)]
 pub enum ParametricStage {
+    #[default]
     Parametric,
     PostParametric,
     ParentParametric,
@@ -147,54 +148,23 @@ impl LayoutCalculator {
     /// Call guarantee: parametric solved, not fixed
     fn apply_general_attrs(&mut self, i: usize) {
         self.calculated[i].post_parametric = self.calculated[i].parametric.clone();
-        self.calculated[i].post_parametric.min_width = max(self.elements[i].general_attributes.min_width, self.calculated[i].post_parametric.min_width);
-        self.calculated[i].post_parametric.min_height = max(self.elements[i].general_attributes.min_height, self.calculated[i].post_parametric.min_height);
+        self.calculated[i].set_parametric_stage(ParametricStage::PostParametric);
+
+        self.calculated[i].post_parametric.apply_min_width(self.elements[i].general_attributes.min_width);
+        self.calculated[i].post_parametric.apply_min_height(self.elements[i].general_attributes.min_height);
         if self.elements[i].general_attributes.nostretch_x {
-            if self.calculated[i].post_parametric.state.kind() == ParametricKind::SelfDepBoth {
-                *stretch = true;
-            }
-            else if self.try_fix_axis_subtree(i, None, FixAxis::FixWidth, ParametricStage::PostParametric) {
-                self.calculated[i].parent_parametric = self.calculated[i].post_parametric.clone();
-                return;
-            }
-        }
-        if self.elements[i].general_attributes.nostretch_y {
-            if self.calculated[i].post_parametric.state.kind() == ParametricKind::SelfDepBoth {
-                *stretch = true;
-            }
-            else if self.try_fix_axis_subtree(i, None, FixAxis::FixHeight, ParametricStage::PostParametric) {
-                self.calculated[i].parent_parametric = self.calculated[i].post_parametric.clone();
-                return;
+            if self.calculated[i].try_fix_width(None) {
+                self.dfs(i, Phase::FixPass);
+
+                return
             }
         }
 
-        if self.calculated[i].post_parametric.state.kind() == ParametricKind::SelfDepBoth {
-            match self.elements[i].general_attributes.self_dep_axis {
-                SelfDepAxis::HeightFromWidth => {
-                    if stretch {
-                        // <- nostretch_x is not enabled, transform to selfdepx
-                        self.calculated[i].post_parametric.state = ParametricKindState::width_to_height();
-                    }
-                    else {
-                        // cannot stay selfdepx with stretch disabled - subtree fix
-                        if self.try_fix_axis_subtree(i, None, FixAxis::FixWidth, ParametricStage::PostParametric) {
-                            self.calculated[i].parent_parametric = self.calculated[i].post_parametric.clone();
-                        }
-                    }
-                }
-                SelfDepAxis::WidthFromHeight => {
-                    if stretch {
-                        // <- nostretch_y is not enabled, transform to selfdepy
-                        self.calculated[i].post_parametric.state = ParametricKindState::height_to_width();
-                    }
-                    else {
-                        // cannot stay selfdepy with stretch disabled - subtree fix
-                        if self.try_fix_axis_subtree(i, None, FixAxis::FixHeight, ParametricStage::PostParametric) {
-                            self.calculated[i].parent_parametric = self.calculated[i].post_parametric.clone();
-                        }
-                    }
-                }
-                SelfDepAxis::Auto => {}
+        if self.elements[i].general_attributes.nostretch_x {
+            if self.calculated[i].try_fix_width(None) {
+                self.dfs(i, Phase::FixPass);
+
+                return;
             }
         }
     }
@@ -205,101 +175,6 @@ impl LayoutCalculator {
     fn fix_subtree(&mut self, i: usize) {
 
     }
-
-    /// Fix element axis subtree with length guard. Recursively spawn DFS if fully fix.
-    /// If another axis is still stretchable, new fix dfs is not spawned, and false is returned
-    fn try_fix_axis_subtree(&mut self, i: usize, length: Option<Lu>, fix_axis: FixAxis, parametric_stage: ParametricStage) -> bool {
-        let calculated = &mut self.calculated[i];
-
-        let mut length = length.unwrap_or_else(|| {
-            match fix_axis {
-                FixAxis::FixWidth => calculated.parametric(parametric_stage).min_width,
-                FixAxis::FixHeight => calculated.parametric(parametric_stage).min_height,
-            }
-        });
-
-        if length == 0 {
-            length = ZERO_LENGTH_GUARD;
-            calculated.has_problems = true;
-        }
-        match fix_axis {
-            FixAxis::FixWidth => {
-                if matches!(calculated.parametric(parametric_stage).state, ParametricKindState::Normal { width: SideParametricKind::Dependent | SideParametricKind::Fixed, .. }) {
-                    return false
-                }
-
-                if calculated.parametric(parametric_stage).state.kind() == ParametricKind::SelfDepBoth {
-                    panic!("Assertion failed! width subtree fix called on selfdepboth!")
-                }
-
-                calculated.dim_fix.set_width(length);
-                match &mut calculated.parametric(parametric_stage).state {
-                    ParametricKindState::Normal {
-                        width,
-                        height
-                    } => {
-                        *width = SideParametricKind::Fixed;
-                        if matches!(height,  SideParametricKind::Stretchable) {
-                            false
-                        }
-                        else {
-                            // Launch new DFS to fix selfdep subtree with new length constraint
-                            self.dfs(i, Phase::FixPass);
-                            true
-                        }
-                    }
-                    ParametricKindState::SelfDepBoth {
-                        ..
-                    } => {
-                        calculated.parametric(parametric_stage).state = ParametricKindState::Normal {
-                            width: SideParametricKind::Fixed,
-                            height: SideParametricKind::Dependent,
-                        };
-                        // Launch new DFS to fix selfdep subtree with new length constraint
-                        self.dfs(i, Phase::FixPass);
-                        true
-                    }
-                }
-            }
-            FixAxis::FixHeight => {
-                if matches!(calculated.parametric(parametric_stage).state, ParametricKindState::Normal { height: SideParametricKind::Dependent | SideParametricKind::Fixed, .. }) {
-                    return false
-                }
-                if calculated.parametric(parametric_stage).state.kind() == ParametricKind::SelfDepBoth {
-                    panic!("Assertion failed! height subtree fix called on selfdepboth with stretch enabled!")
-                }
-
-                calculated.dim_fix.set_height(length);
-                match &mut calculated.parametric(parametric_stage).state {
-                    ParametricKindState::Normal {
-                        width,
-                        height
-                    } => {
-                        *height = SideParametricKind::Fixed;
-                        if matches!(width,  SideParametricKind::Stretchable) {
-                            false
-                        } else {
-                            // Launch new DFS to fix selfdep subtree with new length constraint
-                            self.dfs(i, Phase::FixPass);
-                            true
-                        }
-                    }
-                    ParametricKindState::SelfDepBoth {
-                        ..
-                    } => {
-                        calculated.parametric(parametric_stage).state = ParametricKindState::Normal {
-                            width: SideParametricKind::Dependent,
-                            height: SideParametricKind::Fixed,
-                        };
-                        // Launch new DFS to fix selfdep subtree with new length constraint
-                        self.dfs(i, Phase::FixPass);
-                        true
-                    }
-                }
-            }
-        }
-    }
-
     fn handle_node(&mut self, i: usize, parents: &[usize], phase: Phase) -> ControlFlow {
         match phase {
             Phase::ParametricSolve => {

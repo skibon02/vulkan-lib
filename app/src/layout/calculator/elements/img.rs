@@ -8,10 +8,13 @@ pub fn parametric_solve(attrs: &ImgAttributes, images: &mut Images) -> Parametri
     let name = attrs.resource.clone();
     let img_info = images.load_image(name);
     if attrs.height.is_none() && attrs.width.is_none() {
-        res.state = ParametricKindState::SelfDepBoth;
+        res.state = ParametricKindState {
+            width: SideParametricKind::Dependent,
+            height: SideParametricKind::Dependent,
+        };
     }
     else {
-        res.state = ParametricKindState::Normal {
+        res.state = ParametricKindState{
             width: SideParametricKind::Fixed,
             height: SideParametricKind::Fixed,
         };

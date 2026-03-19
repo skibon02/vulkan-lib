@@ -1,5 +1,6 @@
+use std::cmp::max;
 use std::ops::{Deref, DerefMut};
-use crate::layout::calculator::{ParametricStage, SideParametricKind};
+use crate::layout::calculator::{ParametricStage, SideParametricKind, ZERO_LENGTH_GUARD};
 use crate::layout::Lu;
 
 pub struct Calculated(pub Vec<ElementSizes>);
@@ -22,6 +23,7 @@ pub struct ElementSizes {
     pub parametric: ParametricSolveState,
     pub post_parametric: ParametricSolveState,
     pub parent_parametric: ParametricSolveState,
+    pub parametric_stage: ParametricStage,
     pub dim_fix: DimFixState,
     pub pos_fix: PosFixState,
     pub has_problems: bool,
@@ -35,28 +37,76 @@ impl ElementSizes {
             ParametricStage::ParentParametric => &mut self.parent_parametric,
         }
     }
+    pub fn cur_parametric(&mut self) -> &mut ParametricSolveState {
+        self.parametric(self.parametric_stage)
+    }
+    pub fn set_parametric_stage(&mut self, stage: ParametricStage) {
+        self.parametric_stage = stage;
+    }
+    
+    /// Return true -> need to run subtree fix for this element
+    pub fn try_fix_width(&mut self, width: Option<Lu>) -> bool {
+        let cur = self.cur_parametric();
+        if cur.state.can_fix_width() {
+            cur.state.width = SideParametricKind::Fixed;
+            let is_fixed = cur.state.is_fixed();
+            
+            let width = if let Some(w) = width {
+                w
+            } else {
+                ZERO_LENGTH_GUARD
+            };
+            self.dim_fix.set_width(width);
+            is_fixed
+        }
+        else {
+            false
+        }
+    }
+    
+    /// Returns true -> need to run subtree fix for this element
+    pub fn try_fix_height(&mut self, height: Option<Lu>) -> bool {
+        let cur = self.cur_parametric();
+        if cur.state.can_fix_width() {
+            cur.state.width = SideParametricKind::Fixed;
+            let is_fixed = cur.state.is_fixed();
+
+            let height = if let Some(h) = height {
+                h
+            } else {
+                ZERO_LENGTH_GUARD
+            };
+            self.dim_fix.set_height(height);
+            is_fixed
+        }
+        else {
+            false
+        }
+    }
 }
 #[derive(Clone, Debug, Copy)]
-pub enum ParametricKindState {
-    Normal {
-        width: SideParametricKind,
-        height: SideParametricKind,
-    },
-    SelfDepBoth,
+pub struct ParametricKindState {
+    pub width: SideParametricKind,
+    pub height: SideParametricKind,
 }
 
 #[derive(Clone, Debug, Copy, PartialEq)]
 pub enum ParametricKind {
+    /// At least one side is free
     NotFixed,
+    /// Both sides are fixed
     Fixed,
+    /// selfdepx
     WidthToHeight,
+    /// selfdepy
     HeightToWidth,
+    /// selfdepboth
     SelfDepBoth,
 }
 
 impl Default for ParametricKindState {
     fn default() -> Self {
-        ParametricKindState::Normal {
+        Self {
             width: SideParametricKind::default(),
             height: SideParametricKind::default(),
         }
@@ -64,58 +114,54 @@ impl Default for ParametricKindState {
 }
 
 impl ParametricKindState {
-    pub fn width_to_height() -> Self {
-        ParametricKindState::Normal {
-            width: SideParametricKind::Stretchable,
+    pub fn new_width_to_height() -> Self {
+        Self {
+            width: SideParametricKind::Free,
             height: SideParametricKind::Dependent,
         }
     }
 
-    pub fn height_to_width() -> Self {
-        ParametricKindState::Normal {
+    pub fn new_height_to_width() -> Self {
+        Self {
             width: SideParametricKind::Dependent,
-            height: SideParametricKind::Stretchable,
+            height: SideParametricKind::Free,
         }
     }
 
-    pub fn fixed() -> Self {
-        ParametricKindState::Normal {
+    pub fn new_fixed() -> Self {
+        Self {
             width: SideParametricKind::Fixed,
             height: SideParametricKind::Fixed,
         }
     }
 
     pub fn is_fixed(&self) -> bool {
-        matches!(self, ParametricKindState::Normal { width: SideParametricKind::Fixed | SideParametricKind::Dependent, height: SideParametricKind::Fixed | SideParametricKind::Dependent })
-    }
-
-    pub fn is_width_stretch(&self) -> bool {
-        match self {
-            ParametricKindState::Normal { width: SideParametricKind::Stretchable, .. } => true,
-            ParametricKindState::SelfDepBoth => true,
+        match (self.width, self.height) {
+            (SideParametricKind::Fixed, SideParametricKind::Dependent | SideParametricKind::Fixed) => true,
+            (SideParametricKind::Dependent, SideParametricKind::Fixed) => true,
             _ => false
         }
     }
+    
+    pub fn is_self_dep_both(&self) -> bool {
+        self.width == SideParametricKind::Dependent && self.height == SideParametricKind::Dependent
+    }
 
-    pub fn is_height_stretch(&self) -> bool {
-        match self {
-            ParametricKindState::Normal { height: SideParametricKind::Stretchable, .. } => true,
-            ParametricKindState::SelfDepBoth => true,
-            _ => false
-        }
+    pub fn can_fix_width(&self) -> bool {
+        self.width == SideParametricKind::Free || self.is_self_dep_both()
+    }
+
+    pub fn can_fix_height(&self) -> bool {
+        self.height == SideParametricKind::Free || self.is_self_dep_both()
     }
 
     pub fn kind(&self) -> ParametricKind {
-        match self {
-            ParametricKindState::Normal { width, height } => {
-                match (width, height) {
-                    (SideParametricKind::Fixed, SideParametricKind::Fixed) => ParametricKind::Fixed,
-                    (SideParametricKind::Stretchable, SideParametricKind::Dependent) => ParametricKind::WidthToHeight,
-                    (SideParametricKind::Dependent, SideParametricKind::Stretchable) => ParametricKind::HeightToWidth,
-                    _ => ParametricKind::NotFixed,
-                }
-            },
-            ParametricKindState::SelfDepBoth => ParametricKind::SelfDepBoth,
+        match (self.width, self.height) {
+            (SideParametricKind::Free, SideParametricKind::Dependent) => ParametricKind::WidthToHeight,
+            (SideParametricKind::Dependent, SideParametricKind::Free) => ParametricKind::HeightToWidth,
+            (_, SideParametricKind::Free) => ParametricKind::NotFixed,
+            (SideParametricKind::Free, _) => ParametricKind::NotFixed,
+            _ => ParametricKind::Fixed,
         }
     }
 }
@@ -126,11 +172,19 @@ pub struct ParametricSolveState {
     pub min_height: Lu,
     pub state: ParametricKindState,
 }
+
+impl ParametricSolveState {
+    pub fn apply_min_width(&mut self, width: Lu) {
+        self.min_width = max(self.min_width, width);
+    }
+    pub fn apply_min_height(&mut self, height: Lu) {
+        self.min_height = max(self.min_height, height);
+    }
+}
 #[derive(Clone, Debug, Default)]
 pub struct DimFixState {
     height: Option<Lu>,
     width: Option<Lu>,
-    processed: bool,
 }
 impl DimFixState {
     pub fn height(&self) -> Option<Lu> {
@@ -141,15 +195,9 @@ impl DimFixState {
     }
     pub fn set_height(&mut self, height: Lu) {
         self.height = Some(height);
-        if self.width.is_some() {
-            self.processed = true;
-        }
     }
     pub fn set_width(&mut self, width: Lu) {
         self.width = Some(width);
-        if self.height.is_some() {
-            self.processed = true;
-        }
     }
 }
 #[derive(Clone, Debug, Default)]

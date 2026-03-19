@@ -18,21 +18,21 @@ pub fn parametric_solve(attrs: &TextAttributes, i: usize, fonts: &mut Fonts, tex
             res.min_width = text.width();
         }
 
-        res.state = ParametricKindState::Normal {
-            width: if attrs.hide_overflow { SideParametricKind::Stretchable } else { SideParametricKind::Fixed },
+        res.state = ParametricKindState {
+            width: if attrs.hide_overflow { SideParametricKind::Free } else { SideParametricKind::Fixed },
             height: SideParametricKind::Fixed,
         };
     }
     else {
         // Deferred layout calculation until width is known
         if attrs.hide_overflow {
-            res.state = ParametricKindState::Normal {
-                width: SideParametricKind::Stretchable,
-                height: SideParametricKind::Stretchable,
+            res.state = ParametricKindState {
+                width: SideParametricKind::Free,
+                height: SideParametricKind::Free,
             };
         }
         else {
-            res.state = ParametricKindState::width_to_height();
+            res.state = ParametricKindState::new_width_to_height();
         }
     }
 
