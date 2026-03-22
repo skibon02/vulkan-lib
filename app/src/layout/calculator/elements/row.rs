@@ -1,8 +1,33 @@
-use crate::layout::{BoxAttributes, RowAttributes};
-use crate::layout::calculator::components::element_sizes::ParametricSolveState;
+use crate::layout::{BoxAttributes, ChildAttributes, Element, Lu, RowAttributes, RowChildAttributes};
+use crate::layout::calculator::components::ContainerParametricSolver;
+use crate::layout::calculator::components::element_sizes::{ElementSizes, ParametricKindState, ParametricSolveState};
+use crate::layout::calculator::SideParametricKind;
 
-pub fn parametric_solve(attrs: &RowAttributes) -> ParametricSolveState {
-    let mut res = ParametricSolveState::default();
+pub struct RowParametricSolver<'a> {
+    attrs: &'a RowAttributes,
+}
+
+impl ContainerParametricSolver for RowParametricSolver<'_> {
+    type ChildAttributes = RowChildAttributes;
+    fn handle_child(&mut self, child_sizes: &ElementSizes, child_attrs: &RowChildAttributes) -> (Option<Option<Lu>>, Option<Option<Lu>>) {
+        (None, None)
+    }
+
+    fn finalize(self) -> ParametricSolveState {
+        ParametricSolveState {
+            min_width: 0,
+            min_height: 0,
+            state: ParametricKindState {
+                width: SideParametricKind::Free,
+                height: SideParametricKind::Free,
+            }
+        }
+    }
+}
+pub fn parametric_solver(attrs: &RowAttributes) -> RowParametricSolver {
+    RowParametricSolver {
+        attrs
+    }
 
     // let grow_en = matches!(attrs.main_size_mode, MainSizeMode::EqualWidth);
     // let gap_en = matches!(attrs.main_gap_mode, MainGapMode::Around | MainGapMode::Between);
@@ -60,6 +85,4 @@ pub fn parametric_solve(attrs: &RowAttributes) -> ParametricSolveState {
     // } else if has_selfdepy {
     // } else {
     // }
-
-    res
 }

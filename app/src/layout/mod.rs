@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use smallvec::{SmallVec, smallvec};
 use ui_macro::{AttributeEnum, generate_parsed_attributes};
+use crate::layout::calculator::components::ChildAttributesUnwrap;
 
 pub mod calculator;
 
@@ -27,6 +28,12 @@ impl Element {
             Element::Img(_) => ElementKind::Img,
             Element::Text(_) => ElementKind::Text,
             Element::Box(_) => ElementKind::Box,
+        }
+    }
+    pub fn is_container(&self) -> bool {
+        match self {
+            Element::Col(_) | Element::Row(_) | Element::Stack(_) => true,
+            _ => false
         }
     }
 }
@@ -426,6 +433,11 @@ struct ChildAttributes {
 pub struct RowChildAttributes {
     pub cross_align: YAlign,
 }
+impl ChildAttributesUnwrap for RowChildAttributes {
+    fn unwrap(val: &mut ChildAttributes) -> &mut Self {
+        &mut val.row
+    }
+}
 impl Default for RowChildAttributes {
     fn default() -> Self {
         Self {
@@ -437,6 +449,11 @@ impl Default for RowChildAttributes {
 #[derive(Clone, Debug, AttributeEnum)]
 pub struct ColChildAttributes {
     pub cross_align: XAlign,
+}
+impl ChildAttributesUnwrap for ColChildAttributes {
+    fn unwrap(val: &mut ChildAttributes) -> &mut Self {
+        &mut val.col
+    }
 }
 impl Default for ColChildAttributes {
     fn default() -> Self {
@@ -452,7 +469,11 @@ pub struct StackChildAttributes {
     pub proportional_mode: ProportionalMode,
     pub self_dep_axis: SelfDepAxis,
 }
-
+impl ChildAttributesUnwrap for StackChildAttributes {
+    fn unwrap(val: &mut ChildAttributes) -> &mut Self {
+        &mut val.stack
+    }
+}
 impl Default for StackChildAttributes {
     fn default() -> Self {
         Self {

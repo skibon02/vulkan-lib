@@ -4,24 +4,13 @@ use crate::layout::ElementNode;
 pub struct Elements(pub Vec<ElementNode>);
 
 impl Elements {
-    fn children(&mut self, i: usize) -> (&mut ElementNode, impl Iterator<Item = (usize, &ElementNode)> + Clone + '_) {
-        let (before, after) = self.0.split_at_mut(i + 1);
-        let parent = &mut before[i];
-        let after_ref: &[ElementNode] = after;
+    pub fn children(&mut self, i: usize) -> (&mut ElementNode, ElementsChildrenMut) {
+        let (element, children) = self.0[i..].split_first_mut().unwrap();
 
-        let mut next_i = after_ref.get(0)
-            .is_some_and(|e| e.parent_i == i as u32)
-            .then(|| i + 1);
-
-        let children_iter = std::iter::from_fn(move || {
-            let child_i = next_i?;
-            let offset = child_i - i - 1;
-            let node = &after_ref[offset];
-            next_i = node.next_sibling_i.map(|n| n as usize);
-            Some((child_i, node))
-        });
-
-        (parent, children_iter)
+        (element, ElementsChildrenMut {
+            parent_i: i as u32,
+            elements: children
+        })
     }
 }
 
@@ -36,5 +25,59 @@ impl Deref for Elements {
 impl DerefMut for Elements {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.0
+    }
+}
+
+pub struct ElementsChildrenMut<'a> {
+    parent_i: u32,
+    elements: &'a mut [ElementNode],
+}
+impl<'a> ElementsChildrenMut<'a> {
+    pub fn get(&'a mut self, i: u32) -> &'a mut ElementNode {
+        if (self.parent_i..self.parent_i + self.elements.len() as u32).contains(&i) {
+            &mut self.elements[i as usize - self.parent_i as usize]
+        }
+        else {
+            panic!("Incorrect element index specified provided to ElementsChildren::get")
+        }
+    }
+    pub fn into_iter(self) -> ElementsChildrenIterMut<'a> {
+        ElementsChildrenIterMut {
+            inner: self,
+            i: Some(0),
+        }
+    }
+}
+
+pub struct ElementsChildrenIterMut<'a> {
+    inner: ElementsChildrenMut<'a>,
+    i: Option<u32>,
+}
+
+impl<'a> Iterator for ElementsChildrenIterMut<'a> {
+    type Item = (u32, &'a mut ElementNode);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.inner.elements.is_empty() {
+            return None;
+        }
+
+        if let Some(i) = self.i {
+            let ptr = self.inner.elements.as_mut_ptr();
+
+            // SAFETY: We guarantee that `next_sibling_i` never creates a cycle,
+            // so we will never yield a mutable reference to the same index twice.
+            // We also assume `i` is always within the bounds of the slice.
+            let el: &'a mut ElementNode = unsafe {
+                &mut *ptr.add(i as usize)
+            };
+
+            self.i = el.next_sibling_i.map(|next_i| next_i - self.inner.parent_i - 1);
+
+            Some((i + self.inner.parent_i, el))
+        }
+        else {
+            None
+        }
     }
 }

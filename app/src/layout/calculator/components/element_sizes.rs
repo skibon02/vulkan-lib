@@ -18,6 +18,17 @@ impl DerefMut for Calculated {
     }
 }
 
+impl Calculated {
+    /// This method will panic if index i is not present!
+    pub fn children(&mut self, i: usize) -> (&mut ElementSizes, ElementSizesChildrenMut) {
+        let (element, rest) = (self.0[i..]).split_first_mut().unwrap();
+        (element, ElementSizesChildrenMut {
+            parent_i: i,
+            elements: rest,
+        })
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct ElementSizes {
     pub parametric: ParametricSolveState,
@@ -30,14 +41,24 @@ pub struct ElementSizes {
 }
 
 impl ElementSizes {
-    pub fn parametric(&mut self, stage: ParametricStage) -> &mut ParametricSolveState {
+    pub fn parametric_mut(&mut self, stage: ParametricStage) -> &mut ParametricSolveState {
         match stage {
             ParametricStage::Parametric => &mut self.parametric,
             ParametricStage::PostParametric => &mut self.post_parametric,
             ParametricStage::ParentParametric => &mut self.parent_parametric,
         }
     }
-    pub fn cur_parametric(&mut self) -> &mut ParametricSolveState {
+    pub fn cur_parametric_mut(&mut self) -> &mut ParametricSolveState {
+        self.parametric_mut(self.parametric_stage)
+    }
+    pub fn parametric(&self, stage: ParametricStage) -> &ParametricSolveState {
+        match stage {
+            ParametricStage::Parametric => &self.parametric,
+            ParametricStage::PostParametric => &self.post_parametric,
+            ParametricStage::ParentParametric => &self.parent_parametric,
+        }
+    }
+    pub fn cur_parametric(&self) -> &ParametricSolveState {
         self.parametric(self.parametric_stage)
     }
     pub fn set_parametric_stage(&mut self, stage: ParametricStage) {
@@ -46,7 +67,7 @@ impl ElementSizes {
     
     /// Return true -> need to run subtree fix for this element
     pub fn try_fix_width(&mut self, width: Option<Lu>) -> bool {
-        let cur = self.cur_parametric();
+        let cur = self.cur_parametric_mut();
         if cur.state.can_fix_width() {
             cur.state.width = SideParametricKind::Fixed;
             let is_fixed = cur.state.is_fixed();
@@ -66,7 +87,7 @@ impl ElementSizes {
     
     /// Returns true -> need to run subtree fix for this element
     pub fn try_fix_height(&mut self, height: Option<Lu>) -> bool {
-        let cur = self.cur_parametric();
+        let cur = self.cur_parametric_mut();
         if cur.state.can_fix_width() {
             cur.state.width = SideParametricKind::Fixed;
             let is_fixed = cur.state.is_fixed();
@@ -81,6 +102,21 @@ impl ElementSizes {
         }
         else {
             false
+        }
+    }
+}
+
+pub struct ElementSizesChildrenMut<'a> {
+    parent_i: usize,
+    elements: &'a mut [ElementSizes]
+}
+impl<'a> ElementSizesChildrenMut<'a> {
+    pub fn get(&mut self, i: u32) -> &mut ElementSizes {
+        if (self.parent_i..self.parent_i + self.elements.len()).contains(&(i as usize)) {
+            &mut self.elements[i as usize - self.parent_i]
+        }
+        else {
+            panic!("Incorrect element index specified provided to ElementsChildren::get")
         }
     }
 }
