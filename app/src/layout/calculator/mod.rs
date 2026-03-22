@@ -1,12 +1,12 @@
-use std::cmp::max;
 use std::collections::{HashMap};
+use log::warn;
 use crate::layout::{AttributeValue, Element, ElementKind, ElementNode, ElementNodeRepr, Lu, ParsedAttributes, SelfDepAxis};
-use crate::layout::calculator::components::{ChildAttributesUnwrap, ContainerParametricSolver};
-use crate::layout::calculator::components::element_sizes::{Calculated, ElementSizes, ElementSizesChildrenMut, ParametricKind, ParametricKindState, ParametricSolveState};
+use crate::layout::calculator::components::element_sizes::{Calculated, ElementSizes, ElementSizesChildren, ParametricKind, ParametricKindState, ParametricSolveState};
 use crate::layout::calculator::components::elements::{Elements, ElementsChildrenMut};
 use crate::layout::calculator::components::font::Fonts;
 use crate::layout::calculator::components::image::Images;
 use crate::layout::calculator::components::text::Texts;
+use crate::layout::calculator::elements::{ContainerFixSolver, ContainerParametricSolver};
 
 mod elements;
 pub mod components;
@@ -115,70 +115,89 @@ impl LayoutCalculator {
     fn parametric_solve(&mut self, i: usize) {
         let (element, children) = self.elements.children(i);
         let (el_sizes, children_sizes) = self.elements_sizes.children(i);
-        if element.element.is_container() {
+        let parametric = if element.element.is_container() {
 
-            fn parametric_solve_container<T: ContainerParametricSolver>(mut solver: T, container_sizes: &mut ElementSizes, children: ElementsChildrenMut, mut children_sizes: ElementSizesChildrenMut) -> ParametricSolveState {
+            fn parametric_solve_container<T: ContainerParametricSolver>(mut solver: T,
+                                                                        container_sizes: &mut ElementSizes,
+                                                                        children: ElementsChildrenMut,
+                                                                        mut children_sizes: ElementSizesChildren) -> (Vec<u32>, ParametricSolveState) {
+                let mut solver_state = T::State::default();
+                let mut child_fixes = vec![];
                 for (i, child) in children.into_iter() {
-                    let child_sizes = children_sizes.get(i);
-                    let (fix_width, fix_height) = solver.handle_child(child_sizes, T::ChildAttributes::unwrap(&mut child.self_child_attributes));
+                    let child_sizes = children_sizes.get_mut(i);
+                    if !child_sizes.cur_parametric_mut().state.is_fixed() {
+                        child_sizes.parent_parametric = child_sizes.post_parametric.clone();
+                        child_sizes.set_parametric_stage(ParametricStage::ParentParametric);
+                    }
+                    
+                    let (fix_width, fix_height) = solver.handle_child(&mut solver_state, child_sizes, T::unwrap(&mut child.self_child_attributes));
                     if let Some(fix_width) = fix_width {
-                        if children_sizes.get(i).try_fix_width(fix_width) {
-                            self.dfs(i) // ????
+                        if !child_sizes.cur_parametric_mut().state.can_fix_width() {
+                            warn!("Tried to fix width on element {i}, but it is already fixed!");
+                        }
+                        if child_sizes.try_fix_width(fix_width) {
+                            child_fixes.push(i);
+                            continue;
                         }
                     }
 
                     if let Some(fix_height) = fix_height {
-                        if children_sizes.get(i).try_fix_height(fix_height) {
-                            self.dfs(i) // ????
+                        if !child_sizes.cur_parametric_mut().state.can_fix_height() {
+                            warn!("Tried to fix height on element {i}, but it is already fixed!");
+                        }
+                        if child_sizes.try_fix_height(fix_height) {
+                            child_fixes.push(i);
+                            continue;
                         }
                     }
                 }
 
-                solver.finalize()
+                (child_fixes, solver.finalize(solver_state))
             }
 
-            let parametric = match &element.element {
+            let (child_fixes, parametric) = match &element.element {
                 Element::Row(attrs) => {
-                    parametric_solve_container(elements::row::parametric_solver(attrs), el_sizes, children, children_sizes)
+                    parametric_solve_container(elements::row::solver(attrs), el_sizes, children, children_sizes)
                 }
                 Element::Col(attrs) => {
-                    parametric_solve_container(elements::col::parametric_solver(attrs), el_sizes, children, children_sizes)
+                    parametric_solve_container(elements::col::solver(attrs), el_sizes, children, children_sizes)
                 }
                 Element::Stack(attrs) => {
-                    parametric_solve_container(elements::stack::parametric_solver(attrs), el_sizes, children, children_sizes)
+                    parametric_solve_container(elements::stack::solver(attrs), el_sizes, children, children_sizes)
                 }
                 _ => unreachable!(),
             };
-            self.elements_sizes[i].parametric = parametric;
-            if self.elements_sizes[i].parametric.state.is_fixed() {
-                // set dim fixed
-                let parametric = self.elements_sizes[i].parametric;
-                self.elements_sizes[i].dim_fix.set_width(parametric.min_width);
-                self.elements_sizes[i].dim_fix.set_height(parametric.min_height);
-
-                // run fix subtree
-                self.dfs(i, Phase::FixPass);
+            // fix children
+            for child_fix in child_fixes {
+                self.dfs(child_fix as usize, Phase::FixPass);
             }
+            
+            parametric
         }
         else {
             match &element.element {
                 Element::Img(attrs) => {
-                    self.elements_sizes[i].parametric = elements::img::parametric_solve(attrs, &mut self.images);
+                     elements::img::parametric_solve(attrs, &mut self.images)
                 },
                 Element::Box(attrs) => {
-                    self.elements_sizes[i].parametric = elements::box_el::parametric_solve(attrs);
+                     elements::box_el::parametric_solve(attrs)
                 }
                 Element::Text(attrs) => {
-                    self.elements_sizes[i].parametric = elements::text::parametric_solve(attrs, i, &mut self.fonts, &mut self.texts)
+                     elements::text::parametric_solve(attrs, i, &mut self.fonts, &mut self.texts)
                 }
                 _ => unreachable!(),
             }
-            if self.elements_sizes[i].parametric.state.is_fixed() {
-                // set dim fixed
-                let parametric = self.elements_sizes[i].parametric;
-                self.elements_sizes[i].dim_fix.set_width(parametric.min_width);
-                self.elements_sizes[i].dim_fix.set_height(parametric.min_height);
-            }
+        };
+
+        // set self parametric params
+        self.elements_sizes[i].parametric = parametric;
+        if self.elements_sizes[i].parametric.state.is_fixed() {
+            // set dim fixed
+            self.elements_sizes[i].dim_fix.set_width(parametric.min_width);
+            self.elements_sizes[i].dim_fix.set_height(parametric.min_height);
+
+            // run fix subtree
+            self.dfs(i, Phase::FixPass);
         }
     }
 
@@ -212,8 +231,74 @@ impl LayoutCalculator {
     /// Phase 2: Normal flow subtree fix.
     /// Call guarantee: fix dimensions are provided for element i, matching parametric solve ranges.
     /// Result: specify fix dimensions for all direct children, maybe update some internal positioning information.
-    fn fix_subtree(&mut self, i: usize) {
+    fn dim_fix_children(&mut self, i: usize) {
+        let (el_sizes, children_sizes) = self.elements_sizes.children(i);
+        let (element, children) = self.elements.children(i);
+        if element.element.is_container() {
+            fn dim_fix_container<T: ContainerFixSolver>(mut solver: T,
+                                                        sizes: &mut ElementSizes,
+                                                        children: ElementsChildrenMut,
+                                                        mut children_sizes: ElementSizesChildren) -> Vec<(usize, Option<Option<Lu>>, Option<Option<Lu>>)> {
+                let mut res = vec![];
+                let mut state = solver.init(&children_sizes, children.iter());
 
+                for (i, child) in children.into_iter() {
+                    let (width, height) = solver.handle_child(&mut state, children_sizes.get_mut(i), T::unwrap(&mut child.self_child_attributes));
+                    res.push((i as usize, width, height));
+                }
+                res
+            }
+
+            let (children_fixes) = match &element.element {
+                Element::Row(attrs) => {
+                    dim_fix_container(elements::row::solver(attrs), el_sizes, children, children_sizes)
+                }
+                Element::Col(attrs) => {
+                    dim_fix_container(elements::col::solver(attrs), el_sizes, children, children_sizes)
+                }
+                Element::Stack(attrs) => {
+                    dim_fix_container(elements::stack::solver(attrs), el_sizes, children, children_sizes)
+                }
+                _ => unreachable!(),
+            };
+
+            for (i, width, height) in children_fixes {
+                if let Some(width) = width {
+                    if !self.elements_sizes[i].cur_parametric().state.can_fix_width() {
+                        panic!("Attempted to fix width for element {i}, but it is not free!");
+                    }
+                    self.elements_sizes[i].try_fix_width(width);
+                }
+
+                if let Some(height) = height {
+                    if !self.elements_sizes[i].cur_parametric().state.can_fix_height() {
+                        panic!("Attempted to fix height for element {i}, but it is not free!");
+                    }
+                    self.elements_sizes[i].try_fix_height(height);
+                }
+
+                assert!(self.elements_sizes[i].cur_parametric_mut().state.is_fixed(), "All children must be fixed in the end of dim_fix_children!");
+            }
+        }
+    }
+
+    fn dim_fix_finalize(&mut self, i: usize) {
+        let (el_sizes, children_sizes) = self.elements_sizes.children(i);
+        let (element, children) = self.elements.children(i);
+        if element.element.is_container() {
+            match &element.element {
+                Element::Col(col) => {
+                    
+                }
+                Element::Row(row) => {
+
+                }
+                Element::Stack(stack) => {
+
+                }
+                _ => unreachable!()
+            }
+        }
     }
     fn handle_node(&mut self, i: usize, parents: &[usize], phase: Phase) -> ControlFlow {
         match phase {
@@ -221,20 +306,35 @@ impl LayoutCalculator {
                 ControlFlow::Continue
             }
             Phase::FixPass => {
-                ControlFlow::Continue
+                if self.elements_sizes[i].dim_fix.is_subtree_fixed() {
+                    ControlFlow::SkipChildren
+                }
+                else {
+                    self.dim_fix_children(i);
+                    self.elements_sizes[i].dim_fix.set_subtree_fixed();
+                    ControlFlow::Continue
+                }
             }
         }
     }
 
     fn finalize_node(&mut self, i: usize, phase: Phase) {
-        if matches!(phase, Phase::ParametricSolve) {
-            self.parametric_solve(i);
-            if self.elements_sizes[i].parametric.state.is_fixed() {
-                return;
+        match phase {
+            Phase::ParametricSolve => {
+                self.parametric_solve(i);
+                if self.elements_sizes[i].parametric.state.is_fixed() {
+                    return;
+                }
+                self.apply_general_attrs(i);
+                if self.elements_sizes[i].post_parametric.state.is_fixed() {
+                    return;
+                }
             }
-            self.apply_general_attrs(i);
-            if self.elements_sizes[i].post_parametric.state.is_fixed() {
-                return;
+            Phase::FixPass => {
+                if self.elements_sizes[i].cur_parametric_mut().state.is_self_dep() {
+                    self.dim_fix_finalize(i);
+                }
+                self.elements_sizes[i].dim_fix.set_subtree_fixed();
             }
         }
     }

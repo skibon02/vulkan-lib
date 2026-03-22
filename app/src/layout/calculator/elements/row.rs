@@ -1,31 +1,15 @@
-use crate::layout::{BoxAttributes, ChildAttributes, Element, Lu, RowAttributes, RowChildAttributes};
-use crate::layout::calculator::components::ContainerParametricSolver;
-use crate::layout::calculator::components::element_sizes::{ElementSizes, ParametricKindState, ParametricSolveState};
+use crate::layout::{BoxAttributes, ChildAttributes, ColAttributes, Element, Lu, RowAttributes, RowChildAttributes};
+use crate::layout::calculator::components::element_sizes::{DimFixState, ElementSizes, ElementSizesChildren, ParametricKindState, ParametricSolveState};
+use crate::layout::calculator::components::elements::{ElementsChildrenIter, ElementsChildrenIterMut};
+use crate::layout::calculator::elements::{ContainerFixSolver, ContainerParametricSolver, HasChildAttributes, SelfDepResolve};
 use crate::layout::calculator::SideParametricKind;
 
-pub struct RowParametricSolver<'a> {
+pub struct RowSolver<'a> {
     attrs: &'a RowAttributes,
 }
 
-impl ContainerParametricSolver for RowParametricSolver<'_> {
-    type ChildAttributes = RowChildAttributes;
-    fn handle_child(&mut self, child_sizes: &ElementSizes, child_attrs: &RowChildAttributes) -> (Option<Option<Lu>>, Option<Option<Lu>>) {
-        (None, None)
-    }
-
-    fn finalize(self) -> ParametricSolveState {
-        ParametricSolveState {
-            min_width: 0,
-            min_height: 0,
-            state: ParametricKindState {
-                width: SideParametricKind::Free,
-                height: SideParametricKind::Free,
-            }
-        }
-    }
-}
-pub fn parametric_solver(attrs: &RowAttributes) -> RowParametricSolver {
-    RowParametricSolver {
+pub fn solver(attrs: &RowAttributes) -> RowSolver {
+    RowSolver {
         attrs
     }
 
@@ -85,4 +69,47 @@ pub fn parametric_solver(attrs: &RowAttributes) -> RowParametricSolver {
     // } else if has_selfdepy {
     // } else {
     // }
+}
+impl HasChildAttributes for RowSolver<'_> {
+    type ChildAttributes = RowChildAttributes;
+
+    fn unwrap(val: &mut ChildAttributes) -> &mut Self::ChildAttributes {
+        &mut val.row
+    }
+}
+
+// STAGE 1: PARAMETRIC SOLVE
+impl ContainerParametricSolver for RowSolver<'_> {
+    type State = ();
+    fn handle_child(&mut self, state: &mut (), child_sizes: &ElementSizes, child_attrs: &RowChildAttributes) -> (Option<Option<Lu>>, Option<Option<Lu>>) {
+        (None, None)
+    }
+
+    fn finalize(self, state: ()) -> ParametricSolveState {
+        ParametricSolveState {
+            min_width: 0,
+            min_height: 0,
+            state: ParametricKindState {
+                width: SideParametricKind::Free,
+                height: SideParametricKind::Free,
+            }
+        }
+    }
+}
+
+// STAGE 2: DIM FIX
+
+impl ContainerFixSolver for RowSolver<'_> {
+    type State = ();
+
+    fn init(&mut self, children_sizes: &ElementSizesChildren, children: ElementsChildrenIter) -> Self::State {
+    }
+
+    fn handle_child(&mut self, state: &mut Self::State, child_sizes: &ElementSizes, child_attrs: &Self::ChildAttributes) -> (Option<Option<Lu>>, Option<Option<Lu>>) {
+        (None, None)
+    }
+}
+
+pub fn resolve_selfdep(attrs: &ColAttributes, sizes: &ElementSizes, children: ElementsChildrenIter, children_sizes: &ElementSizesChildren) -> SelfDepResolve {
+    SelfDepResolve::Width(100)
 }

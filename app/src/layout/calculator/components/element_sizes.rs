@@ -20,9 +20,9 @@ impl DerefMut for Calculated {
 
 impl Calculated {
     /// This method will panic if index i is not present!
-    pub fn children(&mut self, i: usize) -> (&mut ElementSizes, ElementSizesChildrenMut) {
+    pub fn children(&mut self, i: usize) -> (&mut ElementSizes, ElementSizesChildren) {
         let (element, rest) = (self.0[i..]).split_first_mut().unwrap();
-        (element, ElementSizesChildrenMut {
+        (element, ElementSizesChildren {
             parent_i: i,
             elements: rest,
         })
@@ -106,14 +106,22 @@ impl ElementSizes {
     }
 }
 
-pub struct ElementSizesChildrenMut<'a> {
+pub struct ElementSizesChildren<'a> {
     parent_i: usize,
     elements: &'a mut [ElementSizes]
 }
-impl<'a> ElementSizesChildrenMut<'a> {
-    pub fn get(&mut self, i: u32) -> &mut ElementSizes {
+impl<'a> ElementSizesChildren<'a> {
+    pub fn get_mut(&mut self, i: u32) -> &mut ElementSizes {
         if (self.parent_i..self.parent_i + self.elements.len()).contains(&(i as usize)) {
             &mut self.elements[i as usize - self.parent_i]
+        }
+        else {
+            panic!("Incorrect element index specified provided to ElementsChildren::get")
+        }
+    }
+    pub fn get(&self, i: u32) -> &ElementSizes {
+        if (self.parent_i..self.parent_i + self.elements.len()).contains(&(i as usize)) {
+            &self.elements[i as usize - self.parent_i]
         }
         else {
             panic!("Incorrect element index specified provided to ElementsChildren::get")
@@ -179,6 +187,9 @@ impl ParametricKindState {
         }
     }
     
+    pub fn is_self_dep(&self) -> bool {
+        self.width == SideParametricKind::Dependent || self.height == SideParametricKind::Dependent
+    }
     pub fn is_self_dep_both(&self) -> bool {
         self.width == SideParametricKind::Dependent && self.height == SideParametricKind::Dependent
     }
@@ -221,6 +232,7 @@ impl ParametricSolveState {
 pub struct DimFixState {
     height: Option<Lu>,
     width: Option<Lu>,
+    subtree_fixed: bool,
 }
 impl DimFixState {
     pub fn height(&self) -> Option<Lu> {
@@ -234,6 +246,12 @@ impl DimFixState {
     }
     pub fn set_width(&mut self, width: Lu) {
         self.width = Some(width);
+    }
+    pub fn set_subtree_fixed(&mut self) {
+        self.subtree_fixed = true
+    }
+    pub fn is_subtree_fixed(&self) -> bool {
+        self.subtree_fixed
     }
 }
 #[derive(Clone, Debug, Default)]

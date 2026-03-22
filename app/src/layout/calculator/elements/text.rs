@@ -1,7 +1,9 @@
-use crate::layout::{BoxAttributes, TextAttributes};
+use crate::layout::{BoxAttributes, ColAttributes, TextAttributes};
 use crate::layout::calculator::{Fonts, ParametricKindState, SideParametricKind};
-use crate::layout::calculator::components::element_sizes::ParametricSolveState;
+use crate::layout::calculator::components::element_sizes::{ElementSizes, ElementSizesChildren, ParametricSolveState};
+use crate::layout::calculator::components::elements::ElementsChildrenIter;
 use crate::layout::calculator::components::text::Texts;
+use crate::layout::calculator::elements::SelfDepResolve;
 
 pub fn parametric_solve(attrs: &TextAttributes, i: usize, fonts: &mut Fonts, texts: &mut Texts) -> ParametricSolveState {
     let mut res = ParametricSolveState::default();
