@@ -306,12 +306,11 @@ impl LayoutCalculator {
                 ControlFlow::Continue
             }
             Phase::FixPass => {
-                if self.elements_sizes[i].dim_fix.is_subtree_fixed() {
+                if self.elements_sizes[i].cur_parametric_mut().state.is_fixed() {
                     ControlFlow::SkipChildren
                 }
                 else {
                     self.dim_fix_children(i);
-                    self.elements_sizes[i].dim_fix.set_subtree_fixed();
                     ControlFlow::Continue
                 }
             }
@@ -334,7 +333,6 @@ impl LayoutCalculator {
                 if self.elements_sizes[i].cur_parametric_mut().state.is_self_dep() {
                     self.dim_fix_finalize(i);
                 }
-                self.elements_sizes[i].dim_fix.set_subtree_fixed();
             }
         }
     }
