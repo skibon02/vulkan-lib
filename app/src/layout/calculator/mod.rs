@@ -27,6 +27,12 @@ pub enum SideParametricKind {
     Dependent,
 }
 
+impl SideParametricKind {
+    fn is_fixed(&self) -> bool {
+        self == &SideParametricKind::Fixed
+    }
+}
+
 #[derive(Default, Clone, Debug, Copy)]
 pub enum ParametricStage {
     #[default]
@@ -193,8 +199,12 @@ impl LayoutCalculator {
         self.elements_sizes[i].parametric = parametric;
         if self.elements_sizes[i].parametric.state.is_fixed() {
             // set dim fixed
-            self.elements_sizes[i].dim_fix.set_width(parametric.min_width);
-            self.elements_sizes[i].dim_fix.set_height(parametric.min_height);
+            if self.elements_sizes[i].parametric.state.width == SideParametricKind::Fixed {
+                self.elements_sizes[i].dim_fix.set_width(parametric.min_width);
+            }
+            if self.elements_sizes[i].parametric.state.height == SideParametricKind::Fixed {
+                self.elements_sizes[i].dim_fix.set_height(parametric.min_height);
+            }
 
             // run fix subtree
             self.dfs(i, Phase::FixPass);
@@ -243,7 +253,7 @@ impl LayoutCalculator {
                 let mut state = solver.init(&children_sizes, children.iter());
 
                 for (i, child) in children.into_iter() {
-                    let (width, height) = solver.handle_child(&mut state, children_sizes.get_mut(i), T::unwrap(&mut child.self_child_attributes));
+                    let (width, height) = solver.handle_child(&mut state, children_sizes.get_mut(i), T::unwrap(&mut child.self_child_attributes), sizes);
                     res.push((i as usize, width, height));
                 }
                 res

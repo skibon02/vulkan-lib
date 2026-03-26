@@ -104,6 +104,23 @@ impl ElementSizes {
             false
         }
     }
+    
+    // min width for current parametric or dim fix width if fixed
+    pub fn min_width(&self) -> Lu {
+        self.dim_fix.width.unwrap_or(self.cur_parametric().min_width)
+    }
+    pub fn min_height(&self) -> Lu {
+        self.dim_fix.height.unwrap_or(self.cur_parametric().min_height)
+    }
+    
+    // for use from dim fix stage
+    pub fn is_width_fixed(&self) -> bool {
+        self.dim_fix.width.is_some()
+    }
+    pub fn is_height_fixed(&self) -> bool {
+        self.dim_fix.height.is_some()
+    }
+
 }
 
 pub struct ElementSizesChildren<'a> {
