@@ -27,15 +27,10 @@ pub fn parametric_solve(attrs: &TextAttributes, i: usize, fonts: &mut Fonts, tex
     }
     else {
         // Deferred layout calculation until width is known
-        if attrs.hide_overflow {
-            res.state = ParametricKindState {
-                width: SideParametricKind::Free,
-                height: SideParametricKind::Free,
-            };
-        }
-        else {
-            res.state = ParametricKindState::new_width_to_height();
-        }
+        res.state = ParametricKindState {
+            width: SideParametricKind::Free,
+            height: if attrs.hide_overflow { SideParametricKind::Free } else { SideParametricKind::Dependent },
+        };
     }
 
     res

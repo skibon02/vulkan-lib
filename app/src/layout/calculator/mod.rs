@@ -143,6 +143,9 @@ impl LayoutCalculator {
                         }
                         if child_sizes.try_fix_width(fix_width) {
                             child_fixes.push(i);
+                            if fix_height.is_some() {
+                                warn!("Tried to fix width and height on element {i}, but fixing width was already enough!");
+                            }
                             continue;
                         }
                     }
@@ -197,17 +200,14 @@ impl LayoutCalculator {
 
         // set self parametric params
         self.elements_sizes[i].parametric = parametric;
-        if self.elements_sizes[i].parametric.state.is_fixed() {
+        if parametric.state.is_fixed() {
             // set dim fixed
-            if self.elements_sizes[i].parametric.state.width == SideParametricKind::Fixed {
+            if parametric.state.width == SideParametricKind::Fixed {
                 self.elements_sizes[i].dim_fix.set_width(parametric.min_width);
             }
-            if self.elements_sizes[i].parametric.state.height == SideParametricKind::Fixed {
+            if parametric.state.height == SideParametricKind::Fixed {
                 self.elements_sizes[i].dim_fix.set_height(parametric.min_height);
             }
-
-            // run fix subtree
-            self.dfs(i, Phase::FixPass);
         }
     }
 
@@ -357,6 +357,9 @@ impl LayoutCalculator {
         self.dfs(0, Phase::ParametricSolve);
         self.dfs(0, Phase::FixPass);
     }
+
+
+    /// Result for FixPass dfs is Fixed parametric kind and exact width and height for element and all other subtree elements
     pub fn dfs(&mut self, first_element: usize, phase: Phase) {
         let mut parents = vec![first_element];
         if self.handle_node(first_element, &[], phase) == ControlFlow::SkipChildren {

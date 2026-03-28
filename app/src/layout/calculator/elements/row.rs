@@ -31,6 +31,7 @@ pub struct RowSolverState {
     children_max_height: Lu,
     is_any_selfdepx: bool,
     is_any_selfdepy: bool,
+    is_any_selfdepboth: bool,
 }
 impl ContainerParametricSolver for RowSolver<'_> {
     type State = RowSolverState;
@@ -38,23 +39,40 @@ impl ContainerParametricSolver for RowSolver<'_> {
         state.children_width_sum += child_sizes.min_width();
         state.children_max_height = max(state.children_max_height, child_sizes.min_height());
 
-        match child_sizes.cur_parametric().state.kind() {
-            ParametricKind::HeightToWidth => {
-                state.is_any_selfdepy = true;
-            }
-            ParametricKind::WidthToHeight => {
-                state.is_any_selfdepx = true;
-            }
-            _ => {}
-        }
-
         let grow_en = matches!(self.attrs.main_size_mode, MainSizeMode::EqualWidth);
         let cross_stretch_en = self.attrs.cross_stretch;
 
-        let width = (!grow_en && child_sizes.cur_parametric().state.can_fix_width()).then_some(None);
-        let height = (!cross_stretch_en && child_sizes.cur_parametric().state.can_fix_height()).then_some(None);
+        if child_sizes.cur_parametric().state.is_self_dep_both() && !grow_en && !cross_stretch_en{
+            // Fix width for self-dep-both child
+            (Some(None), None)
+        }
+        else {
+            let cur_parametric = child_sizes.cur_parametric().state;
+            let width = (!grow_en && cur_parametric.can_fix_width()).then_some(None);
+            let height = (!cross_stretch_en && cur_parametric.can_fix_height()).then_some(None);
 
-        (width, height)
+            match cur_parametric.kind() {
+                ParametricKind::HeightToWidth => {
+                    if width.is_none() {
+                        state.is_any_selfdepx = true;
+                    }
+                }
+                ParametricKind::WidthToHeight => {
+                    if height.is_none() {
+                        state.is_any_selfdepy = true;
+                    }
+                }
+                ParametricKind::SelfDepBoth => {
+                    if width.is_none() && height.is_none(){
+                        state.is_any_selfdepboth = true;
+                    }
+                }
+                _ => {}
+            }
+
+
+            (width, height)
+        }
     }
 
     fn finalize(self, state: RowSolverState) -> ParametricSolveState {
@@ -64,8 +82,9 @@ impl ContainerParametricSolver for RowSolver<'_> {
         let gap_en = matches!(self.attrs.main_gap_mode, MainGapMode::Around | MainGapMode::Between);
         let cross_stretch_en = self.attrs.cross_stretch;
 
-        let has_selfdepx = grow_en && state.is_any_selfdepx;
-        let has_selfdepy = cross_stretch_en && state.is_any_selfdepy;
+        let has_selfdepx = state.is_any_selfdepx;
+        let has_selfdepy = state.is_any_selfdepy;
+        let has_selfdepboth = state.is_any_selfdepboth && !has_selfdepx && !has_selfdepy;
         if has_selfdepx && has_selfdepy {
             warn!("row parametric: selfdepx and selfdepy conflict!");
         }
@@ -74,17 +93,9 @@ impl ContainerParametricSolver for RowSolver<'_> {
         res.min_height = state.children_max_height;
         res.state = ParametricKindState::default();
 
-        if has_selfdepx {
-            if !grow_en && !gap_en {
-                res.state.width = SideParametricKind::Fixed;
-            }
-
+        if has_selfdepx || has_selfdepboth{
             res.state.height = SideParametricKind::Dependent
         } else if has_selfdepy {
-            if !cross_stretch_en {
-                res.state.height = SideParametricKind::Fixed;
-            }
-
             res.state.width = SideParametricKind::Dependent
         } else {
             if !grow_en && !gap_en {
@@ -144,7 +155,7 @@ impl ContainerFixSolver for RowSolver<'_> {
         }
     }
 
-    fn handle_child(&mut self, state: &mut Self::State, child_sizes: &ElementSizes, child_attrs: &Self::ChildAttributes, el_sizes: ElementSizes) -> (Option<Option<Lu>>, Option<Option<Lu>>) {
+    fn handle_child(&mut self, state: &mut Self::State, child_sizes: &ElementSizes, child_attrs: &Self::ChildAttributes, el_sizes: &ElementSizes) -> (Option<Option<Lu>>, Option<Option<Lu>>) {
         let grow_en = matches!(self.attrs.main_size_mode, MainSizeMode::EqualWidth) && !state.has_self_dep_y;
         let gap_en = matches!(self.attrs.main_gap_mode, MainGapMode::Around | MainGapMode::Between) && !state.has_self_dep_y;
         let cross_stretch_en = self.attrs.cross_stretch;
@@ -153,20 +164,20 @@ impl ContainerFixSolver for RowSolver<'_> {
             let free_space = el_sizes.dim_fix.width().unwrap() - state.fixed_width_sum;
             let mut min_sum = 0;
             let mut min_cnt = 0;
-            'outer: for (sz, cnt) in state.breakpoints {
+            'outer: for (&sz, &cnt) in &state.breakpoints {
                 for i in 0..cnt {
                     min_sum += sz;
-                    cnt += 1;
+                    min_cnt += 1;
                     if min_sum > free_space {
                         break 'outer;
                     }
                 }
             }
         };
-        (width, None)
+        (None, None)
     }
 }
 
-pub fn resolve_selfdep(attrs: &ColAttributes, sizes: &ElementSizes, children: ElementsChildrenIter, children_sizes: &ElementSizesChildren) -> SelfDepResolve {
+pub fn resolve_selfdep(attrs: &RowAttributes, sizes: &ElementSizes, children: ElementsChildrenIter, children_sizes: &ElementSizesChildren) -> SelfDepResolve {
     SelfDepResolve::Width(100)
 }

@@ -75,7 +75,12 @@ impl ElementSizes {
             let width = if let Some(w) = width {
                 w
             } else {
-                ZERO_LENGTH_GUARD
+                if cur.min_width == 0 {
+                    ZERO_LENGTH_GUARD
+                }
+                else {
+                    cur.min_width
+                }
             };
             self.dim_fix.set_width(width);
             is_fixed
@@ -95,7 +100,12 @@ impl ElementSizes {
             let height = if let Some(h) = height {
                 h
             } else {
-                ZERO_LENGTH_GUARD
+                if cur.min_height == 0 {
+                    ZERO_LENGTH_GUARD
+                }
+                else {
+                    cur.min_height
+                }
             };
             self.dim_fix.set_height(height);
             is_fixed
