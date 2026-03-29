@@ -121,7 +121,8 @@ impl App {
         self.instances.push(SolidAttributes {
             pos: [pos.0 as i32 - 20, pos.1 as i32 - 20].into(),
             size: [40, 40].into(),
-            d: 0.5.into()
+            d: 0.5.into(),
+            color: [1.0, 1.0, 1.0, 1.0].into(),
         });
         self.instances_updated = true;
     }
@@ -201,15 +202,21 @@ impl App {
                         }).unwrap();
                     }
 
-                    // poll UI logic
-                    //self.component.poll(&mut self.layout_calculator);
-
+                    // Run layout and produce render rects
                     let size = self.window.inner_size();
-                    //self.layout_calculator.calculate_layout(size.width, size.height);
+                    self.layout_calculator.calculate_layout(size.width, size.height);
 
-                    // take UI elements to render
-                    //let elements = self.layout_calculator.get_elements();
-                    // convert into primitive elements, fill instance buffer (text -> list of symbols, img/box -> rects)
+                    let render_rects = self.layout_calculator.get_render_rects();
+                    self.instances.clear();
+                    for rect in &render_rects {
+                        self.instances.push(SolidAttributes {
+                            pos: [rect.x, rect.y].into(),
+                            size: [rect.w, rect.h].into(),
+                            d: rect.depth.into(),
+                            color: [rect.r, rect.g, rect.b, rect.a].into(),
+                        });
+                    }
+                    self.instances_updated = true;
 
                     self.frame_counter.increment_frame();
                     instant_event!("Send redraw message");

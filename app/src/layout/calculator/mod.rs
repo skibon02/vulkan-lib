@@ -1,6 +1,6 @@
 use std::collections::{HashMap};
 use log::warn;
-use crate::layout::{AttributeValue, Element, ElementKind, ElementNode, ElementNodeRepr, Lu, ParsedAttributes, SelfDepAxis};
+use crate::layout::{AttributeValue, Element, ElementKind, ElementNode, ElementNodeRepr, Lu, MainGapMode, ParsedAttributes, XAlign, YAlign};
 use crate::layout::calculator::components::element_sizes::{Calculated, ElementSizes, ElementSizesChildren, ParametricKind, ParametricKindState, ParametricSolveState};
 use crate::layout::calculator::components::elements::{Elements, ElementsChildrenMut};
 use crate::layout::calculator::components::font::Fonts;
@@ -42,17 +42,23 @@ pub enum ParametricStage {
 }
 
 
-pub struct ElementCalculated {
-    id: u32,
-    kind: ElementKind,
-    pos_x: f32,
-    pos_y: f32,
+pub struct RenderRect {
+    pub x: i32,
+    pub y: i32,
+    pub w: i32,
+    pub h: i32,
+    pub r: f32,
+    pub g: f32,
+    pub b: f32,
+    pub a: f32,
+    pub depth: f32,
 }
 
 #[derive(Copy, Clone)]
 pub enum Phase {
     ParametricSolve,
     FixPass,
+    PosFixPass,
 }
 
 #[derive(PartialEq, PartialOrd)]
@@ -100,6 +106,10 @@ impl LayoutCalculator {
 
             last_sibling_i.insert(elem.parent_i, i as u32);
         }
+
+        let len = element_nodes.len();
+        self.elements = Elements(element_nodes);
+        self.elements_sizes = Calculated(vec![Default::default(); len]);
     }
 
     pub fn hide_element(&mut self, element_id: u32) {
@@ -289,8 +299,9 @@ impl LayoutCalculator {
                 res
             }
 
-            fn fix_children(children_fixes: &Vec<(usize, Option<Option<Lu>>, Option<Option<Lu>>)>, element_sizes: &mut ElementSizes) {
+            fn fix_children(children_fixes: &Vec<(usize, Option<Option<Lu>>, Option<Option<Lu>>)>, element_sizes: &mut ElementSizesChildren, is_final: bool) {
                 for (i, width, height) in children_fixes {
+                    let element_sizes = element_sizes.get_mut(*i as u32);
                     if let Some(width) = width {
                         if !element_sizes.cur_parametric().state.can_fix_width() {
                             panic!("Attempted to fix width for element {i}, but it is not free!");
@@ -305,15 +316,17 @@ impl LayoutCalculator {
                         element_sizes.try_fix_height(*height);
                     }
 
-                    assert!(element_sizes.cur_parametric_mut().state.is_fixed(), "All children must be fixed in the end of dim_fix_children!");
+                    if is_final {
+                        assert!(element_sizes.cur_parametric_mut().state.is_fixed(), "All children must be fixed in the end of dim_fix_children!");
+                    }
                 }
             }
 
             match element.element.clone() {
                 Element::Row(attrs) => {
-                    let mut solver = elements::row::solver(&attrs);
+                    let solver = elements::row::solver(&attrs);
                     let (early_fixes, mut state) = dim_fix_pass1(solver, el_sizes, &mut children, &mut children_sizes);
-                    fix_children(&early_fixes, &mut *el_sizes);
+                    fix_children(&early_fixes, &mut children_sizes, false);
                     // recursive DFS for selfdep children from first pass (TEMPORAL SOLUTION, need rework)
                     for (i, _, _) in early_fixes {
                         self.dfs(i, Phase::FixPass);
@@ -324,12 +337,12 @@ impl LayoutCalculator {
                     let res = solver.early_finalize(&mut state, &children_sizes, children.iter());
                     Self::handle_self_dep_resolve(el_sizes, res);
                     let fixes = dim_fix_pass2(solver, state, el_sizes, &mut children, &mut children_sizes);
-                    fix_children(&fixes, &mut *el_sizes);
+                    fix_children(&fixes, &mut children_sizes, true);
                 }
                 Element::Col(attrs) => {
                     let solver = elements::col::solver(&attrs);
                     let (early_fixes, mut state) = dim_fix_pass1(solver, el_sizes, &mut children, &mut children_sizes);
-                    fix_children(&early_fixes, &mut *el_sizes);
+                    fix_children(&early_fixes, &mut children_sizes, false);
                     // recursive DFS for selfdep children from first pass (TEMPORAL SOLUTION, need rework)
                     for (i, _, _) in early_fixes {
                         self.dfs(i, Phase::FixPass);
@@ -340,12 +353,12 @@ impl LayoutCalculator {
                     let res = solver.early_finalize(&mut state, &children_sizes, children.iter());
                     Self::handle_self_dep_resolve(el_sizes, res);
                     let fixes= dim_fix_pass2(solver, state, el_sizes, &mut children, &mut children_sizes);
-                    fix_children(&fixes, &mut *el_sizes);
+                    fix_children(&fixes, &mut children_sizes, true);
                 }
                 Element::Stack(attrs) => {
                     let solver = elements::stack::solver(&attrs);
                     let (early_fixes, mut state) = dim_fix_pass1(solver, el_sizes, &mut children, &mut children_sizes);
-                    fix_children(&early_fixes, &mut *el_sizes);
+                    fix_children(&early_fixes, &mut children_sizes, false);
                     // recursive DFS for selfdep children from first pass (TEMPORAL SOLUTION, need rework)
                     for (i, _, _) in early_fixes {
                         self.dfs(i, Phase::FixPass);
@@ -356,26 +369,201 @@ impl LayoutCalculator {
                     let res = solver.early_finalize(&mut state, &children_sizes, children.iter());
                     Self::handle_self_dep_resolve(el_sizes, res);
                     let fixes = dim_fix_pass2(solver, state, el_sizes, &mut children, &mut children_sizes);
-                    fix_children(&fixes, &mut *el_sizes);
+                    fix_children(&fixes, &mut children_sizes, true);
                 }
                 _ => unreachable!(),
             };
         }
+        else {
+            match &element.element {
+                Element::Img(attrs) => {
+                    let img_info = self.images.load_image(attrs.resource.clone());
+                    let aspect = img_info.aspect();
+                    if el_sizes.is_width_fixed() && !el_sizes.is_height_fixed() {
+                        let w = el_sizes.dim_fix.width().unwrap();
+                        el_sizes.dim_fix.set_height((w as f32 * aspect) as Lu);
+                    } else if el_sizes.is_height_fixed() && !el_sizes.is_width_fixed() {
+                        let h = el_sizes.dim_fix.height().unwrap();
+                        el_sizes.dim_fix.set_width((h as f32 / aspect) as Lu);
+                    }
+                }
+                Element::Box(_) => {
+                    // No dependent dimensions to resolve
+                }
+                Element::Text(attrs) => {
+                    if el_sizes.is_width_fixed() {
+                        let w = el_sizes.dim_fix.width().unwrap();
+                        let font = self.fonts.load_font(attrs.font.clone());
+                        let size = attrs.font_size.with_scale(1.0);
+                        let text = self.texts.calculate_layout(i as u32, font, attrs.font.clone(), size, Some(w));
+
+                        if !el_sizes.is_height_fixed() {
+                            el_sizes.dim_fix.set_height(text.height());
+                        }
+                    }
+                }
+                _ => unreachable!()
+            }
+        }
     }
 
-    fn handle_node(&mut self, i: usize, parents: &[usize], phase: Phase) -> ControlFlow {
+    /// Phase 3: Position fix.
+    /// Call guarantee: dim_fix is complete for element i and all children.
+    /// Sets pos_fix (relative position within parent) for each direct child.
+    fn pos_fix_children(&mut self, i: usize) {
+        let el_sizes = &self.elements_sizes[i];
+        let parent_w = el_sizes.dim_fix.width().unwrap_or(0);
+        let parent_h = el_sizes.dim_fix.height().unwrap_or(0);
+        let element = &self.elements[i];
+
+        match &element.element {
+            Element::Row(attrs) => {
+                // Calculate total children width for gap/alignment
+                let mut children_width_sum: Lu = 0;
+                let mut child_count: u32 = 0;
+                let mut ci = i + 1;
+                while ci < self.elements.len() && self.elements[ci].parent_i == i as u32 {
+                    children_width_sum += self.elements_sizes[ci].dim_fix.width().unwrap_or(0);
+                    child_count += 1;
+                    ci = self.next_sibling_or_end(ci);
+                }
+
+                let gap = Self::compute_gap(&attrs.main_gap_mode, parent_w, children_width_sum, child_count);
+                let main_offset = Self::compute_main_offset_x(&attrs.main_align, parent_w, children_width_sum, gap, child_count);
+
+                let mut x = main_offset;
+                let mut ci = i + 1;
+                while ci < self.elements.len() && self.elements[ci].parent_i == i as u32 {
+                    let child_w = self.elements_sizes[ci].dim_fix.width().unwrap_or(0);
+                    let child_h = self.elements_sizes[ci].dim_fix.height().unwrap_or(0);
+
+                    let cross_align = self.elements[ci].self_child_attributes.row.cross_align;
+                    let y = Self::align_y(cross_align, parent_h, child_h);
+
+                    self.elements_sizes[ci].pos_fix.pos_x = x;
+                    self.elements_sizes[ci].pos_fix.pos_y = y;
+
+                    x += child_w + gap;
+                    ci = self.next_sibling_or_end(ci);
+                }
+            }
+            Element::Col(attrs) => {
+                // Calculate total children height for gap/alignment
+                let mut children_height_sum: Lu = 0;
+                let mut child_count: u32 = 0;
+                let mut ci = i + 1;
+                while ci < self.elements.len() && self.elements[ci].parent_i == i as u32 {
+                    children_height_sum += self.elements_sizes[ci].dim_fix.height().unwrap_or(0);
+                    child_count += 1;
+                    ci = self.next_sibling_or_end(ci);
+                }
+
+                let gap = Self::compute_gap(&attrs.main_gap_mode, parent_h, children_height_sum, child_count);
+                let main_offset = Self::compute_main_offset_y(&attrs.main_align, parent_h, children_height_sum, gap, child_count);
+
+                let mut y = main_offset;
+                let mut ci = i + 1;
+                while ci < self.elements.len() && self.elements[ci].parent_i == i as u32 {
+                    let child_w = self.elements_sizes[ci].dim_fix.width().unwrap_or(0);
+                    let child_h = self.elements_sizes[ci].dim_fix.height().unwrap_or(0);
+
+                    let cross_align = self.elements[ci].self_child_attributes.col.cross_align;
+                    let x = Self::align_x(cross_align, parent_w, child_w);
+
+                    self.elements_sizes[ci].pos_fix.pos_x = x;
+                    self.elements_sizes[ci].pos_fix.pos_y = y;
+
+                    y += child_h + gap;
+                    ci = self.next_sibling_or_end(ci);
+                }
+            }
+            _ => {
+                // Leaf elements and Stack: no positioning needed (Stack is not yet implemented)
+            }
+        }
+    }
+
+    /// Advance past element and all its descendants, returning the next sibling index or end.
+    fn next_sibling_or_end(&self, i: usize) -> usize {
+        let mut j = i + 1;
+        while j < self.elements.len() && self.elements[j].parent_i > i as u32 {
+            j += 1;
+        }
+        j
+    }
+
+    fn compute_gap(mode: &MainGapMode, parent_main: Lu, children_main_sum: Lu, child_count: u32) -> Lu {
+        if child_count <= 1 {
+            return 0;
+        }
+        let gaps = child_count - 1;
+        match mode {
+            MainGapMode::Between => {
+                let free = parent_main.saturating_sub(children_main_sum);
+                free / gaps as Lu
+            }
+            MainGapMode::Around => {
+                let free = parent_main.saturating_sub(children_main_sum);
+                free / (child_count + 1) as Lu
+            }
+            MainGapMode::Fixed(g) => *g,
+            MainGapMode::None => 0,
+        }
+    }
+
+    fn compute_main_offset_x(align: &XAlign, parent_main: Lu, children_main_sum: Lu, gap: Lu, child_count: u32) -> Lu {
+        let gaps = if child_count > 1 { child_count - 1 } else { 0 };
+        let total = children_main_sum + gap * gaps as Lu;
+        match align {
+            XAlign::Left => 0,
+            XAlign::Center => parent_main.saturating_sub(total) / 2,
+            XAlign::Right => parent_main.saturating_sub(total),
+        }
+    }
+
+    fn compute_main_offset_y(align: &YAlign, parent_main: Lu, children_main_sum: Lu, gap: Lu, child_count: u32) -> Lu {
+        let gaps = if child_count > 1 { child_count - 1 } else { 0 };
+        let total = children_main_sum + gap * gaps as Lu;
+        match align {
+            YAlign::Top => 0,
+            YAlign::Center => parent_main.saturating_sub(total) / 2,
+            YAlign::Bottom => parent_main.saturating_sub(total),
+        }
+    }
+
+    fn align_x(align: XAlign, parent: Lu, child: Lu) -> Lu {
+        match align {
+            XAlign::Left => 0,
+            XAlign::Center => parent.saturating_sub(child) / 2,
+            XAlign::Right => parent.saturating_sub(child),
+        }
+    }
+
+    fn align_y(align: YAlign, parent: Lu, child: Lu) -> Lu {
+        match align {
+            YAlign::Top => 0,
+            YAlign::Center => parent.saturating_sub(child) / 2,
+            YAlign::Bottom => parent.saturating_sub(child),
+        }
+    }
+
+    fn handle_node(&mut self, i: usize, parents: &[usize], phase: Phase, is_root: bool) -> ControlFlow {
         match phase {
             Phase::ParametricSolve => {
                 ControlFlow::Continue
             }
             Phase::FixPass => {
-                if self.elements_sizes[i].cur_parametric_mut().state.is_fixed() {
-                    ControlFlow::SkipChildren
-                }
-                else {
+                if is_root || !self.elements_sizes[i].cur_parametric_mut().state.is_fixed() {
                     self.dim_fix_children(i);
                     ControlFlow::Continue
                 }
+                else {
+                    ControlFlow::SkipChildren
+                }
+            }
+            Phase::PosFixPass => {
+                self.pos_fix_children(i);
+                ControlFlow::Continue
             }
         }
     }
@@ -394,6 +582,8 @@ impl LayoutCalculator {
             }
             Phase::FixPass => {
             }
+            Phase::PosFixPass => {
+            }
         }
     }
 
@@ -405,14 +595,17 @@ impl LayoutCalculator {
         }
 
         self.dfs(0, Phase::ParametricSolve);
+        self.elements_sizes[0].try_fix_width(Some(width));
+        self.elements_sizes[0].try_fix_height(Some(height));
         self.dfs(0, Phase::FixPass);
+        self.dfs(0, Phase::PosFixPass);
     }
 
 
     /// Result for FixPass dfs is Fixed parametric kind and exact width and height for element and all other subtree elements
     pub fn dfs(&mut self, first_element: usize, phase: Phase) {
         let mut parents = vec![first_element];
-        if self.handle_node(first_element, &[], phase) == ControlFlow::SkipChildren {
+        if self.handle_node(first_element, &[], phase, true) == ControlFlow::SkipChildren {
             self.finalize_node(first_element, phase);
             return;
         }
@@ -430,7 +623,7 @@ impl LayoutCalculator {
             }
 
 
-            if self.handle_node(i, &parents, phase) == ControlFlow::SkipChildren {
+            if self.handle_node(i, &parents, phase, false) == ControlFlow::SkipChildren {
                 self.finalize_node(i, phase);
                 // Skip all descendants by advancing until we find a node that's not a child
                 let skip_below = i;
@@ -449,7 +642,65 @@ impl LayoutCalculator {
         }
     }
 
-    pub fn get_elements(&self) -> Vec<ElementCalculated> {
-        vec![]
+    /// Produce render rects for visualization.
+    /// Containers get a 3px border outline, leaf elements get a solid fill.
+    pub fn get_render_rects(&self) -> Vec<RenderRect> {
+        let mut rects = Vec::new();
+        let mut abs_x = vec![0i32; self.elements.len()];
+        let mut abs_y = vec![0i32; self.elements.len()];
+
+        // Compute absolute positions
+        for i in 0..self.elements.len() {
+            let rel_x = self.elements_sizes[i].pos_fix.pos_x as i32;
+            let rel_y = self.elements_sizes[i].pos_fix.pos_y as i32;
+            let parent = self.elements[i].parent_i as usize;
+            if i == 0 {
+                abs_x[i] = rel_x;
+                abs_y[i] = rel_y;
+            } else {
+                abs_x[i] = abs_x[parent] + rel_x;
+                abs_y[i] = abs_y[parent] + rel_y;
+            }
+
+            let w = self.elements_sizes[i].dim_fix.width().unwrap_or(0) as i32;
+            let h = self.elements_sizes[i].dim_fix.height().unwrap_or(0) as i32;
+            let x = abs_x[i];
+            let y = abs_y[i];
+
+            let depth = (i as f32 * 0.001);
+
+            if self.elements[i].element.is_container() {
+                // Border: 4 rects, 3px wide
+                let bw = 3;
+                let (r, g, b) = match &self.elements[i].element {
+                    Element::Row(_) => (0.2, 0.8, 0.2),
+                    Element::Col(_) => (0.2, 0.4, 0.9),
+                    _ => (0.5, 0.5, 0.5),
+                };
+                // Top
+                rects.push(RenderRect { x, y, w, h: bw, r, g, b, a: 1.0, depth });
+                // Bottom
+                rects.push(RenderRect { x, y: y + h - bw, w, h: bw, r, g, b, a: 1.0, depth });
+                // Left
+                rects.push(RenderRect { x, y, w: bw, h, r, g, b, a: 1.0, depth });
+                // Right
+                rects.push(RenderRect { x: x + w - bw, y, w: bw, h, r, g, b, a: 1.0, depth });
+            } else {
+                let (r, g, b) = match &self.elements[i].element {
+                    Element::Box(attrs) => {
+                        match &attrs.fill {
+                            Some(crate::layout::Fill::Solid(c)) => (c.0 as f32 / 255.0, c.1 as f32 / 255.0, c.2 as f32 / 255.0),
+                            _ => (0.3, 0.3, 0.3),
+                        }
+                    }
+                    Element::Img(_) => (0.8, 0.6, 0.2),
+                    Element::Text(_) => (0.9, 0.9, 0.9),
+                    _ => (0.5, 0.5, 0.5),
+                };
+                rects.push(RenderRect { x, y, w, h, r, g, b, a: 1.0, depth });
+            }
+        }
+
+        rects
     }
 }

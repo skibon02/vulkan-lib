@@ -79,7 +79,7 @@ impl<'a> Iterator for ElementsChildrenIter<'a> {
 
             self.i = el.next_sibling_i.map(|next_i| next_i - self.inner.parent_i - 1);
 
-            Some((i + self.inner.parent_i, el))
+            Some((i + self.inner.parent_i + 1, el))
         } else {
             None
         }
@@ -110,7 +110,7 @@ impl<'a, 'b> Iterator for ElementsChildrenIterMut<'a, 'b> {
 
             self.i = el.next_sibling_i.map(|next_i| next_i - self.inner.parent_i - 1);
 
-            Some((i + self.inner.parent_i, el))
+            Some((i + self.inner.parent_i + 1, el))
         }
         else {
             None

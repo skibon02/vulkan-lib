@@ -103,7 +103,7 @@ impl ContainerParametricSolver for RowSolver<'_> {
                 res.state.width = SideParametricKind::Fixed;
             }
             if !cross_stretch_en {
-                res.state.width = SideParametricKind::Fixed;
+                res.state.height = SideParametricKind::Fixed;
             }
         }
 
@@ -230,32 +230,47 @@ impl ContainerFixSolver for RowSolver<'_> {
         if grow_en && !state.has_self_dep_y {
             let width = if cur_parametric.state.can_fix_width() {
                 let free_space = el_sizes.dim_fix.width().unwrap() - state.fixed_width_sum;
-                let mut min_sum = 0;
-                let mut min_cnt = 0;
-                'outer: for (&sz, &cnt) in &state.breakpoints {
-                    for i in 0..cnt {
-                        min_sum += sz;
-                        min_cnt += 1;
-                        if min_sum > free_space {
-                            break 'outer;
-                        }
+
+                // Find target width T so that all free children get equal width where possible.
+                // Children whose min_width > T keep their min_width; the rest get T.
+                // Iterate from largest breakpoint down, locking oversized children.
+                let total_count: usize = state.breakpoints.values().sum();
+                let mut remaining_space = free_space;
+                let mut remaining_count = total_count;
+
+                for (&bp, &cnt) in state.breakpoints.iter().rev() {
+                    if remaining_count == 0 {
+                        break;
+                    }
+                    let target = remaining_space / remaining_count as Lu;
+                    if bp > target {
+                        remaining_space -= bp * cnt as Lu;
+                        remaining_count -= cnt;
+                    } else {
+                        break;
                     }
                 }
 
-                let w = 0;
+                let target_width = if remaining_count > 0 {
+                    remaining_space / remaining_count as Lu
+                } else {
+                    cur_parametric.min_width
+                };
+
+                let w = max(cur_parametric.min_width, target_width);
                 Some(Some(w))
             }
             else {
                 None
             };
 
-            let height = cur_parametric.state.can_fix_height().then_some(cross_stretch_en.then_some(state.max_height));
+            let height = cur_parametric.state.can_fix_height().then_some(cross_stretch_en.then_some(el_sizes.dim_fix.height().unwrap()));
             (width, height)
         }
         else {
 
             let width = cur_parametric.state.can_fix_width().then_some(None);
-            let height = cur_parametric.state.can_fix_height().then_some(cross_stretch_en.then_some(state.max_height));
+            let height = cur_parametric.state.can_fix_height().then_some(cross_stretch_en.then_some(el_sizes.dim_fix.height().unwrap()));
             (width, height)
         }
     }

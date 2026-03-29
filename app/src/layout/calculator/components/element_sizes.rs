@@ -93,8 +93,8 @@ impl ElementSizes {
     /// Returns true -> need to run subtree fix for this element
     pub fn try_fix_height(&mut self, height: Option<Lu>) -> bool {
         let cur = self.cur_parametric_mut();
-        if cur.state.can_fix_width() {
-            cur.state.width = SideParametricKind::Fixed;
+        if cur.state.can_fix_height() {
+            cur.state.height = SideParametricKind::Fixed;
             let is_fixed = cur.state.is_fixed();
 
             let height = if let Some(h) = height {
@@ -139,16 +139,16 @@ pub struct ElementSizesChildren<'a> {
 }
 impl<'a> ElementSizesChildren<'a> {
     pub fn get_mut(&mut self, i: u32) -> &mut ElementSizes {
-        if (self.parent_i..self.parent_i + self.elements.len()).contains(&(i as usize)) {
-            &mut self.elements[i as usize - self.parent_i]
+        if (self.parent_i+1..=self.parent_i + self.elements.len()).contains(&(i as usize)) {
+            &mut self.elements[i as usize - self.parent_i - 1]
         }
         else {
             panic!("Incorrect element index specified provided to ElementsChildren::get")
         }
     }
     pub fn get(&self, i: u32) -> &ElementSizes {
-        if (self.parent_i..self.parent_i + self.elements.len()).contains(&(i as usize)) {
-            &self.elements[i as usize - self.parent_i]
+        if (self.parent_i+1..=self.parent_i + self.elements.len()).contains(&(i as usize)) {
+            &self.elements[i as usize - self.parent_i - 1]
         }
         else {
             panic!("Incorrect element index specified provided to ElementsChildren::get")
@@ -276,6 +276,6 @@ impl DimFixState {
 }
 #[derive(Clone, Debug, Default)]
 pub struct PosFixState {
-    pos_x: Lu,
-    pos_y: Lu,
+    pub pos_x: Lu,
+    pub pos_y: Lu,
 }

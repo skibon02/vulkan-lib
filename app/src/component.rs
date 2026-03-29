@@ -1,6 +1,6 @@
 use std::time::Instant;
 use smallvec::smallvec;
-use crate::layout::{AttributeValue, ElementKind, ElementNodeRepr, ImgValue, MainGapMode, RowValue, TextValue, XAlign};
+use crate::layout::{AttributeValue, BoxValue, Color, ColValue, ElementKind, ElementNodeRepr, Fill, GeneralValue, MainGapMode, MainSizeMode, RowValue, RowChildValue, YAlign};
 use crate::layout::calculator::LayoutCalculator;
 
 pub struct Component {
@@ -16,32 +16,76 @@ impl Component {
 
     pub fn init(&mut self, calculator: &mut LayoutCalculator) {
         calculator.init(vec![
+            // 0: Root row
             ElementNodeRepr {
                 parent_i: 0,
                 element: ElementKind::Row,
-                attributes: smallvec![AttributeValue::Row(RowValue::MainGapMode(MainGapMode::Fixed(100)))],
+                attributes: smallvec![
+                    AttributeValue::Row(RowValue::MainSizeMode(MainSizeMode::EqualWidth)),
+                    AttributeValue::Row(RowValue::MainGapMode(MainGapMode::Fixed(10))),
+                ],
             },
+            // 1: Red box
             ElementNodeRepr {
                 parent_i: 0,
-                element: ElementKind::Img,
-                attributes: smallvec![AttributeValue::Img(ImgValue::Resource(String::from("hello.png")))],
+                element: ElementKind::Box,
+                attributes: smallvec![
+                    AttributeValue::Box(BoxValue::Fill(Some(Fill::Solid(Color(220, 50, 50, 1.0))))),
+                    AttributeValue::General(GeneralValue::MinHeight(100)),
+                ],
             },
+            // 2: Inner col
             ElementNodeRepr {
                 parent_i: 0,
-                element: ElementKind::Text,
-                attributes: smallvec![AttributeValue::Text(TextValue::Preformat(true)), AttributeValue::Text(TextValue::TextAlignX(XAlign::Center))],
+                element: ElementKind::Col,
+                attributes: smallvec![
+                    AttributeValue::Col(ColValue::MainSizeMode(MainSizeMode::EqualWidth)),
+                    AttributeValue::Col(ColValue::MainGapMode(MainGapMode::Fixed(10))),
+                ],
+            },
+            // 3: Green box (child of col)
+            ElementNodeRepr {
+                parent_i: 2,
+                element: ElementKind::Box,
+                attributes: smallvec![
+                    AttributeValue::Box(BoxValue::Fill(Some(Fill::Solid(Color(50, 200, 80, 1.0))))),
+                ],
+            },
+            // 4: Blue box (child of col)
+            ElementNodeRepr {
+                parent_i: 2,
+                element: ElementKind::Box,
+                attributes: smallvec![
+                    AttributeValue::Box(BoxValue::Fill(Some(Fill::Solid(Color(50, 100, 220, 1.0))))),
+                ],
+            },
+            // 5: Yellow box
+            ElementNodeRepr {
+                parent_i: 0,
+                element: ElementKind::Box,
+                attributes: smallvec![
+                    AttributeValue::Box(BoxValue::Fill(Some(Fill::Solid(Color(230, 200, 50, 1.0))))),
+                    AttributeValue::General(GeneralValue::MinHeight(60)),
+                    AttributeValue::RowChild(RowChildValue::CrossAlign(YAlign::Top), false),
+                    AttributeValue::General(GeneralValue::MinWidth(150)),
+                ],
+            },
+            // 6: Nice box
+            ElementNodeRepr {
+                parent_i: 0,
+                element: ElementKind::Box,
+                attributes: smallvec![
+                    AttributeValue::Box(BoxValue::Fill(Some(Fill::Solid(Color(180, 40, 210, 1.0))))),
+                    AttributeValue::General(GeneralValue::MinHeight(60)),
+                    AttributeValue::RowChild(RowChildValue::CrossAlign(YAlign::Bottom), false),
+                    AttributeValue::General(GeneralValue::MinWidth(100)),
+                    AttributeValue::General(GeneralValue::NostretchX(true)),
+                ],
             },
         ]);
         self.start_tm = Instant::now();
     }
 
     pub fn poll(&mut self, calculator: &mut LayoutCalculator) {
-        let hide_img = self.start_tm.elapsed().as_secs() % 2 == 0;
-        if hide_img {
-            calculator.hide_element(1);
-        }
-        else {
-            calculator.show_element(1);
-        }
     }
 }

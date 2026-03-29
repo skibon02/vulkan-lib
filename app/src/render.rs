@@ -61,6 +61,7 @@ define_layout! {
         pub pos: ivec2<0>,
         pub size: ivec2<0>,
         pub d: float<0>,
+        pub color: vec4<0>,
     }
 }
 
@@ -158,6 +159,7 @@ impl Default for SolidAttributes {
             pos: [0, 0].into(),
             d: 0.0.into(),
             size: [0, 0].into(),
+            color: [1.0, 1.0, 1.0, 1.0].into(),
         }
     }
 }
@@ -357,6 +359,7 @@ impl RenderTask {
                                     pos: [x as i32 - font_size.width as i32 / 2, y as i32 - font_size.height as i32 / 2].into(),
                                     size: [font_size.width as i32, font_size.height as i32].into(),
                                     d: 0.5.into(),
+                                    color: [1.0, 1.0, 1.0, 1.0].into(),
                                 };
                             });
 

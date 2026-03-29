@@ -377,7 +377,7 @@ pub struct BoxAttributes {
     pub round_corners: Option<Lu>,
 }
 
-#[derive(Clone, Debug, Default, AttributeEnum)]
+#[derive(Clone, Debug, AttributeEnum)]
 pub struct RowAttributes {
     pub main_size_mode: MainSizeMode,
     pub main_gap_mode: MainGapMode,
@@ -387,6 +387,21 @@ pub struct RowAttributes {
     pub separator_width: Option<Lu>,
     pub separator_fill: Fill,
     pub children_default: RowChildAttributes,
+}
+
+impl Default for RowAttributes {
+    fn default() -> Self {
+        Self {
+            main_size_mode: MainSizeMode::default(),
+            main_gap_mode: MainGapMode::default(),
+            main_align: XAlign::default(),
+
+            cross_stretch: true,
+            separator_width: None,
+            separator_fill: Fill::default(),
+            children_default: RowChildAttributes::default(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, AttributeEnum)]
