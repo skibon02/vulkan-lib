@@ -119,17 +119,17 @@ impl LayoutCalculator {
     /// fill in all children.parent_parametric (if not fixed), probably make subtree fix
     /// Call guarantee: children are post-general solved or fixed. Current element is not solved
     fn parametric_solve(&mut self, i: usize) {
-        let (element, children) = self.elements.children(i);
+        let (element, mut children) = self.elements.children(i);
         let (el_sizes, children_sizes) = self.elements_sizes.children(i);
         let parametric = if element.element.is_container() {
 
-            fn parametric_solve_container<T: ContainerParametricSolver>(mut solver: T,
+            fn parametric_solve_container<'a, T: ContainerParametricSolver>(mut solver: T,
                                                                         container_sizes: &mut ElementSizes,
-                                                                        children: ElementsChildrenMut,
+                                                                        children: &mut ElementsChildrenMut<'a>,
                                                                         mut children_sizes: ElementSizesChildren) -> (Vec<u32>, ParametricSolveState) {
                 let mut solver_state = T::State::default();
                 let mut child_fixes = vec![];
-                for (i, child) in children.into_iter() {
+                for (i, child) in children.iter_mut() {
                     let child_sizes = children_sizes.get_mut(i);
                     if !child_sizes.cur_parametric_mut().state.is_fixed() {
                         child_sizes.parent_parametric = child_sizes.post_parametric.clone();
@@ -166,13 +166,13 @@ impl LayoutCalculator {
 
             let (child_fixes, parametric) = match &element.element {
                 Element::Row(attrs) => {
-                    parametric_solve_container(elements::row::solver(attrs), el_sizes, children, children_sizes)
+                    parametric_solve_container(elements::row::solver(attrs), el_sizes, &mut children, children_sizes)
                 }
                 Element::Col(attrs) => {
-                    parametric_solve_container(elements::col::solver(attrs), el_sizes, children, children_sizes)
+                    parametric_solve_container(elements::col::solver(attrs), el_sizes, &mut children, children_sizes)
                 }
                 Element::Stack(attrs) => {
-                    parametric_solve_container(elements::stack::solver(attrs), el_sizes, children, children_sizes)
+                    parametric_solve_container(elements::stack::solver(attrs), el_sizes, &mut children, children_sizes)
                 }
                 _ => unreachable!(),
             };
@@ -242,53 +242,103 @@ impl LayoutCalculator {
     /// Call guarantee: fix dimensions are provided for element i, matching parametric solve ranges.
     /// Result: specify fix dimensions for all direct children, maybe update some internal positioning information.
     fn dim_fix_children(&mut self, i: usize) {
-        let (el_sizes, children_sizes) = self.elements_sizes.children(i);
-        let (element, children) = self.elements.children(i);
+        let (el_sizes, mut children_sizes) = self.elements_sizes.children(i);
+        let (element, mut children) = self.elements.children(i);
         if element.element.is_container() {
-            fn dim_fix_container<T: ContainerFixSolver>(mut solver: T,
-                                                        sizes: &mut ElementSizes,
-                                                        children: ElementsChildrenMut,
-                                                        mut children_sizes: ElementSizesChildren) -> Vec<(usize, Option<Option<Lu>>, Option<Option<Lu>>)> {
+            fn dim_fix_pass1<T: ContainerFixSolver>(mut solver: T,
+                                                    sizes: &mut ElementSizes,
+                                                    children: &mut ElementsChildrenMut,
+                                                    children_sizes: &mut ElementSizesChildren) -> (Vec<(usize, Option<Option<Lu>>, Option<Option<Lu>>)>, T::State) {
                 let mut res = vec![];
-                let mut state = solver.init(&children_sizes, children.iter());
+                let mut state = solver.init(children_sizes, children.iter());
 
-                for (i, child) in children.into_iter() {
+                for (i, child) in children.iter_mut() {
+                    let (width, height) = solver.early_handle_child(&mut state, children_sizes.get_mut(i), T::unwrap(&mut child.self_child_attributes), sizes);
+                    if width.is_some() && height.is_some() {
+                        res.push((i as usize, width, height));
+                    }
+                }
+                (res, state)
+            }
+
+            fn dim_fix_pass2<T: ContainerFixSolver>(mut solver: T,
+                                                    mut state: T::State,
+                                                    sizes: &mut ElementSizes,
+                                                    children: &mut ElementsChildrenMut,
+                                                    children_sizes: &mut ElementSizesChildren) -> Vec<(usize, Option<Option<Lu>>, Option<Option<Lu>>)> {
+                let mut res = vec![];
+
+                for (i, child) in children.iter_mut() {
                     let (width, height) = solver.handle_child(&mut state, children_sizes.get_mut(i), T::unwrap(&mut child.self_child_attributes), sizes);
-                    res.push((i as usize, width, height));
+                    if width.is_some() && height.is_some() {
+                        res.push((i as usize, width, height));
+                    }
                 }
                 res
             }
 
-            let (children_fixes) = match &element.element {
+            fn fix_children(children_fixes: &Vec<(usize, Option<Option<Lu>>, Option<Option<Lu>>)>, element_sizes: &mut ElementSizes) {
+                for (i, width, height) in children_fixes {
+                    if let Some(width) = width {
+                        if !element_sizes.cur_parametric().state.can_fix_width() {
+                            panic!("Attempted to fix width for element {i}, but it is not free!");
+                        }
+                        element_sizes.try_fix_width(*width);
+                    }
+
+                    if let Some(height) = height {
+                        if !element_sizes.cur_parametric().state.can_fix_height() {
+                            panic!("Attempted to fix height for element {i}, but it is not free!");
+                        }
+                        element_sizes.try_fix_height(*height);
+                    }
+
+                    assert!(element_sizes.cur_parametric_mut().state.is_fixed(), "All children must be fixed in the end of dim_fix_children!");
+                }
+            }
+
+            match element.element.clone() {
                 Element::Row(attrs) => {
-                    dim_fix_container(elements::row::solver(attrs), el_sizes, children, children_sizes)
+                    let (early_fixes, state) = dim_fix_pass1(elements::row::solver(&attrs), el_sizes, &mut children, &mut children_sizes);
+                    fix_children(&early_fixes, &mut *el_sizes);
+                    // recursive DFS for selfdep children from first pass (TEMPORAL SOLUTION, need rework)
+                    for (i, _, _) in early_fixes {
+                        self.dfs(i, Phase::FixPass);
+                    }
+
+                    let (el_sizes, mut children_sizes) = self.elements_sizes.children(i);
+                    let (_, mut children) = self.elements.children(i);
+                    let fixes = dim_fix_pass2(elements::row::solver(&attrs), state, el_sizes, &mut children, &mut children_sizes);
+                    fix_children(&fixes, &mut *el_sizes);
                 }
                 Element::Col(attrs) => {
-                    dim_fix_container(elements::col::solver(attrs), el_sizes, children, children_sizes)
+                    let (early_fixes, state) = dim_fix_pass1(elements::col::solver(&attrs), el_sizes, &mut children, &mut children_sizes);
+                    fix_children(&early_fixes, &mut *el_sizes);
+                    // recursive DFS for selfdep children from first pass (TEMPORAL SOLUTION, need rework)
+                    for (i, _, _) in early_fixes {
+                        self.dfs(i, Phase::FixPass);
+                    }
+
+                    let (el_sizes, mut children_sizes) = self.elements_sizes.children(i);
+                    let (_, mut children) = self.elements.children(i);
+                    let fixes= dim_fix_pass2(elements::col::solver(&attrs), state, el_sizes, &mut children, &mut children_sizes);
+                    fix_children(&fixes, &mut *el_sizes);
                 }
                 Element::Stack(attrs) => {
-                    dim_fix_container(elements::stack::solver(attrs), el_sizes, children, children_sizes)
+                    let (early_fixes, state) = dim_fix_pass1(elements::stack::solver(&attrs), el_sizes, &mut children, &mut children_sizes);
+                    fix_children(&early_fixes, &mut *el_sizes);
+                    // recursive DFS for selfdep children from first pass (TEMPORAL SOLUTION, need rework)
+                    for (i, _, _) in early_fixes {
+                        self.dfs(i, Phase::FixPass);
+                    }
+
+                    let (el_sizes, mut children_sizes) = self.elements_sizes.children(i);
+                    let (_, mut children) = self.elements.children(i);
+                    let fixes = dim_fix_pass2(elements::stack::solver(&attrs), state, el_sizes, &mut children, &mut children_sizes);
+                    fix_children(&fixes, &mut *el_sizes);
                 }
                 _ => unreachable!(),
             };
-
-            for (i, width, height) in children_fixes {
-                if let Some(width) = width {
-                    if !self.elements_sizes[i].cur_parametric().state.can_fix_width() {
-                        panic!("Attempted to fix width for element {i}, but it is not free!");
-                    }
-                    self.elements_sizes[i].try_fix_width(width);
-                }
-
-                if let Some(height) = height {
-                    if !self.elements_sizes[i].cur_parametric().state.can_fix_height() {
-                        panic!("Attempted to fix height for element {i}, but it is not free!");
-                    }
-                    self.elements_sizes[i].try_fix_height(height);
-                }
-
-                assert!(self.elements_sizes[i].cur_parametric_mut().state.is_fixed(), "All children must be fixed in the end of dim_fix_children!");
-            }
         }
     }
 

@@ -23,6 +23,8 @@ pub trait ContainerFixSolver: Sized + HasChildAttributes {
     type State;
     fn init(&mut self, children_sizes: &ElementSizesChildren, children: ElementsChildrenIter) -> Self::State;
     /// Must provide all free axis information as a result to make full fix
+    fn early_handle_child(&mut self, state: &mut Self::State, child_sizes: &ElementSizes, child_attrs: &Self::ChildAttributes, sizes: &ElementSizes) -> (Option<Option<Lu>>, Option<Option<Lu>>);
+    fn early_finalize(&mut self, state: &mut Self::State, children_sizes: &ElementSizesChildren, children: ElementsChildrenIter);
     fn handle_child(&mut self, state: &mut Self::State, child_sizes: &ElementSizes, child_attrs: &Self::ChildAttributes, sizes: &ElementSizes) -> (Option<Option<Lu>>, Option<Option<Lu>>);
 }
 

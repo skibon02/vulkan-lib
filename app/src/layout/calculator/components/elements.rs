@@ -41,7 +41,7 @@ impl<'a> ElementsChildrenMut<'a> {
             panic!("Incorrect element index specified provided to ElementsChildren::get")
         }
     }
-    pub fn into_iter(self) -> ElementsChildrenIterMut<'a> {
+    pub fn iter_mut(&mut self) -> ElementsChildrenIterMut<'a, '_> {
         ElementsChildrenIterMut {
             inner: self,
             i: Some(0),
@@ -85,12 +85,12 @@ impl<'a> Iterator for ElementsChildrenIter<'a> {
         }
     }
 }
-pub struct ElementsChildrenIterMut<'a> {
-    inner: ElementsChildrenMut<'a>,
+pub struct ElementsChildrenIterMut<'a, 'b> {
+    inner: &'b mut ElementsChildrenMut<'a>,
     i: Option<u32>,
 }
 
-impl<'a> Iterator for ElementsChildrenIterMut<'a> {
+impl<'a, 'b> Iterator for ElementsChildrenIterMut<'a, 'b> {
     type Item = (u32, &'a mut ElementNode);
 
     fn next(&mut self) -> Option<Self::Item> {

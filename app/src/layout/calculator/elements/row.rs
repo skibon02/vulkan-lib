@@ -114,6 +114,8 @@ pub struct RowSolverFixState {
     has_self_dep_x: bool,
     has_self_dep_y: bool,
     fixed_width_sum: Lu,
+    sum_width: Lu,
+    max_height: Lu,
     breakpoints: BTreeMap<Lu, usize>
 }
 // STAGE 2: DIM FIX
@@ -124,6 +126,7 @@ impl ContainerFixSolver for RowSolver<'_> {
     fn init(&mut self, children_sizes: &ElementSizesChildren, children: ElementsChildrenIter) -> Self::State {
         let mut has_self_dep_x = false;
         let mut has_self_dep_y = false;
+        let mut has_self_dep_both = false;
         let mut breakpoints = BTreeMap::new();
 
         let mut fixed_width_sum = 0;
@@ -136,6 +139,9 @@ impl ContainerFixSolver for RowSolver<'_> {
             else if kind == ParametricKind::HeightToWidth {
                 has_self_dep_y = true;
             }
+            else if kind == ParametricKind::SelfDepBoth {
+                has_self_dep_both = true;
+            }
 
             fixed_width_sum += child_sizes.dim_fix.width().unwrap_or(0);
             if child_sizes.cur_parametric().state.can_fix_width() {
@@ -143,38 +149,116 @@ impl ContainerFixSolver for RowSolver<'_> {
             }
         }
 
-        if has_self_dep_y && has_self_dep_x {
+        if has_self_dep_x || (!has_self_dep_y && has_self_dep_both){
             has_self_dep_y = false;
+        }
+        else {
+            has_self_dep_x = false;
         }
 
         RowSolverFixState {
             has_self_dep_x,
             has_self_dep_y,
             fixed_width_sum,
-            breakpoints
+            breakpoints,
+            max_height: 0,
+            sum_width: 0,
         }
     }
 
-    fn handle_child(&mut self, state: &mut Self::State, child_sizes: &ElementSizes, child_attrs: &Self::ChildAttributes, el_sizes: &ElementSizes) -> (Option<Option<Lu>>, Option<Option<Lu>>) {
-        let grow_en = matches!(self.attrs.main_size_mode, MainSizeMode::EqualWidth) && !state.has_self_dep_y;
-        let gap_en = matches!(self.attrs.main_gap_mode, MainGapMode::Around | MainGapMode::Between) && !state.has_self_dep_y;
-        let cross_stretch_en = self.attrs.cross_stretch;
-
-        let width = if grow_en {
-            let free_space = el_sizes.dim_fix.width().unwrap() - state.fixed_width_sum;
-            let mut min_sum = 0;
-            let mut min_cnt = 0;
-            'outer: for (&sz, &cnt) in &state.breakpoints {
-                for i in 0..cnt {
-                    min_sum += sz;
-                    min_cnt += 1;
-                    if min_sum > free_space {
-                        break 'outer;
-                    }
+    fn early_handle_child(&mut self, state: &mut Self::State, child_sizes: &ElementSizes, child_attrs: &Self::ChildAttributes, el_sizes: &ElementSizes) -> (Option<Option<Lu>>, Option<Option<Lu>>) {
+        if state.has_self_dep_y {
+            let cur_parametric = child_sizes.cur_parametric();
+            match cur_parametric.state.kind() {
+                ParametricKind::HeightToWidth | ParametricKind::SelfDepBoth => {
+                    (None, Some(Some(el_sizes.min_height())))
+                }
+                _ => {
+                    (None, None)
                 }
             }
-        };
-        (None, None)
+        }
+        else if state.has_self_dep_x {
+            let cur_parametric = child_sizes.cur_parametric();
+            match cur_parametric.state.kind() {
+                ParametricKind::WidthToHeight | ParametricKind::SelfDepBoth => {
+                    (Some(Some(el_sizes.min_width())), None)
+                }
+                _ => {
+                    (None, None)
+                }
+            }
+        }
+        else {
+            (None, None)
+        }
+    }
+    fn early_finalize(&mut self, state: &mut Self::State, children_sizes: &ElementSizesChildren, children: ElementsChildrenIter) {
+        if state.has_self_dep_y {
+            // recalculate max min height
+            for (i, _) in children {
+                let child_sizes = children_sizes.get(i);
+                state.max_height = max(state.max_height, child_sizes.min_height())
+            }
+        }
+        else if state.has_self_dep_x {
+            // recalculate width sum
+            for (i, _) in children {
+                let child_sizes = children_sizes.get(i);
+                state.sum_width += child_sizes.min_height();
+            }
+        }
+    }
+    fn handle_child(&mut self, state: &mut Self::State, child_sizes: &ElementSizes, child_attrs: &Self::ChildAttributes, sizes: &ElementSizes) -> (Option<Option<Lu>>, Option<Option<Lu>>) {
+        let cross_stretch_en = self.attrs.cross_stretch;
+
+        if state.has_self_dep_y {
+            let cur_parametric = child_sizes.cur_parametric();
+            match cur_parametric.state.kind() {
+                ParametricKind::HeightToWidth | ParametricKind::SelfDepBoth => {
+                    (None, Some(Some(el_sizes.min_height())))
+                }
+                _ => {
+                    let width = cur_parametric.state.can_fix_width().then_some(None);
+                    let height = cur_parametric.state.can_fix_height().then_some(Some(el_sizes.min_height()));
+                    (width, height)
+                }
+            }
+        }
+        else {
+            let grow_en = matches!(self.attrs.main_size_mode, MainSizeMode::EqualWidth);
+            let gap_en = matches!(self.attrs.main_gap_mode, MainGapMode::Around | MainGapMode::Between);
+
+            let cur_parametric = child_sizes.cur_parametric();
+            // match cur_parametric.state.kind() {
+            //     ParametricKind::WidthToHeight | ParametricKind::SelfDepBoth => {
+            //         (None, Some(Some(el_sizes.min_height())))
+            //     }
+            //     _ => {
+            //         let width = cur_parametric.state.can_fix_width().then_some(None);
+            //         let height = cur_parametric.state.can_fix_height().then_some(Some(el_sizes.min_height()));
+            //         (width, height)
+            //     }
+            // }
+            if grow_en {
+                let free_space = el_sizes.dim_fix.width().unwrap() - state.fixed_width_sum;
+                let mut min_sum = 0;
+                let mut min_cnt = 0;
+                'outer: for (&sz, &cnt) in &state.breakpoints {
+                    for i in 0..cnt {
+                        min_sum += sz;
+                        min_cnt += 1;
+                        if min_sum > free_space {
+                            break 'outer;
+                        }
+                    }
+                }
+            } else {
+
+            }
+
+            (None, None)
+        }
     }
 }
 
