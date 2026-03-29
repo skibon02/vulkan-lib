@@ -259,6 +259,7 @@ impl ParametricSolveState {
 pub struct DimFixState {
     height: Option<Lu>,
     width: Option<Lu>,
+    subtree_fixed: bool,
 }
 impl DimFixState {
     pub fn height(&self) -> Option<Lu> {
@@ -272,6 +273,12 @@ impl DimFixState {
     }
     pub fn set_width(&mut self, width: Lu) {
         self.width = Some(width);
+    }
+    pub fn is_subtree_fixed(&self) -> bool {
+        self.subtree_fixed
+    }
+    pub fn set_subtree_fixed(&mut self) {
+        self.subtree_fixed = true;
     }
 }
 #[derive(Clone, Debug, Default)]

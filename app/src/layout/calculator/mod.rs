@@ -547,13 +547,13 @@ impl LayoutCalculator {
         }
     }
 
-    fn handle_node(&mut self, i: usize, parents: &[usize], phase: Phase, is_root: bool) -> ControlFlow {
+    fn handle_node(&mut self, i: usize, parents: &[usize], phase: Phase) -> ControlFlow {
         match phase {
             Phase::ParametricSolve => {
                 ControlFlow::Continue
             }
             Phase::FixPass => {
-                if is_root || !self.elements_sizes[i].cur_parametric_mut().state.is_fixed() {
+                if !self.elements_sizes[i].dim_fix.is_subtree_fixed() {
                     self.dim_fix_children(i);
                     ControlFlow::Continue
                 }
@@ -581,6 +581,7 @@ impl LayoutCalculator {
                 }
             }
             Phase::FixPass => {
+                self.elements_sizes[i].dim_fix.set_subtree_fixed();
             }
             Phase::PosFixPass => {
             }
@@ -605,7 +606,7 @@ impl LayoutCalculator {
     /// Result for FixPass dfs is Fixed parametric kind and exact width and height for element and all other subtree elements
     pub fn dfs(&mut self, first_element: usize, phase: Phase) {
         let mut parents = vec![first_element];
-        if self.handle_node(first_element, &[], phase, true) == ControlFlow::SkipChildren {
+        if self.handle_node(first_element, &[], phase) == ControlFlow::SkipChildren {
             self.finalize_node(first_element, phase);
             return;
         }
@@ -623,7 +624,7 @@ impl LayoutCalculator {
             }
 
 
-            if self.handle_node(i, &parents, phase, false) == ControlFlow::SkipChildren {
+            if self.handle_node(i, &parents, phase) == ControlFlow::SkipChildren {
                 self.finalize_node(i, phase);
                 // Skip all descendants by advancing until we find a node that's not a child
                 let skip_below = i;
