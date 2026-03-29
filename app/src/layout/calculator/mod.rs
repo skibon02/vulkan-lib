@@ -6,7 +6,7 @@ use crate::layout::calculator::components::elements::{Elements, ElementsChildren
 use crate::layout::calculator::components::font::Fonts;
 use crate::layout::calculator::components::image::Images;
 use crate::layout::calculator::components::text::Texts;
-use crate::layout::calculator::elements::{ContainerFixSolver, ContainerParametricSolver};
+use crate::layout::calculator::elements::{ContainerFixSolver, ContainerParametricSolver, SelfDepResolve};
 
 mod elements;
 pub mod components;
@@ -238,6 +238,18 @@ impl LayoutCalculator {
         }
     }
 
+    fn handle_self_dep_resolve(el_sizes: &mut ElementSizes, res: Option<SelfDepResolve>) {
+        match res {
+            Some(SelfDepResolve::Height(h)) => {
+                el_sizes.dim_fix.set_height(h);
+            }
+            Some(SelfDepResolve::Width(w)) => {
+                el_sizes.dim_fix.set_width(w);
+            }
+            None => {}
+        }
+    }
+
     /// Phase 2: Normal flow subtree fix.
     /// Call guarantee: fix dimensions are provided for element i, matching parametric solve ranges.
     /// Result: specify fix dimensions for all direct children, maybe update some internal positioning information.
@@ -299,7 +311,8 @@ impl LayoutCalculator {
 
             match element.element.clone() {
                 Element::Row(attrs) => {
-                    let (early_fixes, state) = dim_fix_pass1(elements::row::solver(&attrs), el_sizes, &mut children, &mut children_sizes);
+                    let mut solver = elements::row::solver(&attrs);
+                    let (early_fixes, mut state) = dim_fix_pass1(solver, el_sizes, &mut children, &mut children_sizes);
                     fix_children(&early_fixes, &mut *el_sizes);
                     // recursive DFS for selfdep children from first pass (TEMPORAL SOLUTION, need rework)
                     for (i, _, _) in early_fixes {
@@ -308,11 +321,14 @@ impl LayoutCalculator {
 
                     let (el_sizes, mut children_sizes) = self.elements_sizes.children(i);
                     let (_, mut children) = self.elements.children(i);
-                    let fixes = dim_fix_pass2(elements::row::solver(&attrs), state, el_sizes, &mut children, &mut children_sizes);
+                    let res = solver.early_finalize(&mut state, &children_sizes, children.iter());
+                    Self::handle_self_dep_resolve(el_sizes, res);
+                    let fixes = dim_fix_pass2(solver, state, el_sizes, &mut children, &mut children_sizes);
                     fix_children(&fixes, &mut *el_sizes);
                 }
                 Element::Col(attrs) => {
-                    let (early_fixes, state) = dim_fix_pass1(elements::col::solver(&attrs), el_sizes, &mut children, &mut children_sizes);
+                    let solver = elements::col::solver(&attrs);
+                    let (early_fixes, mut state) = dim_fix_pass1(solver, el_sizes, &mut children, &mut children_sizes);
                     fix_children(&early_fixes, &mut *el_sizes);
                     // recursive DFS for selfdep children from first pass (TEMPORAL SOLUTION, need rework)
                     for (i, _, _) in early_fixes {
@@ -321,11 +337,14 @@ impl LayoutCalculator {
 
                     let (el_sizes, mut children_sizes) = self.elements_sizes.children(i);
                     let (_, mut children) = self.elements.children(i);
-                    let fixes= dim_fix_pass2(elements::col::solver(&attrs), state, el_sizes, &mut children, &mut children_sizes);
+                    let res = solver.early_finalize(&mut state, &children_sizes, children.iter());
+                    Self::handle_self_dep_resolve(el_sizes, res);
+                    let fixes= dim_fix_pass2(solver, state, el_sizes, &mut children, &mut children_sizes);
                     fix_children(&fixes, &mut *el_sizes);
                 }
                 Element::Stack(attrs) => {
-                    let (early_fixes, state) = dim_fix_pass1(elements::stack::solver(&attrs), el_sizes, &mut children, &mut children_sizes);
+                    let solver = elements::stack::solver(&attrs);
+                    let (early_fixes, mut state) = dim_fix_pass1(solver, el_sizes, &mut children, &mut children_sizes);
                     fix_children(&early_fixes, &mut *el_sizes);
                     // recursive DFS for selfdep children from first pass (TEMPORAL SOLUTION, need rework)
                     for (i, _, _) in early_fixes {
@@ -334,7 +353,9 @@ impl LayoutCalculator {
 
                     let (el_sizes, mut children_sizes) = self.elements_sizes.children(i);
                     let (_, mut children) = self.elements.children(i);
-                    let fixes = dim_fix_pass2(elements::stack::solver(&attrs), state, el_sizes, &mut children, &mut children_sizes);
+                    let res = solver.early_finalize(&mut state, &children_sizes, children.iter());
+                    Self::handle_self_dep_resolve(el_sizes, res);
+                    let fixes = dim_fix_pass2(solver, state, el_sizes, &mut children, &mut children_sizes);
                     fix_children(&fixes, &mut *el_sizes);
                 }
                 _ => unreachable!(),
@@ -342,24 +363,6 @@ impl LayoutCalculator {
         }
     }
 
-    fn dim_fix_finalize(&mut self, i: usize) {
-        let (el_sizes, children_sizes) = self.elements_sizes.children(i);
-        let (element, children) = self.elements.children(i);
-        if element.element.is_container() {
-            match &element.element {
-                Element::Col(col) => {
-                    
-                }
-                Element::Row(row) => {
-
-                }
-                Element::Stack(stack) => {
-
-                }
-                _ => unreachable!()
-            }
-        }
-    }
     fn handle_node(&mut self, i: usize, parents: &[usize], phase: Phase) -> ControlFlow {
         match phase {
             Phase::ParametricSolve => {
@@ -390,9 +393,6 @@ impl LayoutCalculator {
                 }
             }
             Phase::FixPass => {
-                if self.elements_sizes[i].cur_parametric_mut().state.is_self_dep() {
-                    self.dim_fix_finalize(i);
-                }
             }
         }
     }

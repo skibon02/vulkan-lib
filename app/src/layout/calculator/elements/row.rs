@@ -7,6 +7,7 @@ use crate::layout::calculator::components::elements::{ElementsChildrenIter, Elem
 use crate::layout::calculator::elements::{ContainerFixSolver, ContainerParametricSolver, HasChildAttributes, SelfDepResolve};
 use crate::layout::calculator::SideParametricKind;
 
+#[derive(Copy, Clone)]
 pub struct RowSolver<'a> {
     attrs: &'a RowAttributes,
 }
@@ -123,7 +124,7 @@ pub struct RowSolverFixState {
 impl ContainerFixSolver for RowSolver<'_> {
     type State = RowSolverFixState;
 
-    fn init(&mut self, children_sizes: &ElementSizesChildren, children: ElementsChildrenIter) -> Self::State {
+    fn init(&self, children_sizes: &ElementSizesChildren, children: ElementsChildrenIter) -> Self::State {
         let mut has_self_dep_x = false;
         let mut has_self_dep_y = false;
         let mut has_self_dep_both = false;
@@ -166,7 +167,7 @@ impl ContainerFixSolver for RowSolver<'_> {
         }
     }
 
-    fn early_handle_child(&mut self, state: &mut Self::State, child_sizes: &ElementSizes, child_attrs: &Self::ChildAttributes, el_sizes: &ElementSizes) -> (Option<Option<Lu>>, Option<Option<Lu>>) {
+    fn early_handle_child(&self, state: &mut Self::State, child_sizes: &ElementSizes, child_attrs: &Self::ChildAttributes, el_sizes: &ElementSizes) -> (Option<Option<Lu>>, Option<Option<Lu>>) {
         if state.has_self_dep_y {
             let cur_parametric = child_sizes.cur_parametric();
             match cur_parametric.state.kind() {
@@ -193,54 +194,41 @@ impl ContainerFixSolver for RowSolver<'_> {
             (None, None)
         }
     }
-    fn early_finalize(&mut self, state: &mut Self::State, children_sizes: &ElementSizesChildren, children: ElementsChildrenIter) {
+    fn early_finalize(&self, state: &mut Self::State, children_sizes: &ElementSizesChildren, children: ElementsChildrenIter) -> Option<SelfDepResolve> {
         if state.has_self_dep_y {
-            // recalculate max min height
-            for (i, _) in children {
-                let child_sizes = children_sizes.get(i);
-                state.max_height = max(state.max_height, child_sizes.min_height())
-            }
-        }
-        else if state.has_self_dep_x {
             // recalculate width sum
             for (i, _) in children {
                 let child_sizes = children_sizes.get(i);
-                state.sum_width += child_sizes.min_height();
-            }
-        }
-    }
-    fn handle_child(&mut self, state: &mut Self::State, child_sizes: &ElementSizes, child_attrs: &Self::ChildAttributes, sizes: &ElementSizes) -> (Option<Option<Lu>>, Option<Option<Lu>>) {
-        let cross_stretch_en = self.attrs.cross_stretch;
+                let fix_width = child_sizes.min_width();
 
-        if state.has_self_dep_y {
-            let cur_parametric = child_sizes.cur_parametric();
-            match cur_parametric.state.kind() {
-                ParametricKind::HeightToWidth | ParametricKind::SelfDepBoth => {
-                    (None, Some(Some(el_sizes.min_height())))
-                }
-                _ => {
-                    let width = cur_parametric.state.can_fix_width().then_some(None);
-                    let height = cur_parametric.state.can_fix_height().then_some(Some(el_sizes.min_height()));
-                    (width, height)
-                }
+                state.sum_width += fix_width;
             }
+
+            Some(SelfDepResolve::Width(state.sum_width))
+        }
+        else if state.has_self_dep_x {
+            // recalculate max min height
+            for (i, _) in children {
+                let child_sizes = children_sizes.get(i);
+                let fix_height= child_sizes.min_height();
+
+                state.max_height = max(state.max_height, fix_height)
+            }
+
+            Some(SelfDepResolve::Height(state.max_height))
         }
         else {
-            let grow_en = matches!(self.attrs.main_size_mode, MainSizeMode::EqualWidth);
-            let gap_en = matches!(self.attrs.main_gap_mode, MainGapMode::Around | MainGapMode::Between);
+            None
+        }
+    }
+    fn handle_child(&self, state: &mut Self::State, child_sizes: &ElementSizes, child_attrs: &Self::ChildAttributes, el_sizes: &ElementSizes) -> (Option<Option<Lu>>, Option<Option<Lu>>) {
+        let cross_stretch_en = self.attrs.cross_stretch;
 
-            let cur_parametric = child_sizes.cur_parametric();
-            // match cur_parametric.state.kind() {
-            //     ParametricKind::WidthToHeight | ParametricKind::SelfDepBoth => {
-            //         (None, Some(Some(el_sizes.min_height())))
-            //     }
-            //     _ => {
-            //         let width = cur_parametric.state.can_fix_width().then_some(None);
-            //         let height = cur_parametric.state.can_fix_height().then_some(Some(el_sizes.min_height()));
-            //         (width, height)
-            //     }
-            // }
-            if grow_en {
+        let grow_en = matches!(self.attrs.main_size_mode, MainSizeMode::EqualWidth);
+
+        let cur_parametric = child_sizes.cur_parametric();
+        if grow_en && !state.has_self_dep_y {
+            let width = if cur_parametric.state.can_fix_width() {
                 let free_space = el_sizes.dim_fix.width().unwrap() - state.fixed_width_sum;
                 let mut min_sum = 0;
                 let mut min_cnt = 0;
@@ -253,15 +241,22 @@ impl ContainerFixSolver for RowSolver<'_> {
                         }
                     }
                 }
-            } else {
 
+                let w = 0;
+                Some(Some(w))
             }
+            else {
+                None
+            };
 
-            (None, None)
+            let height = cur_parametric.state.can_fix_height().then_some(cross_stretch_en.then_some(state.max_height));
+            (width, height)
+        }
+        else {
+
+            let width = cur_parametric.state.can_fix_width().then_some(None);
+            let height = cur_parametric.state.can_fix_height().then_some(cross_stretch_en.then_some(state.max_height));
+            (width, height)
         }
     }
-}
-
-pub fn resolve_selfdep(attrs: &RowAttributes, sizes: &ElementSizes, children: ElementsChildrenIter, children_sizes: &ElementSizesChildren) -> SelfDepResolve {
-    SelfDepResolve::Width(100)
 }

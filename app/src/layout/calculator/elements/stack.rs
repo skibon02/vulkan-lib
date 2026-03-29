@@ -4,6 +4,7 @@ use crate::layout::{ChildAttributes, StackAttributes, StackChildAttributes, Lu, 
 use crate::layout::calculator::components::elements::{ElementsChildrenIter, ElementsChildrenIterMut};
 use crate::layout::calculator::elements::{ContainerFixSolver, ContainerParametricSolver, HasChildAttributes, SelfDepResolve};
 
+#[derive(Copy, Clone)]
 pub struct StackParametricSolver<'a> {
     attrs: &'a StackAttributes,
 }
@@ -47,19 +48,19 @@ impl ContainerParametricSolver for StackParametricSolver<'_> {
 impl ContainerFixSolver for StackParametricSolver<'_> {
     type State = ();
 
-    fn init(&mut self, children_sizes: &ElementSizesChildren, children: ElementsChildrenIter) -> Self::State {
+    fn init(&self, children_sizes: &ElementSizesChildren, children: ElementsChildrenIter) -> Self::State {
         ()
     }
 
-    fn early_handle_child(&mut self, state: &mut Self::State, child_sizes: &ElementSizes, child_attrs: &Self::ChildAttributes, el_sizes: &ElementSizes) -> (Option<Option<Lu>>, Option<Option<Lu>>) {
+    fn early_handle_child(&self, state: &mut Self::State, child_sizes: &ElementSizes, child_attrs: &Self::ChildAttributes, el_sizes: &ElementSizes) -> (Option<Option<Lu>>, Option<Option<Lu>>) {
         (None, None)
     }
 
-    fn early_finalize(&mut self, state: &mut Self::State, children_sizes: &ElementSizesChildren, children: ElementsChildrenIter) {
+    fn early_finalize(&self, state: &mut Self::State, children_sizes: &ElementSizesChildren, children: ElementsChildrenIter) -> Option<SelfDepResolve> {
         todo!()
     }
 
-    fn handle_child(&mut self, state: &mut Self::State, child_sizes: &ElementSizes, child_attrs: &Self::ChildAttributes, sizes: &ElementSizes) -> (Option<Option<Lu>>, Option<Option<Lu>>) {
+    fn handle_child(&self, state: &mut Self::State, child_sizes: &ElementSizes, child_attrs: &Self::ChildAttributes, sizes: &ElementSizes) -> (Option<Option<Lu>>, Option<Option<Lu>>) {
         todo!()
     }
 }
