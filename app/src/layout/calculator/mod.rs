@@ -276,7 +276,7 @@ impl LayoutCalculator {
 
                 for (i, child) in children.iter_mut() {
                     let (width, height) = solver.early_handle_child(&mut state, children_sizes.get_mut(i), T::unwrap(&mut child.self_child_attributes), sizes);
-                    if width.is_some() && height.is_some() {
+                    if width.is_some() || height.is_some() {
                         res.push((i as usize, width, height));
                     }
                 }
@@ -292,7 +292,7 @@ impl LayoutCalculator {
 
                 for (i, child) in children.iter_mut() {
                     let (width, height) = solver.handle_child(&mut state, children_sizes.get_mut(i), T::unwrap(&mut child.self_child_attributes), sizes);
-                    if width.is_some() && height.is_some() {
+                    if width.is_some() || height.is_some() {
                         res.push((i as usize, width, height));
                     }
                 }
