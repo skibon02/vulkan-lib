@@ -249,6 +249,15 @@ pub enum MainGapMode {
     None
 }
 
+impl MainGapMode {
+    pub fn fixed(&self) -> Option<Lu> {
+        match self {
+            MainGapMode::Fixed(w) => Some(*w),
+            _ => None
+        }
+    }
+}
+
 #[derive(Copy, Clone, Debug, Default)]
 pub enum SelfDepAxis {
     HeightFromWidth,

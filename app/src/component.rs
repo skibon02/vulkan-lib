@@ -32,6 +32,7 @@ impl Component {
                 attributes: smallvec![
                     AttributeValue::Box(BoxValue::Fill(Some(Fill::Solid(Color(220, 50, 50, 1.0))))),
                     AttributeValue::General(GeneralValue::MinHeight(100)),
+                    AttributeValue::General(GeneralValue::NostretchY(true)),
                 ],
             },
             // 2: Inner col
@@ -80,6 +81,7 @@ impl Component {
                     AttributeValue::RowChild(RowChildValue::CrossAlign(YAlign::Bottom), false),
                     AttributeValue::General(GeneralValue::MinWidth(100)),
                     AttributeValue::General(GeneralValue::NostretchX(true)),
+                    AttributeValue::General(GeneralValue::NostretchY(true)),
                 ],
             },
         ]);

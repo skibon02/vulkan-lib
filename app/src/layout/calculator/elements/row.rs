@@ -33,12 +33,14 @@ pub struct RowSolverState {
     is_any_selfdepx: bool,
     is_any_selfdepy: bool,
     is_any_selfdepboth: bool,
+    children_count: usize,
 }
 impl ContainerParametricSolver for RowSolver<'_> {
     type State = RowSolverState;
     fn handle_child(&mut self, state: &mut RowSolverState, child_sizes: &ElementSizes, _: &RowChildAttributes) -> (Option<Option<Lu>>, Option<Option<Lu>>) {
         state.children_width_sum += child_sizes.min_width();
         state.children_max_height = max(state.children_max_height, child_sizes.min_height());
+        state.children_count += 1;
 
         let grow_en = matches!(self.attrs.main_size_mode, MainSizeMode::EqualWidth);
         let cross_stretch_en = self.attrs.cross_stretch;
@@ -91,6 +93,9 @@ impl ContainerParametricSolver for RowSolver<'_> {
         }
 
         res.min_width = state.children_width_sum;
+        if let Some(gap) = self.attrs.main_gap_mode.fixed() {
+            res.min_width += gap * state.children_count.saturating_sub(1) as Lu;
+        }
         res.min_height = state.children_max_height;
         res.state = ParametricKindState::default();
 
@@ -115,8 +120,6 @@ pub struct RowSolverFixState {
     has_self_dep_x: bool,
     has_self_dep_y: bool,
     fixed_width_sum: Lu,
-    sum_width: Lu,
-    max_height: Lu,
     breakpoints: BTreeMap<Lu, usize>
 }
 // STAGE 2: DIM FIX
@@ -131,6 +134,7 @@ impl ContainerFixSolver for RowSolver<'_> {
         let mut breakpoints = BTreeMap::new();
 
         let mut fixed_width_sum = 0;
+        let mut ch_cnt = 0 as usize;
         for (i, child) in children {
             let child_sizes = children_sizes.get(i);
             let kind = child_sizes.cur_parametric().state.kind();
@@ -148,6 +152,11 @@ impl ContainerFixSolver for RowSolver<'_> {
             if child_sizes.cur_parametric().state.can_fix_width() {
                 breakpoints.entry(child_sizes.cur_parametric().min_width).and_modify(|v| *v += 1).or_insert(1);
             }
+            ch_cnt += 1;
+        }
+        
+        if let Some(gap) = self.attrs.main_gap_mode.fixed() {
+            fixed_width_sum += gap * ch_cnt.saturating_sub(1) as Lu;
         }
 
         if has_self_dep_x || (!has_self_dep_y && has_self_dep_both){
@@ -162,8 +171,6 @@ impl ContainerFixSolver for RowSolver<'_> {
             has_self_dep_y,
             fixed_width_sum,
             breakpoints,
-            max_height: 0,
-            sum_width: 0,
         }
     }
 
@@ -196,26 +203,28 @@ impl ContainerFixSolver for RowSolver<'_> {
     }
     fn early_finalize(&self, state: &mut Self::State, children_sizes: &ElementSizesChildren, children: ElementsChildrenIter) -> Option<SelfDepResolve> {
         if state.has_self_dep_y {
+            let mut sum_width = 0;
             // recalculate width sum
             for (i, _) in children {
                 let child_sizes = children_sizes.get(i);
                 let fix_width = child_sizes.min_width();
 
-                state.sum_width += fix_width;
+                sum_width += fix_width;
             }
 
-            Some(SelfDepResolve::Width(state.sum_width))
+            Some(SelfDepResolve::Width(sum_width))
         }
         else if state.has_self_dep_x {
+            let mut max_height = 0;
             // recalculate max min height
             for (i, _) in children {
                 let child_sizes = children_sizes.get(i);
                 let fix_height= child_sizes.min_height();
 
-                state.max_height = max(state.max_height, fix_height)
+                max_height = max(max_height, fix_height)
             }
 
-            Some(SelfDepResolve::Height(state.max_height))
+            Some(SelfDepResolve::Height(max_height))
         }
         else {
             None
