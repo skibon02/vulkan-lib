@@ -111,6 +111,10 @@ impl LayoutCalculator {
         self.elements = Elements(element_nodes);
         self.elements_sizes = Calculated(vec![Default::default(); len]);
     }
+    
+    pub fn set_text(&mut self, i: u32, text: &str) {
+        self.texts.set_text(i, text.into())
+    }
 
     pub fn hide_element(&mut self, element_id: u32) {
 

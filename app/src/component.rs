@@ -1,6 +1,7 @@
+use std::sync::Arc;
 use std::time::Instant;
 use smallvec::smallvec;
-use crate::layout::{AttributeValue, BoxValue, Color, ColValue, ElementKind, ElementNodeRepr, Fill, GeneralValue, MainGapMode, MainSizeMode, RowValue, RowChildValue, YAlign};
+use crate::layout::{AttributeValue, BoxValue, Color, ColValue, ElementKind, ElementNodeRepr, Fill, GeneralValue, MainGapMode, MainSizeMode, RowValue, RowChildValue, YAlign, TextValue, FontFamily};
 use crate::layout::calculator::LayoutCalculator;
 
 pub struct Component {
@@ -84,7 +85,16 @@ impl Component {
                     AttributeValue::General(GeneralValue::NostretchY(true)),
                 ],
             },
+            ElementNodeRepr {
+                parent_i: 0,
+                element: ElementKind::Text,
+                attributes: smallvec![
+                    AttributeValue::Text(TextValue::Font(FontFamily::Named(Arc::from("Ubuntu-Regular.ttf")))),
+
+                ],
+            }
         ]);
+        calculator.set_text(7, "very very very very\n\nlong text");
         self.start_tm = Instant::now();
     }
 

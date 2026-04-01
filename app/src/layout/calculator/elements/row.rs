@@ -55,12 +55,12 @@ impl ContainerParametricSolver for RowSolver<'_> {
             let height = (!cross_stretch_en && cur_parametric.can_fix_height()).then_some(None);
 
             match cur_parametric.kind() {
-                ParametricKind::HeightToWidth => {
+                ParametricKind::WidthToHeight => {
                     if width.is_none() {
                         state.is_any_selfdepx = true;
                     }
                 }
-                ParametricKind::WidthToHeight => {
+                ParametricKind::HeightToWidth => {
                     if height.is_none() {
                         state.is_any_selfdepy = true;
                     }

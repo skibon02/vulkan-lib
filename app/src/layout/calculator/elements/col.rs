@@ -134,10 +134,10 @@ impl ContainerFixSolver for ColSolver<'_> {
         for (i, child) in children {
             let child_sizes = children_sizes.get(i);
             let kind = child_sizes.cur_parametric().state.kind();
-            if kind == ParametricKind::HeightToWidth {
+            if kind == ParametricKind::WidthToHeight {
                 has_self_dep_x = true;
             }
-            else if kind == ParametricKind::WidthToHeight {
+            else if kind == ParametricKind::HeightToWidth {
                 has_self_dep_y = true;
             }
             else if kind == ParametricKind::SelfDepBoth {
@@ -171,7 +171,7 @@ impl ContainerFixSolver for ColSolver<'_> {
         if state.has_self_dep_y {
             let cur_parametric = child_sizes.cur_parametric();
             match cur_parametric.state.kind() {
-                ParametricKind::WidthToHeight | ParametricKind::SelfDepBoth => {
+                ParametricKind::HeightToWidth | ParametricKind::SelfDepBoth => {
                     (Some(Some(el_sizes.min_width())), None)
                 }
                 _ => {
@@ -182,7 +182,7 @@ impl ContainerFixSolver for ColSolver<'_> {
         else if state.has_self_dep_x {
             let cur_parametric = child_sizes.cur_parametric();
             match cur_parametric.state.kind() {
-                ParametricKind::HeightToWidth | ParametricKind::SelfDepBoth => {
+                ParametricKind::WidthToHeight | ParametricKind::SelfDepBoth => {
                     (None, Some(Some(el_sizes.min_height())))
                 }
                 _ => {
