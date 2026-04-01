@@ -51,6 +51,7 @@ impl From<(ElementKind, &ParsedAttributes)> for Element {
     }
 }
 
+#[derive(Debug)]
 pub enum ElementKind {
     Col,
     Row,

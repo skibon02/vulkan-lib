@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 use log::{error, info, warn};
 use raw_window_handle::{HasRawDisplayHandle, HasRawWindowHandle};
 use sparkles::{instant_event, range_event_start};
+use winit::dpi::PhysicalSize;
 use winit::event::{ElementState, MouseButton, TouchPhase, WindowEvent};
 use winit::event_loop::ActiveEventLoop;
 use winit::keyboard;
@@ -37,6 +38,7 @@ pub struct App {
     cursor_pos: (f64, f64),
     component: Component,
     layout_calculator: LayoutCalculator,
+    prev_win_size: PhysicalSize<u32>,
 
     // Rendering thread
     shared: SharedState,
@@ -100,6 +102,7 @@ impl App {
 
             window,
 
+            prev_win_size: PhysicalSize::default(),
             frame_counter,
             instances_updated: true,
             instances,
@@ -204,19 +207,22 @@ impl App {
 
                     // Run layout and produce render rects
                     let size = self.window.inner_size();
-                    self.layout_calculator.calculate_layout(size.width, size.height);
+                    if size != self.prev_win_size {
+                        self.prev_win_size = size;
+                        self.layout_calculator.calculate_layout(size.width, size.height);
+                        let render_rects = self.layout_calculator.get_render_rects();
+                        self.instances.clear();
+                        for rect in &render_rects {
+                            self.instances.push(SolidAttributes {
+                                pos: [rect.x, rect.y].into(),
+                                size: [rect.w, rect.h].into(),
+                                d: rect.depth.into(),
+                                color: [rect.r, rect.g, rect.b, rect.a].into(),
+                            });
+                        }
 
-                    let render_rects = self.layout_calculator.get_render_rects();
-                    self.instances.clear();
-                    for rect in &render_rects {
-                        self.instances.push(SolidAttributes {
-                            pos: [rect.x, rect.y].into(),
-                            size: [rect.w, rect.h].into(),
-                            d: rect.depth.into(),
-                            color: [rect.r, rect.g, rect.b, rect.a].into(),
-                        });
+                        self.instances_updated = true;
                     }
-                    self.instances_updated = true;
 
                     self.frame_counter.increment_frame();
                     instant_event!("Send redraw message");
