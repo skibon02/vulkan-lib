@@ -71,7 +71,7 @@ impl ApplicationHandler for WinitApp {
         let g = range_event_start!("[WINIT] resumed");
         info!("\t\t*** APP RESUMED ***");
         let window = event_loop
-            .create_window(WindowAttributes::default().with_title("shades of pink"))
+            .create_window(WindowAttributes::default().with_title(":P"))
             .unwrap();
 
         window.request_redraw();

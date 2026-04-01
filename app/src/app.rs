@@ -221,7 +221,7 @@ impl App {
                     self.frame_counter.increment_frame();
                     instant_event!("Send redraw message");
                     let _ = self.render_tx.send(RenderMessage::Redraw {
-                        bg_color: [0.7, 0.3, 0.9],
+                        bg_color: [0.15, 0.12, 0.11],
                     });
 
                     self.allocator.destroy_old_resources();

@@ -30,7 +30,7 @@ impl Component {
                 parent_i: 0,
                 element: ElementKind::Box,
                 attributes: smallvec![
-                    AttributeValue::Box(BoxValue::Fill(Some(Fill::Solid(Color(220, 50, 50, 1.0))))),
+                    AttributeValue::Box(BoxValue::Fill(Some(Fill::Solid(Color(60, 20, 30, 1.0))))),
                     AttributeValue::General(GeneralValue::MinHeight(100)),
                     AttributeValue::General(GeneralValue::NostretchY(true)),
                 ],
@@ -49,7 +49,7 @@ impl Component {
                 parent_i: 2,
                 element: ElementKind::Box,
                 attributes: smallvec![
-                    AttributeValue::Box(BoxValue::Fill(Some(Fill::Solid(Color(50, 200, 80, 1.0))))),
+                    AttributeValue::Box(BoxValue::Fill(Some(Fill::Solid(Color(5, 60, 8, 1.0))))),
                 ],
             },
             // 4: Blue box (child of col)
@@ -57,7 +57,7 @@ impl Component {
                 parent_i: 2,
                 element: ElementKind::Box,
                 attributes: smallvec![
-                    AttributeValue::Box(BoxValue::Fill(Some(Fill::Solid(Color(50, 100, 220, 1.0))))),
+                    AttributeValue::Box(BoxValue::Fill(Some(Fill::Solid(Color(5, 40, 60, 1.0))))),
                 ],
             },
             // 5: Yellow box
@@ -65,7 +65,7 @@ impl Component {
                 parent_i: 0,
                 element: ElementKind::Box,
                 attributes: smallvec![
-                    AttributeValue::Box(BoxValue::Fill(Some(Fill::Solid(Color(230, 200, 50, 1.0))))),
+                    AttributeValue::Box(BoxValue::Fill(Some(Fill::Solid(Color(60, 50, 5, 1.0))))),
                     AttributeValue::General(GeneralValue::MinHeight(60)),
                     AttributeValue::RowChild(RowChildValue::CrossAlign(YAlign::Top), false),
                     AttributeValue::General(GeneralValue::MinWidth(150)),
@@ -76,7 +76,7 @@ impl Component {
                 parent_i: 0,
                 element: ElementKind::Box,
                 attributes: smallvec![
-                    AttributeValue::Box(BoxValue::Fill(Some(Fill::Solid(Color(180, 40, 210, 1.0))))),
+                    AttributeValue::Box(BoxValue::Fill(Some(Fill::Solid(Color(40, 10, 50, 1.0))))),
                     AttributeValue::General(GeneralValue::MinHeight(60)),
                     AttributeValue::RowChild(RowChildValue::CrossAlign(YAlign::Bottom), false),
                     AttributeValue::General(GeneralValue::MinWidth(100)),

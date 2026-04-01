@@ -416,35 +416,33 @@ impl LayoutCalculator {
         let parent_h = el_sizes.dim_fix.height().unwrap_or(0);
         let element = &self.elements[i];
 
-        match &element.element {
+        match element.element.clone() {
             Element::Row(attrs) => {
                 // Calculate total children width for gap/alignment
                 let mut children_width_sum: Lu = 0;
                 let mut child_count: u32 = 0;
-                let mut ci = i + 1;
-                while ci < self.elements.len() && self.elements[ci].parent_i == i as u32 {
-                    children_width_sum += self.elements_sizes[ci].dim_fix.width().unwrap_or(0);
+
+                for (i, _) in self.elements.children(i).1.iter_mut() {
+                    children_width_sum += self.elements_sizes[i as usize].dim_fix.width().unwrap_or(0);
                     child_count += 1;
-                    ci = self.next_sibling_or_end(ci);
                 }
 
                 let gap = Self::compute_gap(&attrs.main_gap_mode, parent_w, children_width_sum, child_count);
                 let main_offset = Self::compute_main_offset_x(&attrs.main_align, parent_w, children_width_sum, gap, child_count);
 
                 let mut x = main_offset;
-                let mut ci = i + 1;
-                while ci < self.elements.len() && self.elements[ci].parent_i == i as u32 {
-                    let child_w = self.elements_sizes[ci].dim_fix.width().unwrap_or(0);
-                    let child_h = self.elements_sizes[ci].dim_fix.height().unwrap_or(0);
+                for (i, element) in self.elements.children(i).1.iter_mut() {
+                    let el_sizes = &mut self.elements_sizes[i as usize];
+                    let child_w = el_sizes.dim_fix.width().unwrap_or(0);
+                    let child_h = el_sizes.dim_fix.height().unwrap_or(0);
 
-                    let cross_align = self.elements[ci].self_child_attributes.row.cross_align;
+                    let cross_align = element.self_child_attributes.row.cross_align;
                     let y = Self::align_y(cross_align, parent_h, child_h);
 
-                    self.elements_sizes[ci].pos_fix.pos_x = x;
-                    self.elements_sizes[ci].pos_fix.pos_y = y;
+                    el_sizes.pos_fix.pos_x = x;
+                    el_sizes.pos_fix.pos_y = y;
 
                     x += child_w + gap;
-                    ci = self.next_sibling_or_end(ci);
                 }
             }
             Element::Col(attrs) => {
@@ -452,44 +450,33 @@ impl LayoutCalculator {
                 let mut children_height_sum: Lu = 0;
                 let mut child_count: u32 = 0;
                 let mut ci = i + 1;
-                while ci < self.elements.len() && self.elements[ci].parent_i == i as u32 {
-                    children_height_sum += self.elements_sizes[ci].dim_fix.height().unwrap_or(0);
+                for (i, _) in self.elements.children(i).1.iter_mut() {
+                    children_height_sum += el_sizes.dim_fix.height().unwrap_or(0);
                     child_count += 1;
-                    ci = self.next_sibling_or_end(ci);
                 }
 
                 let gap = Self::compute_gap(&attrs.main_gap_mode, parent_h, children_height_sum, child_count);
                 let main_offset = Self::compute_main_offset_y(&attrs.main_align, parent_h, children_height_sum, gap, child_count);
 
                 let mut y = main_offset;
-                let mut ci = i + 1;
-                while ci < self.elements.len() && self.elements[ci].parent_i == i as u32 {
-                    let child_w = self.elements_sizes[ci].dim_fix.width().unwrap_or(0);
-                    let child_h = self.elements_sizes[ci].dim_fix.height().unwrap_or(0);
+                for (i, element) in self.elements.children(i).1.iter_mut() {
+                    let el_sizes = &mut self.elements_sizes[i as usize];
+                    let child_w = el_sizes.dim_fix.width().unwrap_or(0);
+                    let child_h = el_sizes.dim_fix.height().unwrap_or(0);
 
-                    let cross_align = self.elements[ci].self_child_attributes.col.cross_align;
+                    let cross_align = element.self_child_attributes.col.cross_align;
                     let x = Self::align_x(cross_align, parent_w, child_w);
 
-                    self.elements_sizes[ci].pos_fix.pos_x = x;
-                    self.elements_sizes[ci].pos_fix.pos_y = y;
+                    el_sizes.pos_fix.pos_x = x;
+                    el_sizes.pos_fix.pos_y = y;
 
                     y += child_h + gap;
-                    ci = self.next_sibling_or_end(ci);
                 }
             }
             _ => {
                 // Leaf elements and Stack: no positioning needed (Stack is not yet implemented)
             }
         }
-    }
-
-    /// Advance past element and all its descendants, returning the next sibling index or end.
-    fn next_sibling_or_end(&self, i: usize) -> usize {
-        let mut j = i + 1;
-        while j < self.elements.len() && self.elements[j].parent_i > i as u32 {
-            j += 1;
-        }
-        j
     }
 
     fn compute_gap(mode: &MainGapMode, parent_main: Lu, children_main_sum: Lu, child_count: u32) -> Lu {
