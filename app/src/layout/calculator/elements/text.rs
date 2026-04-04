@@ -25,8 +25,8 @@ pub fn parametric_solve(attrs: &TextAttributes, i: usize, fonts: &mut Fonts, tex
     }
     else {
         // Deferred layout calculation until width is known
-        if attrs.hide_overflow {
-            res.width = SideParametricState::new_dependent_fixed();
+        if !attrs.hide_overflow {
+            res.height = SideParametricState::new_dependent_fixed();
         }
     }
 

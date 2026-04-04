@@ -64,18 +64,16 @@ impl ElementSizes {
     pub fn set_parametric_stage(&mut self, stage: ParametricStage) {
         self.parametric_stage = stage;
     }
-    
+
     /// Returns true -> width was fixed
-    pub fn try_fix_width(&mut self, width: Option<Lu>) -> bool {
+    pub fn try_provide_width(&mut self, w: Option<Lu>) -> bool {
         let cur = self.cur_parametric_mut();
-        if cur.can_fix_width() {
+        if !cur.can_fix_width() {
             return false;
         }
 
-        cur.width.set_fixed();
-
-        let width = if let Some(h) = width {
-            h
+        let width = if let Some(w) = w {
+            w
         } else {
             if cur.width.min == 0 {
                 ZERO_LENGTH_GUARD
@@ -88,17 +86,24 @@ impl ElementSizes {
         self.dim_fix.set_width(width);
         true
     }
-    
-    /// Returns true -> height was fixed
-    pub fn try_fix_height(&mut self, height: Option<Lu>) -> bool {
-        let cur = self.cur_parametric_mut();
-        if cur.can_fix_height() {
+
+    pub fn try_fix_width(&mut self) -> bool {
+        if !self.cur_parametric().can_fix_width() || self.dim_fix.width.is_none() {
             return false;
         }
-        
-        cur.height.set_fixed();
 
-        let height = if let Some(h) = height {
+        self.cur_parametric_mut().width.set_fixed();
+        true
+    }
+
+    /// Returns true -> width was fixed
+    pub fn try_provide_height(&mut self, h: Option<Lu>) -> bool {
+        let cur = self.cur_parametric_mut();
+        if !cur.can_fix_height() {
+            return false;
+        }
+
+        let height = if let Some(h) = h {
             h
         } else {
             if cur.height.min == 0 {
@@ -112,6 +117,17 @@ impl ElementSizes {
         self.dim_fix.set_height(height);
         true
     }
+
+
+    /// Returns true -> height was fixed
+    pub fn try_fix_height(&mut self) -> bool {
+        if !self.cur_parametric().can_fix_height() || self.dim_fix.height.is_none() {
+            return false;
+        }
+
+        self.cur_parametric_mut().height.set_fixed();
+        true
+    }
     
     // min width for current parametric or dim fix width if fixed
     pub fn min_width(&self) -> Lu {
@@ -120,15 +136,6 @@ impl ElementSizes {
     pub fn min_height(&self) -> Lu {
         self.dim_fix.height.unwrap_or(self.cur_parametric().height.min)
     }
-    
-    // for use from dim fix stage
-    pub fn is_width_fixed(&self) -> bool {
-        self.dim_fix.width.is_some()
-    }
-    pub fn is_height_fixed(&self) -> bool {
-        self.dim_fix.height.is_some()
-    }
-
 }
 
 pub struct ElementSizesChildren<'a> {
@@ -198,12 +205,12 @@ impl ParametricSolveState {
 
     /// Can fix width right now?
     pub fn can_fix_width(&self) -> bool {
-        !self.width.is_fixed() && (!self.height.is_dependent() || self.height.is_fixed() && self.height.is_dependent()) || self.is_self_dep_both()
+        !self.width.is_fixed() && !(self.width.is_dependent() && !self.height.is_fixed()) || self.is_self_dep_both()
     }
 
     /// Can fix height right now?
     pub fn can_fix_height(&self) -> bool {
-        !self.height.is_fixed() && (!self.width.is_dependent() || self.width.is_fixed() && self.width.is_dependent()) || self.is_self_dep_both()
+        !self.height.is_fixed() && !(self.height.is_dependent() && !self.width.is_fixed()) || self.is_self_dep_both()
     }
 }
 
