@@ -20,12 +20,13 @@ pub trait ContainerParametricSolver: Sized + HasChildAttributes {
 }
 
 pub trait ContainerFixSolver: Sized + HasChildAttributes {
-    type State;
-    fn init(&self, children_sizes: &ElementSizesChildren, children: ElementsChildrenIter) -> Self::State;
-    /// Must provide all free axis information as a result to make full fix
-    fn early_handle_child(&self, state: &mut Self::State, child_sizes: &ElementSizes, child_attrs: &Self::ChildAttributes, sizes: &ElementSizes) -> (Option<Option<Lu>>, Option<Option<Lu>>);
-    fn early_finalize(&self, state: &mut Self::State, children_sizes: &ElementSizesChildren, children: ElementsChildrenIter) -> Option<SelfDepResolve>;
-    fn handle_child(&self, state: &mut Self::State, child_sizes: &ElementSizes, child_attrs: &Self::ChildAttributes, sizes: &ElementSizes) -> (Option<Option<Lu>>, Option<Option<Lu>>);
+    type StateX;
+    fn init_x(&self, children_sizes: &ElementSizesChildren, children: ElementsChildrenIter) -> Self::StateX;
+    fn handle_child_x(&self, state: &mut Self::StateX, child_sizes: &ElementSizes, child_attrs: &Self::ChildAttributes, sizes: &ElementSizes) -> Option<Option<Lu>>;
+
+    type StateY;
+    fn init_y(&self, children_sizes: &ElementSizesChildren, children: ElementsChildrenIter) -> Self::StateY;
+    fn handle_child_y(&self, state: &mut Self::StateY, child_sizes: &ElementSizes, child_attrs: &Self::ChildAttributes, sizes: &ElementSizes) -> Option<Option<Lu>>;
 }
 
 pub enum SelfDepResolve {

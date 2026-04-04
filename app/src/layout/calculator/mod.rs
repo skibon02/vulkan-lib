@@ -191,8 +191,21 @@ impl LayoutCalculator {
                     }
                     
                     let (fix_width, fix_height) = solver.handle_child(&mut solver_state, child_sizes, T::unwrap(&mut child.self_child_attributes));
+
+                    let cur_parametric = child_sizes.cur_parametric();
+                    // if !cur_parametric.width.is_fixed() && !cur_parametric.height.is_fixed() && cur_parametric.width.is_dependent() && !cur_parametric.height.is_dependent()
+                    //     && fix_width == Some(None) && let Some(Some(fix_height)) = fix_height {
+                    // 
+                    //     if child_sizes.try_fix_height(Some(fix_height)) {
+                    //         child_fixes.push(i);
+                    //     }
+                    //     
+                    //     if child_sizes.try_fix_width(None) {
+                    //         child_fixes.push(i);
+                    //     }
+                    // }
                     if let Some(fix_width) = fix_width {
-                        if !child_sizes.cur_parametric_mut().can_fix_width() {
+                        if !child_sizes.cur_parametric().can_fix_width() {
                             warn!("Tried to fix width on element {i}, but it is already fixed!");
                         }
                         if child_sizes.try_fix_width(fix_width) {
@@ -200,12 +213,11 @@ impl LayoutCalculator {
                             if fix_height.is_some() {
                                 warn!("Tried to fix width and height on element {i}, but fixing width was already enough!");
                             }
-                            continue;
                         }
                     }
 
                     if let Some(fix_height) = fix_height {
-                        if !child_sizes.cur_parametric_mut().can_fix_height() {
+                        if !child_sizes.cur_parametric().can_fix_height() {
                             warn!("Tried to fix height on element {i}, but it is already fixed!");
                         }
                         if child_sizes.try_fix_height(fix_height) {

@@ -33,34 +33,29 @@ impl ContainerParametricSolver for StackParametricSolver<'_> {
     }
 
     fn finalize(self, state: ()) -> ParametricSolveState {
-        ParametricSolveState {
-            min_width: 0,
-            min_height: 0,
-            state: ParametricKindState {
-                width: SideParametricState::Free,
-                height: SideParametricState::Free,
-            }
-        }
+        ParametricSolveState::default()
     }
 }
 // STAGE 2: DIM FIX
 
 impl ContainerFixSolver for StackParametricSolver<'_> {
-    type State = ();
+    type StateX = ();
 
-    fn init(&self, children_sizes: &ElementSizesChildren, children: ElementsChildrenIter) -> Self::State {
-        ()
-    }
-
-    fn early_handle_child(&self, state: &mut Self::State, child_sizes: &ElementSizes, child_attrs: &Self::ChildAttributes, el_sizes: &ElementSizes) -> (Option<Option<Lu>>, Option<Option<Lu>>) {
-        (None, None)
-    }
-
-    fn early_finalize(&self, state: &mut Self::State, children_sizes: &ElementSizesChildren, children: ElementsChildrenIter) -> Option<SelfDepResolve> {
+    fn init_x(&self, children_sizes: &ElementSizesChildren, children: ElementsChildrenIter) -> Self::StateX {
         todo!()
     }
 
-    fn handle_child(&self, state: &mut Self::State, child_sizes: &ElementSizes, child_attrs: &Self::ChildAttributes, sizes: &ElementSizes) -> (Option<Option<Lu>>, Option<Option<Lu>>) {
+    fn handle_child_x(&self, state: &mut Self::StateX, child_sizes: &ElementSizes, child_attrs: &Self::ChildAttributes, sizes: &ElementSizes) -> Option<Option<Lu>> {
+        todo!()
+    }
+
+    type StateY = ();
+
+    fn init_y(&self, children_sizes: &ElementSizesChildren, children: ElementsChildrenIter) -> Self::StateY {
+        todo!()
+    }
+
+    fn handle_child_y(&self, state: &mut Self::StateY, child_sizes: &ElementSizes, child_attrs: &Self::ChildAttributes, sizes: &ElementSizes) -> Option<Option<Lu>> {
         todo!()
     }
 }

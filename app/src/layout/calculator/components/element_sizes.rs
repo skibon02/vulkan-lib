@@ -181,23 +181,29 @@ impl ParametricSolveState {
         }
     }
 
+    /// Is full fixed? (no input params)
     pub fn is_fixed(&self) -> bool {
         self.width.is_fixed() && self.height.is_fixed()
     }
 
+    /// Is self dep x/y/both? (1/2 input param)
     pub fn is_self_dep(&self) -> bool {
-        self.width.is_dependent() || self.height.is_dependent()
+        (self.width.is_dependent() || self.height.is_dependent()) && !self.is_fixed()
     }
+    
+    /// Is unresolved self dep both? (1 input param)
     pub fn is_self_dep_both(&self) -> bool {
-        self.width.is_dependent() && self.height.is_dependent()
+        self.width.is_dependent() && self.height.is_dependent() && !self.width.is_fixed() && !self.height.is_fixed()
     }
 
+    /// Can fix width right now?
     pub fn can_fix_width(&self) -> bool {
-        !self.width.is_fixed() && (!self.height.is_dependent() || self.height.is_fixed() && self.height.is_dependent())
+        !self.width.is_fixed() && (!self.height.is_dependent() || self.height.is_fixed() && self.height.is_dependent()) || self.is_self_dep_both()
     }
 
+    /// Can fix height right now?
     pub fn can_fix_height(&self) -> bool {
-        !self.height.is_fixed() && (!self.width.is_dependent() || self.width.is_fixed() && self.width.is_dependent())
+        !self.height.is_fixed() && (!self.width.is_dependent() || self.width.is_fixed() && self.width.is_dependent()) || self.is_self_dep_both()
     }
 }
 
