@@ -2,10 +2,10 @@ use std::cmp::max;
 use std::collections::BTreeMap;
 use log::warn;
 use crate::layout::{BoxAttributes, ChildAttributes, ColAttributes, Element, Lu, MainGapMode, MainSizeMode, RowAttributes, RowChildAttributes};
-use crate::layout::calculator::components::element_sizes::{DimFixState, ElementSizes, ElementSizesChildren, ParametricKind, ParametricKindState, ParametricSolveState};
+use crate::layout::calculator::components::element_sizes::{DimFixState, ElementSizes, ElementSizesChildren, ParametricSolveState};
 use crate::layout::calculator::components::elements::{ElementsChildrenIter, ElementsChildrenIterMut};
 use crate::layout::calculator::elements::{ContainerFixSolver, ContainerParametricSolver, HasChildAttributes, SelfDepResolve};
-use crate::layout::calculator::SideParametricKind;
+use crate::layout::calculator::SideParametricState;
 
 #[derive(Copy, Clone)]
 pub struct RowSolver<'a> {
@@ -45,37 +45,39 @@ impl ContainerParametricSolver for RowSolver<'_> {
         let grow_en = matches!(self.attrs.main_size_mode, MainSizeMode::EqualWidth);
         let cross_stretch_en = self.attrs.cross_stretch;
 
-        if child_sizes.cur_parametric().state.is_self_dep_both() && !grow_en && !cross_stretch_en{
+        // Special case for self-dep-both - fix only width
+        if child_sizes.cur_parametric().is_self_dep_both() && !grow_en && !cross_stretch_en{
             // Fix width for self-dep-both child
-            (Some(None), None)
+            return (Some(None), None)
         }
-        else {
-            let cur_parametric = child_sizes.cur_parametric().state;
-            let width = (!grow_en && cur_parametric.can_fix_width()).then_some(None);
-            let height = (!cross_stretch_en && cur_parametric.can_fix_height()).then_some(None);
 
-            match cur_parametric.kind() {
-                ParametricKind::WidthToHeight => {
-                    if width.is_none() {
-                        state.is_any_selfdepx = true;
-                    }
+        let cur_parametric = child_sizes.cur_parametric().state;
+
+        // Disabled grow or cross stretch - reason for early fix
+        let width = (!grow_en && cur_parametric.can_fix_width()).then_some(None);
+        let height = (!cross_stretch_en && cur_parametric.can_fix_height()).then_some(None);
+
+        match cur_parametric.kind() {
+            ParametricKind::WidthToHeight => {
+                if width.is_none() {
+                    state.is_any_selfdepx = true;
                 }
-                ParametricKind::HeightToWidth => {
-                    if height.is_none() {
-                        state.is_any_selfdepy = true;
-                    }
-                }
-                ParametricKind::SelfDepBoth => {
-                    if width.is_none() && height.is_none(){
-                        state.is_any_selfdepboth = true;
-                    }
-                }
-                _ => {}
             }
-
-
-            (width, height)
+            ParametricKind::HeightToWidth => {
+                if height.is_none() {
+                    state.is_any_selfdepy = true;
+                }
+            }
+            ParametricKind::SelfDepBoth => {
+                if width.is_none() && height.is_none(){
+                    state.is_any_selfdepboth = true;
+                }
+            }
+            _ => {}
         }
+
+
+        (width, height)
     }
 
     fn finalize(self, state: RowSolverState) -> ParametricSolveState {
@@ -100,15 +102,15 @@ impl ContainerParametricSolver for RowSolver<'_> {
         res.state = ParametricKindState::default();
 
         if has_selfdepx || has_selfdepboth{
-            res.state.height = SideParametricKind::Dependent
+            res.state.height = SideParametricState::Dependent
         } else if has_selfdepy {
-            res.state.width = SideParametricKind::Dependent
+            res.state.width = SideParametricState::Dependent
         } else {
             if !grow_en && !gap_en {
-                res.state.width = SideParametricKind::Fixed;
+                res.state.width = SideParametricState::Fixed;
             }
             if !cross_stretch_en {
-                res.state.height = SideParametricKind::Fixed;
+                res.state.height = SideParametricState::Fixed;
             }
         }
 

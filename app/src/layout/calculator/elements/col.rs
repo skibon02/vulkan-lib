@@ -2,7 +2,7 @@ use std::cmp::max;
 use std::collections::BTreeMap;
 use log::warn;
 use crate::layout::calculator::components::element_sizes::{ElementSizes, ElementSizesChildren, ParametricKind, ParametricKindState, ParametricSolveState};
-use crate::layout::calculator::SideParametricKind;
+use crate::layout::calculator::SideParametricState;
 use crate::layout::{ChildAttributes, ColAttributes, ColChildAttributes, Lu, MainGapMode, MainSizeMode};
 use crate::layout::calculator::components::elements::{ElementsChildrenIter, ElementsChildrenIterMut};
 use crate::layout::calculator::elements::{ContainerFixSolver, ContainerParametricSolver, HasChildAttributes, SelfDepResolve};
@@ -95,15 +95,15 @@ impl ContainerParametricSolver for ColSolver<'_> {
         res.state = ParametricKindState::default();
 
         if has_selfdepx || has_selfdepboth {
-            res.state.width = SideParametricKind::Dependent
+            res.state.width = SideParametricState::Dependent
         } else if has_selfdepy {
-            res.state.height = SideParametricKind::Dependent
+            res.state.height = SideParametricState::Dependent
         } else {
             if !grow_en && !gap_en {
-                res.state.height = SideParametricKind::Fixed;
+                res.state.height = SideParametricState::Fixed;
             }
             if !cross_stretch_en {
-                res.state.width = SideParametricKind::Fixed;
+                res.state.width = SideParametricState::Fixed;
             }
         }
 

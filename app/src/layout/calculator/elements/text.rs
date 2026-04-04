@@ -1,9 +1,7 @@
-use crate::layout::{BoxAttributes, ColAttributes, TextAttributes};
-use crate::layout::calculator::{Fonts, ParametricKindState, SideParametricKind};
-use crate::layout::calculator::components::element_sizes::{ElementSizes, ElementSizesChildren, ParametricSolveState};
-use crate::layout::calculator::components::elements::ElementsChildrenIter;
+use crate::layout::calculator::{Fonts, SideParametricState};
+use crate::layout::calculator::components::element_sizes::ParametricSolveState;
 use crate::layout::calculator::components::text::Texts;
-use crate::layout::calculator::elements::SelfDepResolve;
+use crate::layout::TextAttributes;
 
 pub fn parametric_solve(attrs: &TextAttributes, i: usize, fonts: &mut Fonts, texts: &mut Texts) -> ParametricSolveState {
     let mut res = ParametricSolveState::default();
@@ -15,22 +13,21 @@ pub fn parametric_solve(attrs: &TextAttributes, i: usize, fonts: &mut Fonts, tex
         let size = attrs.font_size.with_scale(1.0);
 
         let text = texts.calculate_layout(i as u32, font, attrs.font.clone(), size, None);
-        res.min_height = text.height();
+        res.height.min = text.height();
         if !attrs.hide_overflow {
-            res.min_width = text.width();
+            res.width.min = text.width();
         }
 
-        res.state = ParametricKindState {
-            width: if attrs.hide_overflow { SideParametricKind::Free } else { SideParametricKind::Fixed },
-            height: SideParametricKind::Fixed,
-        };
+        if !attrs.hide_overflow { 
+            res.width.set_fixed();
+        }
+        res.height.set_fixed();
     }
     else {
         // Deferred layout calculation until width is known
-        res.state = ParametricKindState {
-            width: SideParametricKind::Free,
-            height: if attrs.hide_overflow { SideParametricKind::Free } else { SideParametricKind::Dependent },
-        };
+        if attrs.hide_overflow {
+            res.width = SideParametricState::new_dependent_fixed();
+        }
     }
 
     res

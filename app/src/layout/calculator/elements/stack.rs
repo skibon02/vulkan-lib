@@ -1,5 +1,5 @@
 use crate::layout::calculator::components::element_sizes::{ElementSizes, ElementSizesChildren, ParametricKindState, ParametricSolveState};
-use crate::layout::calculator::SideParametricKind;
+use crate::layout::calculator::SideParametricState;
 use crate::layout::{ChildAttributes, StackAttributes, StackChildAttributes, Lu, RowChildAttributes, ColAttributes};
 use crate::layout::calculator::components::elements::{ElementsChildrenIter, ElementsChildrenIterMut};
 use crate::layout::calculator::elements::{ContainerFixSolver, ContainerParametricSolver, HasChildAttributes, SelfDepResolve};
@@ -37,8 +37,8 @@ impl ContainerParametricSolver for StackParametricSolver<'_> {
             min_width: 0,
             min_height: 0,
             state: ParametricKindState {
-                width: SideParametricKind::Free,
-                height: SideParametricKind::Free,
+                width: SideParametricState::Free,
+                height: SideParametricState::Free,
             }
         }
     }

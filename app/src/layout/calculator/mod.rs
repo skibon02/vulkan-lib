@@ -1,7 +1,8 @@
+use std::cmp::max;
 use std::collections::{HashMap};
 use log::warn;
 use crate::layout::{AttributeValue, Element, ElementKind, ElementNode, ElementNodeRepr, Lu, MainGapMode, ParsedAttributes, XAlign, YAlign};
-use crate::layout::calculator::components::element_sizes::{Calculated, ElementSizes, ElementSizesChildren, ParametricKind, ParametricKindState, ParametricSolveState};
+use crate::layout::calculator::components::element_sizes::{Calculated, ElementSizes, ElementSizesChildren, ParametricSolveState};
 use crate::layout::calculator::components::elements::{Elements, ElementsChildrenMut};
 use crate::layout::calculator::components::font::Fonts;
 use crate::layout::calculator::components::image::Images;
@@ -20,16 +21,55 @@ pub enum FixAxis {
 
 
 #[derive(Copy, Clone, Debug, Default, PartialEq)]
-pub enum SideParametricKind {
-    Fixed,
-    #[default]
-    Free,
-    Dependent,
+pub struct SideParametricState {
+    min: Lu,
+    fixed: bool,
+    dependent: bool,
 }
 
-impl SideParametricKind {
+impl SideParametricState {
+    pub fn new_free() -> Self {
+        Self {
+            min: 0,
+            fixed: false,
+            dependent: false
+        }
+    }
+    pub fn new_dependent() -> Self {
+        Self {
+            min: 0,
+            fixed: false,
+            dependent: true
+        }
+    }
+    pub fn new_dependent_fixed() -> Self {
+        Self {
+            min: 0,
+            fixed: true,
+            dependent: true
+        }
+    }
+    pub fn new_fixed() -> Self {
+        Self {
+            min: 0,
+            fixed: true,
+            dependent: false
+        }
+    }
     fn is_fixed(&self) -> bool {
-        self == &SideParametricKind::Fixed
+        self.fixed
+    }
+    pub fn set_fixed(&mut self) {
+        self.fixed = true;
+    }
+    fn is_dependent(&self) -> bool {
+        self.dependent
+    }
+    fn min_len(&self) -> Lu {
+        self.min
+    }
+    fn apply_min_len(&mut self, len: Lu) {
+        self.min = max(self.min, len);
     }
 }
 
@@ -145,14 +185,14 @@ impl LayoutCalculator {
                 let mut child_fixes = vec![];
                 for (i, child) in children.iter_mut() {
                     let child_sizes = children_sizes.get_mut(i);
-                    if !child_sizes.cur_parametric_mut().state.is_fixed() {
+                    if !child_sizes.cur_parametric_mut().is_fixed() {
                         child_sizes.parent_parametric = child_sizes.post_parametric.clone();
                         child_sizes.set_parametric_stage(ParametricStage::ParentParametric);
                     }
                     
                     let (fix_width, fix_height) = solver.handle_child(&mut solver_state, child_sizes, T::unwrap(&mut child.self_child_attributes));
                     if let Some(fix_width) = fix_width {
-                        if !child_sizes.cur_parametric_mut().state.can_fix_width() {
+                        if !child_sizes.cur_parametric_mut().can_fix_width() {
                             warn!("Tried to fix width on element {i}, but it is already fixed!");
                         }
                         if child_sizes.try_fix_width(fix_width) {
@@ -165,7 +205,7 @@ impl LayoutCalculator {
                     }
 
                     if let Some(fix_height) = fix_height {
-                        if !child_sizes.cur_parametric_mut().state.can_fix_height() {
+                        if !child_sizes.cur_parametric_mut().can_fix_height() {
                             warn!("Tried to fix height on element {i}, but it is already fixed!");
                         }
                         if child_sizes.try_fix_height(fix_height) {
@@ -214,13 +254,13 @@ impl LayoutCalculator {
 
         // set self parametric params
         self.elements_sizes[i].parametric = parametric;
-        if parametric.state.is_fixed() {
+        if parametric.is_fixed() {
             // set dim fixed
-            if parametric.state.width == SideParametricKind::Fixed {
-                self.elements_sizes[i].dim_fix.set_width(parametric.min_width);
+            if parametric.width.is_fixed() {
+                self.elements_sizes[i].dim_fix.set_width(parametric.width.min);
             }
-            if parametric.state.height == SideParametricKind::Fixed {
-                self.elements_sizes[i].dim_fix.set_height(parametric.min_height);
+            if parametric.height.is_fixed() {
+                self.elements_sizes[i].dim_fix.set_height(parametric.height.min);
             }
         }
     }
@@ -233,8 +273,8 @@ impl LayoutCalculator {
         self.elements_sizes[i].post_parametric = self.elements_sizes[i].parametric.clone();
         self.elements_sizes[i].set_parametric_stage(ParametricStage::PostParametric);
 
-        self.elements_sizes[i].post_parametric.apply_min_width(self.elements[i].general_attributes.min_width);
-        self.elements_sizes[i].post_parametric.apply_min_height(self.elements[i].general_attributes.min_height);
+        self.elements_sizes[i].post_parametric.width.apply_min_len(self.elements[i].general_attributes.min_width);
+        self.elements_sizes[i].post_parametric.height.apply_min_len(self.elements[i].general_attributes.min_height);
         if self.elements[i].general_attributes.nostretch_x {
             if self.elements_sizes[i].try_fix_width(None) {
                 self.dfs(i, Phase::FixPass);
@@ -307,21 +347,21 @@ impl LayoutCalculator {
                 for (i, width, height) in children_fixes {
                     let element_sizes = element_sizes.get_mut(*i as u32);
                     if let Some(width) = width {
-                        if !element_sizes.cur_parametric().state.can_fix_width() {
+                        if !element_sizes.cur_parametric().can_fix_width() {
                             panic!("Attempted to fix width for element {i}, but it is not free!");
                         }
                         element_sizes.try_fix_width(*width);
                     }
 
                     if let Some(height) = height {
-                        if !element_sizes.cur_parametric().state.can_fix_height() {
+                        if !element_sizes.cur_parametric().can_fix_height() {
                             panic!("Attempted to fix height for element {i}, but it is not free!");
                         }
                         element_sizes.try_fix_height(*height);
                     }
 
                     if is_final {
-                        assert!(element_sizes.cur_parametric_mut().state.is_fixed(), "All children must be fixed in the end of dim_fix_children!");
+                        assert!(element_sizes.cur_parametric_mut().is_fixed(), "All children must be fixed in the end of dim_fix_children!");
                     }
                 }
             }
@@ -563,11 +603,11 @@ impl LayoutCalculator {
         match phase {
             Phase::ParametricSolve => {
                 self.parametric_solve(i);
-                if self.elements_sizes[i].parametric.state.is_fixed() {
+                if self.elements_sizes[i].parametric.is_fixed() {
                     return;
                 }
                 self.apply_general_attrs(i);
-                if self.elements_sizes[i].post_parametric.state.is_fixed() {
+                if self.elements_sizes[i].post_parametric.is_fixed() {
                     return;
                 }
             }
@@ -599,8 +639,8 @@ impl LayoutCalculator {
                  self.elements_sizes[i].pos_fix.pos_x, self.elements_sizes[i].pos_fix.pos_y);
             println!("  > Parametric stage: {:?}", self.elements_sizes[i].parametric_stage);
             let parametric = self.elements_sizes[i].cur_parametric();
-            println!("  > Parametric min: {}x{}", parametric.min_width, parametric.min_height);
-            println!("  > Parametric kind: {:?}", parametric.state);
+            println!("  > Parametric min: {}x{}", parametric.width.min, parametric.height.min);
+            println!("  > Parametric kind: {:?}", parametric);
         }
     }
 

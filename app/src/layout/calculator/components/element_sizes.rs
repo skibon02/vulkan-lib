@@ -1,6 +1,6 @@
 use std::cmp::max;
 use std::ops::{Deref, DerefMut};
-use crate::layout::calculator::{ParametricStage, SideParametricKind, ZERO_LENGTH_GUARD};
+use crate::layout::calculator::{ParametricStage, SideParametricState, ZERO_LENGTH_GUARD};
 use crate::layout::Lu;
 
 pub struct Calculated(pub Vec<ElementSizes>);
@@ -65,62 +65,60 @@ impl ElementSizes {
         self.parametric_stage = stage;
     }
     
-    /// Return true -> need to run subtree fix for this element
+    /// Returns true -> width was fixed
     pub fn try_fix_width(&mut self, width: Option<Lu>) -> bool {
         let cur = self.cur_parametric_mut();
-        if cur.state.can_fix_width() {
-            cur.state.width = SideParametricKind::Fixed;
-            let is_fixed = cur.state.is_fixed();
-            
-            let width = if let Some(w) = width {
-                w
-            } else {
-                if cur.min_width == 0 {
-                    ZERO_LENGTH_GUARD
-                }
-                else {
-                    cur.min_width
-                }
-            };
-            self.dim_fix.set_width(width);
-            is_fixed
+        if cur.can_fix_width() {
+            return false;
         }
-        else {
-            false
-        }
+
+        cur.width.set_fixed();
+
+        let width = if let Some(h) = width {
+            h
+        } else {
+            if cur.width.min == 0 {
+                ZERO_LENGTH_GUARD
+            }
+            else {
+                cur.width.min
+            }
+        };
+        assert!(width >= cur.width.min);
+        self.dim_fix.set_width(width);
+        true
     }
     
-    /// Returns true -> need to run subtree fix for this element
+    /// Returns true -> height was fixed
     pub fn try_fix_height(&mut self, height: Option<Lu>) -> bool {
         let cur = self.cur_parametric_mut();
-        if cur.state.can_fix_height() {
-            cur.state.height = SideParametricKind::Fixed;
-            let is_fixed = cur.state.is_fixed();
+        if cur.can_fix_height() {
+            return false;
+        }
+        
+        cur.height.set_fixed();
 
-            let height = if let Some(h) = height {
-                h
-            } else {
-                if cur.min_height == 0 {
-                    ZERO_LENGTH_GUARD
-                }
-                else {
-                    cur.min_height
-                }
-            };
-            self.dim_fix.set_height(height);
-            is_fixed
-        }
-        else {
-            false
-        }
+        let height = if let Some(h) = height {
+            h
+        } else {
+            if cur.height.min == 0 {
+                ZERO_LENGTH_GUARD
+            }
+            else {
+                cur.height.min
+            }
+        };
+        assert!(height >= cur.height.min);
+        self.dim_fix.set_height(height);
+        true
     }
     
     // min width for current parametric or dim fix width if fixed
     pub fn min_width(&self) -> Lu {
-        self.dim_fix.width.unwrap_or(self.cur_parametric().min_width)
+        self.dim_fix.width.unwrap_or(self.cur_parametric().width.min)
     }
     pub fn min_height(&self) -> Lu {
-        self.dim_fix.height.unwrap_or(self.cur_parametric().min_height)
+        self.dim_fix.height.unwrap_or(self.cur_parametric().height.min)
     }
     
     // for use from dim fix stage
@@ -155,111 +153,61 @@ impl<'a> ElementSizesChildren<'a> {
         }
     }
 }
-#[derive(Clone, Debug, Copy)]
-pub struct ParametricKindState {
-    pub width: SideParametricKind,
-    pub height: SideParametricKind,
-}
 
-#[derive(Clone, Debug, Copy, PartialEq)]
-pub enum ParametricKind {
-    /// At least one side is free
-    NotFixed,
-    /// Both sides are fixed
-    Fixed,
-    /// selfdepx
-    WidthToHeight,
-    /// selfdepy
-    HeightToWidth,
-    /// selfdepboth
-    SelfDepBoth,
+#[derive(Copy, Clone, Debug, Default)]
+pub struct ParametricSolveState {
+    pub width: SideParametricState,
+    pub height: SideParametricState,
 }
-
-impl Default for ParametricKindState {
-    fn default() -> Self {
-        Self {
-            width: SideParametricKind::default(),
-            height: SideParametricKind::default(),
-        }
-    }
-}
-
-impl ParametricKindState {
+impl ParametricSolveState {
     pub fn new_width_to_height() -> Self {
         Self {
-            width: SideParametricKind::Free,
-            height: SideParametricKind::Dependent,
+            width: SideParametricState::new_free(),
+            height: SideParametricState::new_dependent_fixed(),
         }
     }
 
     pub fn new_height_to_width() -> Self {
         Self {
-            width: SideParametricKind::Dependent,
-            height: SideParametricKind::Free,
+            width: SideParametricState::new_dependent_fixed(),
+            height: SideParametricState::new_free(),
         }
     }
 
     pub fn new_fixed() -> Self {
         Self {
-            width: SideParametricKind::Fixed,
-            height: SideParametricKind::Fixed,
+            width: SideParametricState::new_fixed(),
+            height: SideParametricState::new_fixed(),
         }
     }
 
     pub fn is_fixed(&self) -> bool {
-        match (self.width, self.height) {
-            (SideParametricKind::Fixed, SideParametricKind::Dependent | SideParametricKind::Fixed) => true,
-            (SideParametricKind::Dependent, SideParametricKind::Fixed) => true,
-            _ => false
-        }
+        self.width.is_fixed() && self.height.is_fixed()
     }
-    
+
     pub fn is_self_dep(&self) -> bool {
-        self.width == SideParametricKind::Dependent || self.height == SideParametricKind::Dependent
+        self.width.is_dependent() || self.height.is_dependent()
     }
     pub fn is_self_dep_both(&self) -> bool {
-        self.width == SideParametricKind::Dependent && self.height == SideParametricKind::Dependent
+        self.width.is_dependent() && self.height.is_dependent()
     }
 
     pub fn can_fix_width(&self) -> bool {
-        self.width == SideParametricKind::Free || self.is_self_dep_both()
+        !self.width.is_fixed() && (!self.height.is_dependent() || self.height.is_fixed() && self.height.is_dependent())
     }
 
     pub fn can_fix_height(&self) -> bool {
-        self.height == SideParametricKind::Free || self.is_self_dep_both()
-    }
-
-    pub fn kind(&self) -> ParametricKind {
-        match (self.width, self.height) {
-            (SideParametricKind::Free, SideParametricKind::Dependent) => ParametricKind::WidthToHeight,
-            (SideParametricKind::Dependent, SideParametricKind::Free) => ParametricKind::HeightToWidth,
-            (_, SideParametricKind::Free) => ParametricKind::NotFixed,
-            (SideParametricKind::Free, _) => ParametricKind::NotFixed,
-            _ => ParametricKind::Fixed,
-        }
+        !self.height.is_fixed() && (!self.width.is_dependent() || self.width.is_fixed() && self.width.is_dependent())
     }
 }
 
-#[derive(Copy, Clone, Debug, Default)]
-pub struct ParametricSolveState {
-    pub min_width: Lu,
-    pub min_height: Lu,
-    pub state: ParametricKindState,
-}
 
-impl ParametricSolveState {
-    pub fn apply_min_width(&mut self, width: Lu) {
-        self.min_width = max(self.min_width, width);
-    }
-    pub fn apply_min_height(&mut self, height: Lu) {
-        self.min_height = max(self.min_height, height);
-    }
-}
 #[derive(Clone, Debug, Default)]
 pub struct DimFixState {
     height: Option<Lu>,
     width: Option<Lu>,
-    subtree_fixed: bool,
+    subtree_fixed_x: bool,
+    subtree_fixed_y: bool,
 }
 impl DimFixState {
     pub fn height(&self) -> Option<Lu> {
@@ -274,11 +222,17 @@ impl DimFixState {
     pub fn set_width(&mut self, width: Lu) {
         self.width = Some(width);
     }
-    pub fn is_subtree_fixed(&self) -> bool {
-        self.subtree_fixed
+    pub fn is_subtree_fixed_x(&self) -> bool {
+        self.subtree_fixed_x
     }
-    pub fn set_subtree_fixed(&mut self) {
-        self.subtree_fixed = true;
+    pub fn set_subtree_fixed_x(&mut self) {
+        self.subtree_fixed_x = true;
+    }
+    pub fn is_subtree_fixed_y(&self) -> bool {
+        self.subtree_fixed_y
+    }
+    pub fn set_subtree_fixed_y(&mut self) {
+        self.subtree_fixed_y = true;
     }
 }
 #[derive(Clone, Debug, Default)]

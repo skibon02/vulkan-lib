@@ -1,4 +1,4 @@
-use crate::layout::calculator::{Images, ParametricKindState, SideParametricKind};
+use crate::layout::calculator::{Images, SideParametricState};
 use crate::layout::{ImgAttributes, Lu};
 use crate::layout::calculator::components::element_sizes::ParametricSolveState;
 
@@ -8,24 +8,20 @@ pub fn parametric_solve(attrs: &ImgAttributes, images: &mut Images) -> Parametri
     let name = attrs.resource.clone();
     let img_info = images.load_image(name);
     if attrs.height.is_none() && attrs.width.is_none() {
-        res.state = ParametricKindState {
-            width: SideParametricKind::Dependent,
-            height: SideParametricKind::Dependent,
-        };
+        res.width = SideParametricState::new_dependent();
+        res.height = SideParametricState::new_dependent();
     }
     else {
-        res.state = ParametricKindState{
-            width: SideParametricKind::Fixed,
-            height: SideParametricKind::Fixed,
-        };
+        res.width = SideParametricState::new_fixed();
+        res.height = SideParametricState::new_fixed();
 
         if let Some(width) = attrs.width {
-            res.min_width = width;
-            res.min_height = (width as f32 * img_info.aspect()) as Lu;
+            res.width.min = width;
+            res.height.min = (width as f32 * img_info.aspect()) as Lu;
         }
         else if let Some(height) = attrs.height {
-            res.min_height = height;
-            res.min_width = (height as f32 / img_info.aspect()) as Lu;
+            res.height.min = height;
+            res.width.min = (height as f32 / img_info.aspect()) as Lu;
         }
         else {
             unreachable!()
