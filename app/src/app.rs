@@ -1,7 +1,8 @@
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc};
 use std::{mem, thread};
+use std::cmp::max;
 use std::slice::from_raw_parts;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -52,7 +53,7 @@ pub struct App {
     render_tx: mpsc::Sender<RenderMessage>,
     render_thread: Option<JoinHandle<()>>,
     render_ready: Arc<AtomicBool>,
-    resize_ready: Arc<AtomicBool>,
+    pending_resize: Arc<AtomicU64>,
 
     // some stats
     frame_cnt: usize,
@@ -65,6 +66,7 @@ impl App {
         let raw_window_handle = window.raw_window_handle().unwrap();
         let raw_display_handle = window.raw_display_handle().unwrap();
         let inner_size = window.inner_size();
+        info!("Window created! ({}x{})", inner_size.width, inner_size.height);
 
         // try load resource
         let font_data = get_resource(Path::join("fonts".as_ref(), "Ubuntu-Regular.ttf")).unwrap();
@@ -73,7 +75,8 @@ impl App {
         let vulkan_renderer = VulkanInstance::new_for_handle(raw_window_handle, raw_display_handle, (inner_size.width, inner_size.height), api_version).unwrap();
         let shared = vulkan_renderer.shared();
         let mut allocator = vulkan_renderer.new_allocator();
-        let (render_task, render_tx, render_ready, resize_ready) = render::RenderTask::new(vulkan_renderer, inner_size);
+        let pending_resize = Arc::new(AtomicU64::new(0));
+        let (render_task, render_tx, render_ready) = render::RenderTask::new(vulkan_renderer, inner_size, pending_resize.clone());
         let render_jh = render_task.spawn();
         
         // create UI component
@@ -113,7 +116,7 @@ impl App {
 
             render_tx,
             render_ready,
-            resize_ready,
+            pending_resize,
             render_thread: Some(render_jh),
 
             frame_cnt: 0,
@@ -210,6 +213,10 @@ impl App {
                     if size != self.prev_win_size {
                         self.prev_win_size = size;
                         self.layout_calculator.calculate_layout(size.width, size.height);
+                        
+                        let (w, h) = self.layout_calculator.get_min_root_size();
+                        self.window.set_min_inner_size(Some(PhysicalSize::new(w, h)));
+                        
                         let render_rects = self.layout_calculator.get_render_rects();
                         self.instances.clear();
                         for rect in &render_rects {
@@ -258,15 +265,8 @@ impl App {
                         info!("Continue rendering...");
                     }
 
-                    // wait until previous resize operation is finished
-                    while !self.resize_ready.swap(false, Ordering::Relaxed) {
-                        thread::sleep(Duration::from_millis(1));
-                    }
-
-                    let _ = self.render_tx.send(RenderMessage::Resize {
-                        width: size.width,
-                        height: size.height,
-                    });
+                    let packed = ((size.width as u64) << 32) | (size.height as u64);
+                    self.pending_resize.store(packed, Ordering::Relaxed);
                     self.is_collapsed = false;
                 }
             }

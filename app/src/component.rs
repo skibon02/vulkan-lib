@@ -86,6 +86,7 @@ impl Component {
                     AttributeValue::General(GeneralValue::NostretchY(true)),
                 ],
             },
+            // 7: White Text
             ElementNodeRepr {
                 parent_i: 0,
                 element: ElementKind::Text,

@@ -27,11 +27,13 @@ impl CalibratedTimestamps {
     pub fn get_timestamps(&self) -> (Vec<(TimeDomainEXT, u64)>, u64) {
         let mut res = Vec::new();
 
-        let calibrated_timestamps_info: Vec<_> = self.time_domains.iter().map(|d| {
-            CalibratedTimestampInfoEXT {
-                time_domain: *d,
-                ..Default::default()
-            }
+        let calibrated_timestamps_info: Vec<_> = self.time_domains.iter().filter_map(|d| {
+            [TimeDomainEXT::DEVICE, TimeDomainEXT::CLOCK_MONOTONIC_EXT, TimeDomainEXT::CLOCK_MONOTONIC_RAW, TimeDomainEXT::QUERY_PERFORMANCE_COUNTER].contains(d).then_some(
+                CalibratedTimestampInfoEXT {
+                    time_domain: *d,
+                    ..Default::default()
+                }
+            )
         }).collect();
         unsafe {
             let (timestamps, max_deviation) = self.device.get_calibrated_timestamps(&calibrated_timestamps_info).unwrap();

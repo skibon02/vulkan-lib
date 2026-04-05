@@ -3,6 +3,7 @@ use log::{error, info};
 use sparkles::config::SparklesConfig;
 use sparkles::{range_event_start, FinalizeGuard};
 use winit::application::ApplicationHandler;
+use winit::dpi::{LogicalSize, PhysicalSize};
 use winit::event::{DeviceEvent, DeviceId, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{WindowAttributes, WindowId};
@@ -71,7 +72,8 @@ impl ApplicationHandler for WinitApp {
         let g = range_event_start!("[WINIT] resumed");
         info!("\t\t*** APP RESUMED ***");
         let window = event_loop
-            .create_window(WindowAttributes::default().with_title(":P"))
+            .create_window(WindowAttributes::default()
+                .with_title(":P"))
             .unwrap();
 
         window.request_redraw();

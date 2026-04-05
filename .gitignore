@@ -4,3 +4,4 @@ app/trace
 .toolchain
 .direnv
 trace
+app/debug.keystore

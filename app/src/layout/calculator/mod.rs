@@ -446,7 +446,7 @@ impl LayoutCalculator {
         }
     }
 
-    fn dim_fix_self_dep_resolve(&mut self, i: usize) {
+    fn dim_fix_self_dep_resolve(&mut self, i: usize, fix_x: bool) {
         let (el_sizes, mut children_sizes) = self.elements_sizes.children(i);
         let (element, mut children) = self.elements.children(i);
         if element.element.is_container() {
@@ -487,7 +487,14 @@ impl LayoutCalculator {
                 _ => unreachable!(),
             };
 
-            *el_sizes.cur_parametric_mut() = parametric;
+            if fix_x {
+                // only update min_y
+                el_sizes.cur_parametric_mut().height.min = parametric.height.min;
+            }
+            else {
+                // only update min_x
+                el_sizes.cur_parametric_mut().width.min = parametric.width.min;
+            }
         }
     }
 
@@ -661,14 +668,14 @@ impl LayoutCalculator {
                 }
             }
             Phase::FixPassX => {
-                self.dim_fix_self_dep_resolve(i);
+                self.dim_fix_self_dep_resolve(i, true);
                 let sizes = &mut self.elements_sizes[i];
                 if sizes.dim_fix.width().is_some() {
                     sizes.dim_fix.set_subtree_fixed_x()
                 }
             }
             Phase::FixPassY => {
-                self.dim_fix_self_dep_resolve(i);
+                self.dim_fix_self_dep_resolve(i, false);
                 let sizes = &mut self.elements_sizes[i];
                 if sizes.dim_fix.width().is_some() {
                     sizes.dim_fix.set_subtree_fixed_y()
@@ -687,10 +694,13 @@ impl LayoutCalculator {
         }
 
         self.dfs(0, Phase::ParametricSolve);
-        if self.elements_sizes[0].try_provide_width(Some(width)) {
+
+        let min_width = self.elements_sizes[0].cur_parametric().width.min;
+        if self.elements_sizes[0].try_provide_width(Some(max(min_width, width))) {
             self.dfs(0, Phase::FixPassX);
         }
-        if self.elements_sizes[0].try_provide_height(Some(height)) {
+        let min_height = self.elements_sizes[0].cur_parametric().height.min;
+        if self.elements_sizes[0].try_provide_height(Some(max(min_height, height))) {
             self.dfs(0, Phase::FixPassY);
         }
         self.dfs(0, Phase::PosFixPass);
@@ -746,6 +756,11 @@ impl LayoutCalculator {
         while let Some(parent) = parents.pop() {
             self.finalize_node(parent, phase);
         }
+    }
+
+    pub fn get_min_root_size(&self) -> (u32, u32) {
+        let el_sizes = self.elements_sizes.get(0).unwrap();
+        (el_sizes.cur_parametric().width.min, el_sizes.cur_parametric().height.min)
     }
 
     /// Produce render rects for visualization.

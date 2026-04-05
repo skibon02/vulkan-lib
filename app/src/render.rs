@@ -12,7 +12,7 @@ use std::path::Path;
 use vulkan_lib::shaders::layout::types::GlslTypeVariant;
 use smallvec::{smallvec, SmallVec};
 use std::sync::{mpsc, Arc};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread;
 use std::thread::JoinHandle;
 use std::time::Instant;
@@ -38,7 +38,6 @@ use crate::util::{DoubleBuffered, FrameCounter};
 
 pub enum RenderMessage {
     Redraw { bg_color: [f32; 3] },
-    Resize { width: u32, height: u32 },
     Exit,
     UpdateInstances {
         staging: StagingBufferRange,
@@ -50,7 +49,7 @@ pub struct RenderTask {
     rx: mpsc::Receiver<RenderMessage>,
     vulkan_renderer: GraphicsQueue,
     render_finished: Arc<AtomicBool>,
-    resize_finished: Arc<AtomicBool>,
+    pending_resize: Arc<AtomicU64>,
     swapchain_recreated: bool,
     last_print: Instant,
     extent: [i32; 2],
@@ -164,20 +163,19 @@ impl Default for SolidAttributes {
     }
 }
 impl RenderTask {
-    pub fn new(vulkan_renderer: GraphicsQueue, initial_size: PhysicalSize<u32>) -> (Self, mpsc::Sender<RenderMessage>, Arc<AtomicBool>, Arc<AtomicBool>) {
+    pub fn new(vulkan_renderer: GraphicsQueue, initial_size: PhysicalSize<u32>, pending_resize: Arc<AtomicU64>) -> (Self, mpsc::Sender<RenderMessage>, Arc<AtomicBool>) {
         let (tx, rx) = mpsc::channel::<RenderMessage>();
         let render_finished = Arc::new(AtomicBool::new(true));
-        let resize_finished = Arc::new(AtomicBool::new(true));
 
-        (Self  {
+        (Self {
             rx,
             vulkan_renderer,
             render_finished: render_finished.clone(),
-            resize_finished: resize_finished.clone(),
+            pending_resize,
             swapchain_recreated: false,
             last_print: Instant::now(),
             extent: [initial_size.width as i32, initial_size.height as i32],
-        }, tx, render_finished, resize_finished)
+        }, tx, render_finished)
     }
 
     pub fn spawn(mut self) -> JoinHandle<()> {
@@ -454,17 +452,21 @@ impl RenderTask {
                             instance_buffer = Some(buf.range(0..len));
                         });
                     }
-                    RenderMessage::Resize { width, height } => {
-                        let g = range_event_start!("Recreate Resize");
-                        self.vulkan_renderer.recreate_resize((width, height));
-                        self.swapchain_recreated = true;
-                        self.resize_finished.store(true, Ordering::Release);
-                        self.extent = [width as i32, height as i32];
-                    }
                     RenderMessage::Exit => {
                         info!("Render thread exiting");
                         break;
                     }
+                }
+
+                // Mailbox resize: consume latest pending resize (if any)
+                let packed = self.pending_resize.swap(0, Ordering::Relaxed);
+                if packed != 0 {
+                    let width = (packed >> 32) as u32;
+                    let height = (packed & 0xFFFF_FFFF) as u32;
+                    let g = range_event_start!("Recreate Resize");
+                    self.vulkan_renderer.recreate_resize((width, height));
+                    self.swapchain_recreated = true;
+                    self.extent = [width as i32, height as i32];
                 }
 
                 if self.last_print.elapsed().as_secs() >= 3 {
