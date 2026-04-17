@@ -11,7 +11,7 @@ log = "0.4.28"
 simple_logger = "5.1.0"
 
 
-winit = { version="0.30.12", features=["android-native-activity"] }
+winit = { version="0.31.0-beta.2", features=["android-native-activity"] }
 
 # android
 jni = "0.22.4"
@@ -50,3 +50,4 @@ keystore_password = "android"
 [features]
 default = ["vulkan-lib/validation"]
 android = ["vulkan-lib/android", "dep:ndk-sys", "dep:ndk", "dep:android_logger"]
+

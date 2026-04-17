@@ -1,3 +1,7 @@
 [workspace]
 resolver = "3"
 members = ["vulkan-lib", "app", "ui-macro"]
+
+[patch.crates-io]
+winit = { version = "0.31.0-beta.2", path = "../../packages/winit/winit"}
+winit-android = { version = "0.31.0-beta.2", path = "../../packages/winit/winit-android"}

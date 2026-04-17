@@ -7,7 +7,7 @@ use sparkles::range_event_start;
 use winit::event_loop::{EventLoop, EventLoopBuilder};
 use winit::platform::android::activity::*;
 
-pub fn android_main(app: AndroidApp) -> EventLoop<()> {
+pub fn android_main(app: AndroidApp) -> EventLoop {
     use jni::objects::{JObject, JObjectArray, JValue};
     use winit::platform::android::EventLoopBuilderExtAndroid;
     use vulkan_lib::android::set_android_context;

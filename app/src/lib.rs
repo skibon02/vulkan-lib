@@ -6,6 +6,7 @@ use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalSize};
 use winit::event::{DeviceEvent, DeviceId, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::event_loop::run_on_demand::EventLoopExtRunOnDemand;
 use winit::window::{WindowAttributes, WindowId};
 use crate::app::App;
 
@@ -42,17 +43,17 @@ fn android_main(app: winit::platform::android::activity::AndroidApp) {
     }
 
     let g = sparkles_init();
-    let event_loop = android_main(app);
-    let mut winit_app: WinitApp = WinitApp::new(g);
-    event_loop.run_app(&mut winit_app).unwrap();
+    let mut event_loop = android_main(app);
+    let winit_app: WinitApp = WinitApp::new(g);
+    event_loop.run_app_on_demand(winit_app).unwrap();
     info!("Winit application exited without error!");
     std::process::exit(0);
 }
 pub fn run() {
     let g = sparkles_init();
-    let event_loop = EventLoop::new().unwrap();
-    let mut winit_app: WinitApp = WinitApp::new(g);
-    event_loop.run_app(&mut winit_app).unwrap();
+    let mut event_loop = EventLoop::new().unwrap();
+    let winit_app: WinitApp = WinitApp::new(g);
+    event_loop.run_app_on_demand(winit_app).unwrap();
 }
 
 struct WinitApp {
@@ -68,9 +69,9 @@ impl WinitApp {
 }
 
 impl ApplicationHandler for WinitApp {
-    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        let g = range_event_start!("[WINIT] resumed");
-        info!("\t\t*** APP RESUMED ***");
+    fn can_create_surfaces(&mut self, event_loop: &dyn ActiveEventLoop) {
+        let g = range_event_start!("[WINIT] can_create_surfaces");
+        info!("\t\t*** APP CAN CREATE SURFACES ***");
         let window = event_loop
             .create_window(WindowAttributes::default()
                 .with_title(":P"))
@@ -78,15 +79,19 @@ impl ApplicationHandler for WinitApp {
 
         window.request_redraw();
 
-
         let instances = self.app.take().map(|a| a.instances.clone());
         let app_state = App::new_winit(window, instances.unwrap_or_default());
         self.app = Some(app_state);
     }
 
+    fn resumed(&mut self, event_loop: &dyn ActiveEventLoop) {
+        let g = range_event_start!("[WINIT] resumed");
+        info!("\t\t*** APP RESUMED ***");
+    }
+
     fn window_event(
         &mut self,
-        event_loop: &ActiveEventLoop,
+        event_loop: &dyn ActiveEventLoop,
         _window_id: WindowId,
         event: WindowEvent,
     ) {
@@ -100,16 +105,12 @@ impl ApplicationHandler for WinitApp {
         }
     }
 
-    fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
-        let g = range_event_start!("[WINIT] Exiting");
-        info!("\t\t*** APP EXITING ***");
-    }
     //
-    // fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+    // fn about_to_wait(&mut self, event_loop: &dyn ActiveEventLoop) {
     //     info!("\t\t*** APP ABOUT TO WAIT ***");
     // }
 
-    fn memory_warning(&mut self, event_loop: &ActiveEventLoop) {
+    fn memory_warning(&mut self, event_loop: &dyn ActiveEventLoop) {
         let g = range_event_start!("[WINIT] Memory warning");
         info!("\t\t*** APP MEMORY WARNING ***");
     }

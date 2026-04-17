@@ -7,14 +7,15 @@ use std::slice::from_raw_parts;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 use log::{error, info, warn};
-use raw_window_handle::{HasRawDisplayHandle, HasRawWindowHandle};
+use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use sparkles::{instant_event, range_event_start};
 use winit::dpi::PhysicalSize;
-use winit::event::{ElementState, MouseButton, TouchPhase, WindowEvent};
+use winit::event::{ButtonSource, ElementState, MouseButton, PointerSource, WindowEvent};
 use winit::event_loop::ActiveEventLoop;
 use winit::keyboard;
 use winit::keyboard::NamedKey;
-use winit::window::{Fullscreen, Window};
+use winit::monitor::Fullscreen;
+use winit::window::Window;
 use vulkan_lib::{vk, VulkanInstance};
 use vulkan_lib::queue::shared::SharedState;
 use vulkan_lib::resources::buffer::BufferResource;
@@ -33,7 +34,7 @@ pub struct App {
     is_collapsed: bool,
     start_time: Instant,
 
-    window: Window,
+    window: Box<dyn Window>,
 
     // ui
     cursor_pos: (f64, f64),
@@ -62,10 +63,10 @@ pub struct App {
 
 
 impl App {
-    pub fn new_winit(window: Window, instances: Vec<SolidAttributes>) -> App {
-        let raw_window_handle = window.raw_window_handle().unwrap();
-        let raw_display_handle = window.raw_display_handle().unwrap();
-        let inner_size = window.inner_size();
+    pub fn new_winit(window: Box<dyn Window>, instances: Vec<SolidAttributes>) -> App {
+        let raw_window_handle = window.window_handle().unwrap().as_raw();
+        let raw_display_handle = window.display_handle().unwrap().as_raw();
+        let inner_size = window.surface_size();
         info!("Window created! ({}x{})", inner_size.width, inner_size.height);
 
         // try load resource
@@ -136,7 +137,7 @@ impl App {
         self.app_finished
     }
 
-    pub fn handle_event(&mut self, event_loop: &ActiveEventLoop, event: WindowEvent) -> anyhow::Result<()> {
+    pub fn handle_event(&mut self, event_loop: &dyn ActiveEventLoop, event: WindowEvent) -> anyhow::Result<()> {
         match &event {
             WindowEvent::CloseRequested
             | WindowEvent::KeyboardInput {
@@ -168,13 +169,14 @@ impl App {
                     // find max by width and refresh rate
                     let mode = monitor
                         .video_modes()
-                        .map(|m| (m.size().width, m.refresh_rate_millihertz(), m))
-                        .max_by_key(|(w, hz, m)| w * 5000 + * hz)
+                        .map(|m| (m.size().width, m.refresh_rate_millihertz().map(|v| v.get()).unwrap_or(0), m))
+                        .max_by_key(|(w, hz, _)| w * 5000 + hz)
                         .map(|(_, _, m)| m)
                         .unwrap();
-                    info!("Entering fullscreen mode {:?}, refresh rate: {}", mode.size(), mode.refresh_rate_millihertz() as f32 / 1000.0);
+                    let hz = mode.refresh_rate_millihertz().map(|v| v.get()).unwrap_or(0);
+                    info!("Entering fullscreen mode {:?}, refresh rate: {}", mode.size(), hz as f32 / 1000.0);
                     self.window
-                        .set_fullscreen(Some(Fullscreen::Exclusive(mode)));
+                        .set_fullscreen(Some(Fullscreen::Exclusive(monitor, mode)));
                 } else {
                     let g = range_event_start!("[APP] Exit fullscreen mode");
                     self.window.set_fullscreen(None);
@@ -190,45 +192,45 @@ impl App {
                     if !self.render_ready.swap(false, Ordering::Acquire) {
                         break 'handling;
                     }
-
-                    if self.instances_updated {
-                        self.instances_updated = false;
-                        let g = range_event_start!("instance buffer prepare");
-
-                        // prepare new instances
-                        let bytes_len = self.instances.len() * size_of::<SolidAttributes>();
-                        let mut range = self.staging.allocate(&mut self.allocator, bytes_len);
-                        range.update(|r| {
-                            let bytes = unsafe { from_raw_parts(self.instances.as_ptr() as *const u8, bytes_len) };
-                            r[..bytes_len].copy_from_slice(bytes);
-                        });
-                        self.render_tx.send(RenderMessage::UpdateInstances {
-                            staging: range,
-                            buf: self.instance_buffers.current().clone()
-                        }).unwrap();
-                    }
+                    //
+                    // if self.instances_updated {
+                    //     self.instances_updated = false;
+                    //     let g = range_event_start!("instance buffer prepare");
+                    //
+                    //     // prepare new instances
+                    //     let bytes_len = self.instances.len() * size_of::<SolidAttributes>();
+                    //     let mut range = self.staging.allocate(&mut self.allocator, bytes_len);
+                    //     range.update(|r| {
+                    //         let bytes = unsafe { from_raw_parts(self.instances.as_ptr() as *const u8, bytes_len) };
+                    //         r[..bytes_len].copy_from_slice(bytes);
+                    //     });
+                    //     self.render_tx.send(RenderMessage::UpdateInstances {
+                    //         staging: range,
+                    //         buf: self.instance_buffers.current().clone()
+                    //     }).unwrap();
+                    // }
 
                     // Run layout and produce render rects
-                    let size = self.window.inner_size();
+                    let size = self.window.surface_size();
                     if size != self.prev_win_size {
-                        self.prev_win_size = size;
-                        self.layout_calculator.calculate_layout(size.width, size.height);
+                        // self.prev_win_size = size;
+                        // self.layout_calculator.calculate_layout(size.width, size.height);
                         
-                        let (w, h) = self.layout_calculator.get_min_root_size();
-                        self.window.set_min_inner_size(Some(PhysicalSize::new(w, h)));
-                        
-                        let render_rects = self.layout_calculator.get_render_rects();
-                        self.instances.clear();
-                        for rect in &render_rects {
-                            self.instances.push(SolidAttributes {
-                                pos: [rect.x, rect.y].into(),
-                                size: [rect.w, rect.h].into(),
-                                d: rect.depth.into(),
-                                color: [rect.r, rect.g, rect.b, rect.a].into(),
-                            });
-                        }
-
-                        self.instances_updated = true;
+                        // let (w, h) = self.layout_calculator.get_min_root_size();
+                        // self.window.set_min_inner_size(Some(PhysicalSize::new(w, h)));
+                        //
+                        // let render_rects = self.layout_calculator.get_render_rects();
+                        // self.instances.clear();
+                        // for rect in &render_rects {
+                        //     self.instances.push(SolidAttributes {
+                        //         pos: [rect.x, rect.y].into(),
+                        //         size: [rect.w, rect.h].into(),
+                        //         d: rect.depth.into(),
+                        //         color: [rect.r, rect.g, rect.b, rect.a].into(),
+                        //     });
+                        // }
+                        //
+                        // self.instances_updated = true;
                     }
 
                     self.frame_counter.increment_frame();
@@ -250,7 +252,7 @@ impl App {
                     }
                 }
             }
-            WindowEvent::Resized(size) => {
+            WindowEvent::SurfaceResized(size) => {
                 static FIRST_RESIZE: AtomicBool = AtomicBool::new(true);
                 if FIRST_RESIZE.swap(false, Ordering::Relaxed) {
                     return Ok(());
@@ -270,21 +272,25 @@ impl App {
                     self.is_collapsed = false;
                 }
             }
-            WindowEvent::MouseInput {
+            WindowEvent::PointerButton {
                 state: ElementState::Pressed,
-                button: MouseButton::Left,
+                button: ButtonSource::Mouse(MouseButton::Left),
                 ..
             } => {
                 instant_event!("Mouse button press");
                 self.process_touch(self.cursor_pos);
             }
-            WindowEvent::Touch(t) => {
-                if t.phase == TouchPhase::Started {
-                    self.process_touch((t.location.x, t.location.y))
-                }
-            }
-            WindowEvent::CursorMoved {
+            WindowEvent::PointerButton {
+                state: ElementState::Pressed,
+                button: ButtonSource::Touch { .. },
                 position,
+                ..
+            } => {
+                self.process_touch((position.x, position.y))
+            }
+            WindowEvent::PointerMoved {
+                position,
+                source: PointerSource::Mouse,
                 ..
             } => {
                 self.cursor_pos = (position.x, position.y);

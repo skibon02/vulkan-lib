@@ -50,6 +50,9 @@
         LD_LIBRARY_PATH = with pkgs; lib.makeLibraryPath [
           libGL
           libxkbcommon
+          libx11
+          libxcursor
+          libxi
           wayland
           vulkan-loader
         ];
