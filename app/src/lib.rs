@@ -29,6 +29,7 @@ fn sparkles_init() -> FinalizeGuard{
 #[cfg(not(target_os = "android"))]
 fn sparkles_init() -> FinalizeGuard{
     sparkles::init(SparklesConfig::default()
+        .without_file_sender()
         .with_udp_multicast_default())
 }
 
@@ -84,6 +85,11 @@ impl ApplicationHandler for WinitApp {
         self.app = Some(app_state);
     }
 
+    fn destroy_surfaces(&mut self, _event_loop: &dyn ActiveEventLoop) {
+        info!("\t\t*** APP DESTROY SURFACES ***");
+        self.app = None;
+    }
+
     fn resumed(&mut self, event_loop: &dyn ActiveEventLoop) {
         let g = range_event_start!("[WINIT] resumed");
         info!("\t\t*** APP RESUMED ***");
@@ -95,7 +101,6 @@ impl ApplicationHandler for WinitApp {
         _window_id: WindowId,
         event: WindowEvent,
     ) {
-        let g = range_event_start!("[WINIT] window event");
         if self.app.as_mut().unwrap().is_finished() {
             info!("Exit requested!");
             event_loop.exit();

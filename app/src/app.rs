@@ -166,17 +166,9 @@ impl App {
                 if self.window.fullscreen().is_none() {
                     let g = range_event_start!("[APP] Enable fullscreen");
                     let monitor = self.window.current_monitor().unwrap();
-                    // find max by width and refresh rate
-                    let mode = monitor
-                        .video_modes()
-                        .map(|m| (m.size().width, m.refresh_rate_millihertz().map(|v| v.get()).unwrap_or(0), m))
-                        .max_by_key(|(w, hz, _)| w * 5000 + hz)
-                        .map(|(_, _, m)| m)
-                        .unwrap();
-                    let hz = mode.refresh_rate_millihertz().map(|v| v.get()).unwrap_or(0);
-                    info!("Entering fullscreen mode {:?}, refresh rate: {}", mode.size(), hz as f32 / 1000.0);
+                    info!("Entering fullscreen mode {:?}", monitor.size());
                     self.window
-                        .set_fullscreen(Some(Fullscreen::Exclusive(monitor, mode)));
+                        .set_fullscreen(Some(Fullscreen::Borderless(Some(monitor))));
                 } else {
                     let g = range_event_start!("[APP] Exit fullscreen mode");
                     self.window.set_fullscreen(None);
@@ -184,10 +176,7 @@ impl App {
             }
 
             WindowEvent::RedrawRequested => 'handling: {
-                let g = range_event_start!("[APP] Redraw requested");
-                let g = range_event_start!("[APP] window.request_redraw call");
                 self.window.request_redraw();
-                drop(g);
                 if !self.app_finished && !self.is_collapsed {
                     if !self.render_ready.swap(false, Ordering::Acquire) {
                         break 'handling;

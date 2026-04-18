@@ -954,7 +954,7 @@ impl GraphicsQueue {
                 .swapchain_loader
                 .acquire_next_image(
                     self.swapchain_wrapper.get_swapchain(),
-                    u64::MAX,
+                    500_000_000, // 500ms timeout instead of blocking forever
                     signal_semaphore,
                     vk::Fence::null(),
                 )

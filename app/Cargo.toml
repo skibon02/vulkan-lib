@@ -40,6 +40,9 @@ runtime_libs = "android/lib"
 min_sdk_version = 24
 target_sdk_version = 33
 
+[package.metadata.android.application.activity]
+config_changes = "orientation|keyboardHidden|screenSize|screenLayout|smallestScreenSize|density"
+
 [[package.metadata.android.uses_permission]]
 name = "android.permission.INTERNET"
 
