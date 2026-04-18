@@ -299,6 +299,8 @@ impl GraphicsQueue {
 
     // Swapchain methods
     pub fn recreate_resize(&mut self, new_extent: (u32, u32)) {
+        #[cfg(feature = "sync-swapchain-recreate")]
+        self.wait_idle();
         let g = range_event_start!("[Vulkan] Recreate swapchain");
         let new_extent = Extent2D {
             width: new_extent.0,
