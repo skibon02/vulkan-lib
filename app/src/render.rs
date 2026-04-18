@@ -361,7 +361,24 @@ impl RenderTask {
                                 };
                             });
 
-                            // Handle global uniform update on resize
+                            // Acquire next swapchain image (retry once after recreating swapchain)
+                            let g = range_event_start!("Acquire next image");
+                            let acquire_result = self.vulkan_renderer.acquire_next_image()
+                                .or_else(|_| {
+                                    self.vulkan_renderer.recreate_resize((self.extent[0] as u32, self.extent[1] as u32));
+                                    self.swapchain_recreated = true;
+                                    self.vulkan_renderer.acquire_next_image()
+                                });
+                            let (image_index, acquire_wait_ref, is_suboptimal) = match acquire_result {
+                                Ok(result) => result,
+                                Err(e) => {
+                                    error!("Failed to acquire next image after recreate: {:?}", e);
+                                    break 'render;
+                                }
+                            };
+                            drop(g);
+
+                            // Handle global uniform update on resize (after acquire so extent is up to date)
                             let global_range = if self.swapchain_recreated {
                                 global.aspect = self.extent.into();
                                 let sub_num = self.vulkan_renderer.wait_prev_submission(0);
@@ -373,19 +390,10 @@ impl RenderTask {
                                 None
                             };
 
-                            // Acquire next swapchain image
-                            let g = range_event_start!("Acquire next image");
-                            let (image_index, acquire_wait_ref, is_suboptimal) = match self.vulkan_renderer.acquire_next_image() {
-                                Ok(result) => result,
-                                Err(e) => {
-                                    error!("Failed to acquire next image: {:?}", e);
-                                    break 'render;
-                                }
-                            };
-                            drop(g);
-
                             if is_suboptimal {
-                                warn!("Swapchain is suboptimal after acquire");
+                                self.vulkan_renderer.recreate_resize((self.extent[0] as u32, self.extent[1] as u32));
+                                self.swapchain_recreated = true;
+                                break 'render;
                             }
 
                             let clear_values = smallvec![
@@ -419,6 +427,7 @@ impl RenderTask {
                                     }
                                 })
                             });
+                            self.swapchain_recreated = false;
                             pre_last_frame_submission_num = last_frame_submission_num;
                             last_frame_submission_num = new_sub_num;
 
@@ -433,10 +442,6 @@ impl RenderTask {
                         }
 
 
-                        if self.swapchain_recreated {
-                            self.swapchain_recreated = false;
-                        }
-                        
                         allocator.destroy_old_resources();
                         frame_counter.increment_frame();
 
