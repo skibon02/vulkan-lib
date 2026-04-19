@@ -29,6 +29,7 @@ impl SwapchainWrapper {
         self.surface.clone()
     }
 
+    /// Extent is used from surface capabilities. If does not exist, use `extent`
     pub fn new(device: VkDeviceRef, physical_device: PhysicalDevice,
                extent: Extent2D, surface_ref: VkSurfaceRef, old_swapchain: Option<SwapchainKHR>) -> anyhow::Result<SwapchainWrapper> {
         let g = range_event_start!("[Vulkan] Init swapchain");
@@ -61,9 +62,8 @@ impl SwapchainWrapper {
 
         // 1 additional image, so we can acquire 2 images at a time.
         let image_count = surface_capabilities.min_image_count + 1;
-        info!("\n\tCreating swapchain...\n\tPresent mode: {:?}\n\tSwapchain image count: {:?}, Color space: {:?}, Image format: {:?}", present_mode, image_count, surface_format.color_space, surface_format.format);
 
-        let swapchain_extent = if surface_capabilities.current_extent.width != u32::MAX {
+        let mut swapchain_extent = if surface_capabilities.current_extent.width != u32::MAX {
             surface_capabilities.current_extent
         } else {
             let mut actual_extent = extent;
@@ -71,6 +71,15 @@ impl SwapchainWrapper {
             actual_extent.height = actual_extent.height.max(surface_capabilities.min_image_extent.height).min(surface_capabilities.max_image_extent.height);
             actual_extent
         };
+
+        if swapchain_extent.width == 0 {
+            swapchain_extent.width = 1;
+        }
+        if swapchain_extent.height == 0 {
+            swapchain_extent.height = 1;
+        }
+
+        info!("\tCreating swapchain of size {}x{}...\n\tPresent mode: {:?}, Swapchain image count: {:?}, Color space: {:?}, Image format: {:?}", swapchain_extent.width, swapchain_extent.height, present_mode, image_count, surface_format.color_space, surface_format.format);
 
 
         let swapchain_loader = swapchain::Device::new(device.instance(), &device);

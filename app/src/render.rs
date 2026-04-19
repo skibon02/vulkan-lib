@@ -365,6 +365,7 @@ impl RenderTask {
                             let g = range_event_start!("Acquire next image");
                             let acquire_result = self.vulkan_renderer.acquire_next_image()
                                 .or_else(|_| {
+                                    info!("[ACQUIRE FAILED] recreate swapchain...");
                                     self.vulkan_renderer.recreate_resize((self.extent[0] as u32, self.extent[1] as u32));
                                     self.swapchain_recreated = true;
                                     self.vulkan_renderer.acquire_next_image()
@@ -391,6 +392,7 @@ impl RenderTask {
                             };
 
                             if is_suboptimal {
+                                info!("[SUBOPTIMAL] recreate swapchain...");
                                 self.vulkan_renderer.recreate_resize((self.extent[0] as u32, self.extent[1] as u32));
                                 self.swapchain_recreated = true;
                                 break 'render;
@@ -466,6 +468,7 @@ impl RenderTask {
                 // Mailbox resize: consume latest pending resize (if any)
                 let packed = self.pending_resize.swap(0, Ordering::Relaxed);
                 if packed != 0 {
+                    info!("[WINDOW RESIZE] Recreate swapchain...");
                     let width = (packed >> 32) as u32;
                     let height = (packed & 0xFFFF_FFFF) as u32;
                     let g = range_event_start!("Recreate Resize");
