@@ -34,7 +34,7 @@ use vulkan_lib::resources::staging_buffer::StagingBufferRange;
 use vulkan_lib::resources::VulkanAllocator;
 use vulkan_lib::shaders::layout::types::{vec2, vec3, vec4, ivec2};
 use crate::resources::get_resource;
-use crate::util::{DoubleBuffered, FrameCounter};
+use crate::util::{AtomicResizeRequest, DoubleBuffered, FrameCounter};
 
 pub enum RenderMessage {
     Redraw { bg_color: [f32; 3] },
@@ -49,7 +49,7 @@ pub struct RenderTask {
     rx: mpsc::Receiver<RenderMessage>,
     vulkan_renderer: GraphicsQueue,
     render_finished: Arc<AtomicBool>,
-    pending_resize: Arc<AtomicU64>,
+    pending_resize: AtomicResizeRequest,
     swapchain_recreated: bool,
     last_print: Instant,
     extent: [i32; 2],
@@ -163,7 +163,7 @@ impl Default for SolidAttributes {
     }
 }
 impl RenderTask {
-    pub fn new(vulkan_renderer: GraphicsQueue, initial_size: PhysicalSize<u32>, pending_resize: Arc<AtomicU64>) -> (Self, mpsc::Sender<RenderMessage>, Arc<AtomicBool>) {
+    pub fn new(vulkan_renderer: GraphicsQueue, initial_size: PhysicalSize<u32>, pending_resize: AtomicResizeRequest) -> (Self, mpsc::Sender<RenderMessage>, Arc<AtomicBool>) {
         let (tx, rx) = mpsc::channel::<RenderMessage>();
         let render_finished = Arc::new(AtomicBool::new(true));
 
@@ -321,18 +321,6 @@ impl RenderTask {
                     break;
                 };
 
-                // Mailbox resize: consume latest pending resize (if any)
-                let packed = self.pending_resize.swap(0, Ordering::Relaxed);
-                if packed != 0 {
-                    info!("[WINDOW RESIZE] Recreate swapchain...");
-                    let width = (packed >> 32) as u32;
-                    let height = (packed & 0xFFFF_FFFF) as u32;
-                    let g = range_event_start!("Recreate Resize");
-                    self.vulkan_renderer.recreate_resize((width, height));
-                    self.swapchain_recreated = true;
-                    self.extent = [width as i32, height as i32];
-                }
-
                 match msg {
                     RenderMessage::Redraw { bg_color} => {
                         let g = range_event_start!("Render");
@@ -375,17 +363,14 @@ impl RenderTask {
 
                             // Acquire next swapchain image (retry once after recreating swapchain)
                             let g = range_event_start!("Acquire next image");
-                            let acquire_result = self.vulkan_renderer.acquire_next_image()
-                                .or_else(|_| {
-                                    info!("[ACQUIRE FAILED] recreate swapchain...");
-                                    self.vulkan_renderer.recreate_resize((self.extent[0] as u32, self.extent[1] as u32));
-                                    self.swapchain_recreated = true;
-                                    self.vulkan_renderer.acquire_next_image()
-                                });
-                            let (image_index, acquire_wait_ref, is_suboptimal) = match acquire_result {
+
+                            let (image_index, acquire_wait_ref, is_suboptimal) = match self.vulkan_renderer.acquire_next_image() {
                                 Ok(result) => result,
                                 Err(e) => {
                                     error!("Failed to acquire next image after recreate: {:?}", e);
+                                    // set swapchain recreate flag
+                                    self.pending_resize.store(self.extent[0] as u32, self.extent[1] as u32);
+
                                     break 'render;
                                 }
                             };
@@ -404,10 +389,8 @@ impl RenderTask {
                             };
 
                             if is_suboptimal {
-                                info!("[SUBOPTIMAL] recreate swapchain...");
-                                self.vulkan_renderer.recreate_resize((self.extent[0] as u32, self.extent[1] as u32));
-                                self.swapchain_recreated = true;
-                                break 'render;
+                                warn!("Swapchain acquire: swapchain is suboptimal!");
+                                self.pending_resize.store(self.extent[0] as u32, self.extent[1] as u32);
                             }
 
                             let clear_values = smallvec![
@@ -446,8 +429,15 @@ impl RenderTask {
                             last_frame_submission_num = new_sub_num;
 
                             let g = range_event_start!("Present");
-                            if let Err(e) = self.vulkan_renderer.queue_present(image_index, present_wait_ref) {
-                                error!("Present error: {:?}", e);
+                            match self.vulkan_renderer.queue_present(image_index, present_wait_ref) {
+                                Ok(r) => {
+                                    if r {
+                                        warn!("Swapchain present: Swapchain is suboptimal!");
+                                    }
+                                }
+                                Err(e) => {
+                                    error!("Present error: {:?}", e);
+                                }
                             }
                             drop(g);
 
@@ -475,6 +465,15 @@ impl RenderTask {
                         info!("Render thread exiting");
                         break;
                     }
+                }
+
+                // Mailbox resize: consume latest pending resize (if any)
+                if let Some((width,height)) = self.pending_resize.try_take() {
+                    info!("[WINDOW RESIZE] Recreate swapchain...");
+                    let g = range_event_start!("Recreate Resize");
+                    self.vulkan_renderer.recreate_resize((width, height));
+                    self.swapchain_recreated = true;
+                    self.extent = [width as i32, height as i32];
                 }
 
                 if self.last_print.elapsed().as_secs() >= 3 {

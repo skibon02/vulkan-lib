@@ -1,5 +1,6 @@
 use std::rc::Rc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use image::DynamicImage;
 use sparkles::range_event_start;
 use thiserror::Error;
@@ -176,4 +177,29 @@ pub fn read_image_from_bytes(image_bytes: Vec<u8>) -> ReadImageResult<(Vec<u8>, 
         width: image_width,
         height: image_height,
     }))
+}
+
+#[derive(Clone)]
+pub struct AtomicResizeRequest(Arc<AtomicU64>);
+impl AtomicResizeRequest {
+    pub fn new() -> Self {
+        Self {
+            0: Arc::new(AtomicU64::new(0)),
+        }
+    }
+    pub fn store(&self, width: u32, height: u32) {
+        let packed = ((width as u64) << 32) | (height as u64);
+        self.0.store(packed, Ordering::Relaxed);
+    }
+    pub fn try_take(&self) -> Option<(u32, u32)> {
+        let packed = self.0.swap(0, Ordering::Relaxed);
+        if packed != 0 {
+            let width = (packed >> 32) as u32;
+            let height = (packed & 0xFFFF_FFFF) as u32;
+            Some((width, height))
+        }
+        else {
+            None
+        }
+    }
 }

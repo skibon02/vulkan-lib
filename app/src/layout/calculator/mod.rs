@@ -705,16 +705,16 @@ impl LayoutCalculator {
         }
         self.dfs(0, Phase::PosFixPass);
 
-        // diagnostics print
-        for i in 0..self.elements.len() {
-            println!("{}: {:?} ({}x{}) [x={}, y={}]", i,
-                 self.elements[i].element.kind(), self.elements_sizes[i].min_width(), self.elements_sizes[i].min_height(),
-                 self.elements_sizes[i].pos_fix.pos_x, self.elements_sizes[i].pos_fix.pos_y);
-            println!("  > Parametric stage: {:?}", self.elements_sizes[i].parametric_stage);
-            let parametric = self.elements_sizes[i].cur_parametric();
-            println!("  > Parametric min: {}x{}", parametric.width.min, parametric.height.min);
-            println!("  > Parametric kind: {:?}", parametric);
-        }
+        // // diagnostics print
+        // for i in 0..self.elements.len() {
+        //     println!("{}: {:?} ({}x{}) [x={}, y={}]", i,
+        //          self.elements[i].element.kind(), self.elements_sizes[i].min_width(), self.elements_sizes[i].min_height(),
+        //          self.elements_sizes[i].pos_fix.pos_x, self.elements_sizes[i].pos_fix.pos_y);
+        //     println!("  > Parametric stage: {:?}", self.elements_sizes[i].parametric_stage);
+        //     let parametric = self.elements_sizes[i].cur_parametric();
+        //     println!("  > Parametric min: {}x{}", parametric.width.min, parametric.height.min);
+        //     println!("  > Parametric kind: {:?}", parametric);
+        // }
     }
 
 

@@ -12,7 +12,7 @@ use sparkles::{instant_event, range_event_start};
 use winit::dpi::PhysicalSize;
 use winit::event::{ButtonSource, ElementState, MouseButton, PointerSource, WindowEvent};
 use winit::event_loop::ActiveEventLoop;
-use winit::keyboard;
+use winit::{dpi, keyboard};
 use winit::keyboard::NamedKey;
 use winit::monitor::Fullscreen;
 use winit::window::Window;
@@ -26,7 +26,7 @@ use crate::layout::calculator::LayoutCalculator;
 use crate::render;
 use crate::render::{RenderMessage, SolidAttributes};
 use crate::resources::get_resource;
-use crate::util::{DoubleBuffered, FrameCounter, TrippleAutoStaging};
+use crate::util::{AtomicResizeRequest, DoubleBuffered, FrameCounter, TrippleAutoStaging};
 
 pub struct App {
     app_finished: bool,
@@ -54,7 +54,7 @@ pub struct App {
     render_tx: mpsc::Sender<RenderMessage>,
     render_thread: Option<JoinHandle<()>>,
     render_ready: Arc<AtomicBool>,
-    pending_resize: Arc<AtomicU64>,
+    pending_resize: AtomicResizeRequest,
 
     // some stats
     frame_cnt: usize,
@@ -76,7 +76,7 @@ impl App {
         let vulkan_renderer = VulkanInstance::new_for_handle(raw_window_handle, raw_display_handle, (inner_size.width, inner_size.height), api_version).unwrap();
         let shared = vulkan_renderer.shared();
         let mut allocator = vulkan_renderer.new_allocator();
-        let pending_resize = Arc::new(AtomicU64::new(0));
+        let pending_resize = AtomicResizeRequest::new();
         let (render_task, render_tx, render_ready) = render::RenderTask::new(vulkan_renderer, inner_size, pending_resize.clone());
         let render_jh = render_task.spawn();
         
@@ -181,45 +181,45 @@ impl App {
                     if !self.render_ready.swap(false, Ordering::Acquire) {
                         break 'handling;
                     }
-                    //
-                    // if self.instances_updated {
-                    //     self.instances_updated = false;
-                    //     let g = range_event_start!("instance buffer prepare");
-                    //
-                    //     // prepare new instances
-                    //     let bytes_len = self.instances.len() * size_of::<SolidAttributes>();
-                    //     let mut range = self.staging.allocate(&mut self.allocator, bytes_len);
-                    //     range.update(|r| {
-                    //         let bytes = unsafe { from_raw_parts(self.instances.as_ptr() as *const u8, bytes_len) };
-                    //         r[..bytes_len].copy_from_slice(bytes);
-                    //     });
-                    //     self.render_tx.send(RenderMessage::UpdateInstances {
-                    //         staging: range,
-                    //         buf: self.instance_buffers.current().clone()
-                    //     }).unwrap();
-                    // }
+
+                    if self.instances_updated {
+                        self.instances_updated = false;
+                        let g = range_event_start!("instance buffer prepare");
+
+                        // prepare new instances
+                        let bytes_len = self.instances.len() * size_of::<SolidAttributes>();
+                        let mut range = self.staging.allocate(&mut self.allocator, bytes_len);
+                        range.update(|r| {
+                            let bytes = unsafe { from_raw_parts(self.instances.as_ptr() as *const u8, bytes_len) };
+                            r[..bytes_len].copy_from_slice(bytes);
+                        });
+                        self.render_tx.send(RenderMessage::UpdateInstances {
+                            staging: range,
+                            buf: self.instance_buffers.current().clone()
+                        }).unwrap();
+                    }
 
                     // Run layout and produce render rects
                     let size = self.window.surface_size();
                     if size != self.prev_win_size {
-                        // self.prev_win_size = size;
-                        // self.layout_calculator.calculate_layout(size.width, size.height);
+                        self.prev_win_size = size;
+                        self.layout_calculator.calculate_layout(size.width, size.height);
                         
-                        // let (w, h) = self.layout_calculator.get_min_root_size();
-                        // self.window.set_min_inner_size(Some(PhysicalSize::new(w, h)));
-                        //
-                        // let render_rects = self.layout_calculator.get_render_rects();
-                        // self.instances.clear();
-                        // for rect in &render_rects {
-                        //     self.instances.push(SolidAttributes {
-                        //         pos: [rect.x, rect.y].into(),
-                        //         size: [rect.w, rect.h].into(),
-                        //         d: rect.depth.into(),
-                        //         color: [rect.r, rect.g, rect.b, rect.a].into(),
-                        //     });
-                        // }
-                        //
-                        // self.instances_updated = true;
+                        let (w, h) = self.layout_calculator.get_min_root_size();
+                        self.window.set_min_surface_size(Some(PhysicalSize::new(w, h).into()));
+
+                        let render_rects = self.layout_calculator.get_render_rects();
+                        self.instances.clear();
+                        for rect in &render_rects {
+                            self.instances.push(SolidAttributes {
+                                pos: [rect.x, rect.y].into(),
+                                size: [rect.w, rect.h].into(),
+                                d: rect.depth.into(),
+                                color: [rect.r, rect.g, rect.b, rect.a].into(),
+                            });
+                        }
+
+                        self.instances_updated = true;
                     }
 
                     self.frame_counter.increment_frame();
@@ -256,8 +256,7 @@ impl App {
                         info!("Continue rendering...");
                     }
 
-                    let packed = ((size.width as u64) << 32) | (size.height as u64);
-                    self.pending_resize.store(packed, Ordering::Relaxed);
+                    self.pending_resize.store(size.width, size.height);
                     self.is_collapsed = false;
                 }
             }
