@@ -261,6 +261,15 @@ impl App {
                     self.is_collapsed = false;
                 }
             }
+            WindowEvent::Occluded(occluded) => {
+                if *occluded {
+                    info!("Occluded! suspending rendering...");
+                }
+                else {
+                    info!("No longer occluded! continuing rendering...");
+                }
+                self.is_collapsed = *occluded;
+            }
             WindowEvent::PointerButton {
                 state: ElementState::Pressed,
                 button: ButtonSource::Mouse(MouseButton::Left),

@@ -321,6 +321,18 @@ impl RenderTask {
                     break;
                 };
 
+                // Mailbox resize: consume latest pending resize (if any)
+                let packed = self.pending_resize.swap(0, Ordering::Relaxed);
+                if packed != 0 {
+                    info!("[WINDOW RESIZE] Recreate swapchain...");
+                    let width = (packed >> 32) as u32;
+                    let height = (packed & 0xFFFF_FFFF) as u32;
+                    let g = range_event_start!("Recreate Resize");
+                    self.vulkan_renderer.recreate_resize((width, height));
+                    self.swapchain_recreated = true;
+                    self.extent = [width as i32, height as i32];
+                }
+
                 match msg {
                     RenderMessage::Redraw { bg_color} => {
                         let g = range_event_start!("Render");
@@ -463,18 +475,6 @@ impl RenderTask {
                         info!("Render thread exiting");
                         break;
                     }
-                }
-
-                // Mailbox resize: consume latest pending resize (if any)
-                let packed = self.pending_resize.swap(0, Ordering::Relaxed);
-                if packed != 0 {
-                    info!("[WINDOW RESIZE] Recreate swapchain...");
-                    let width = (packed >> 32) as u32;
-                    let height = (packed & 0xFFFF_FFFF) as u32;
-                    let g = range_event_start!("Recreate Resize");
-                    self.vulkan_renderer.recreate_resize((width, height));
-                    self.swapchain_recreated = true;
-                    self.extent = [width as i32, height as i32];
                 }
 
                 if self.last_print.elapsed().as_secs() >= 3 {
