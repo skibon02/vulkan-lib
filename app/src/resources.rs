@@ -1,10 +1,10 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use log::info;
 
 #[cfg(not(target_os = "android"))]
 pub fn get_resource(path: PathBuf) -> anyhow::Result<Vec<u8>> {
     use std::fs;
-    Ok(fs::read(path)?)
+    Ok(fs::read(Path::join(Path::new(&"assets"), path))?)
 }
 
 #[cfg(target_os = "android")]
