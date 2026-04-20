@@ -69,8 +69,8 @@ impl App {
         let inner_size = window.surface_size();
         info!("Window created! ({}x{})", inner_size.width, inner_size.height);
 
-        // try load resource
-        let font_data = get_resource(Path::join("fonts".as_ref(), "Ubuntu-Regular.ttf")).unwrap();
+        // // try load resource
+        // let font_data = get_resource(Path::join("fonts".as_ref(), "Ubuntu-Regular.ttf")).unwrap();
 
         let api_version = vk::API_VERSION_1_1;
         let vulkan_renderer = VulkanInstance::new_for_handle(raw_window_handle, raw_display_handle, (inner_size.width, inner_size.height), api_version).unwrap();

@@ -13,7 +13,7 @@ impl Fonts {
         self.entry(name.clone())
             .or_insert_with(|| {
 
-                static BASIC_FONT: &'static [u8] = include_bytes!("../../../../fonts/Basic-Regular.ttf");
+                static BASIC_FONT: &'static [u8] = include_bytes!("../../../../assets/fonts/Basic-Regular.ttf");
                 let default_font = FontInfo {
                     default_line_height: 16.0,
                     font_raw: BASIC_FONT.to_vec(),

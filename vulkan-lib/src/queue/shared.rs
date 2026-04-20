@@ -7,6 +7,9 @@ use parking_lot::Mutex;
 use sparkles::range_event_start;
 use crate::wrappers::device::VkDeviceRef;
 
+
+/// Owning this type guarantees that this submission was host-waited (via fence check/wait)
+/// This value acts like a token
 #[derive(Copy, Clone)]
 pub struct HostWaitedNum(usize);
 

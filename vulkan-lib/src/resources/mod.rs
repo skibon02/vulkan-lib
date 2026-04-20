@@ -28,6 +28,8 @@ pub mod sampler;
 pub mod descriptor_pool;
 pub mod staging_buffer;
 
+/// Object responsible for creating new vulkan resources (images, buffers, pipelines...).
+/// Needs to be manually periodically polled to destroy unused resources (garbage collection style).
 pub struct VulkanAllocator {
     memory_manager: MemoryManager,
     descriptor_set_layouts: HashMap<Vec<DescriptorSetLayoutBindingDesc>, DescriptorSetLayout>,
