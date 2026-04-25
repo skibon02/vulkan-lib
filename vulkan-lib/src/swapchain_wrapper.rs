@@ -6,6 +6,8 @@ use ash::vk::{Extent2D, Format, Image, ImageAspectFlags, ImageTiling, ImageUsage
 use log::info;
 use smallvec::SmallVec;
 use sparkles::range_event_start;
+#[cfg(feature = "present-timing")]
+use crate::extensions::present_timing::SWAPCHAIN_CREATE_PRESENT_TIMING_BIT_EXT;
 use crate::resources::image::{destroy_image_resource, ImageResource};
 use crate::wrappers::device::VkDeviceRef;
 use crate::wrappers::image::{image_2d_info, imageview_info_for_image, swapchain_info};
@@ -13,14 +15,16 @@ use crate::wrappers::surface::VkSurfaceRef;
 
 pub struct SwapchainWrapper {
     device: VkDeviceRef,
-    
+
     swapchain: SwapchainKHR,
     pub swapchain_loader: swapchain::Device,
     swapchain_images: SmallVec<[Arc<ImageResource>; 4]>,
     swapchain_format: Format,
     pub swapchain_extent: Extent2D,
 
-    surface: VkSurfaceRef
+    surface: VkSurfaceRef,
+    latency_tracking: bool,
+    present_timing: bool,
 }
 pub type SwapchainImages = SmallVec<[Arc<ImageResource>; 4]>;
 
@@ -31,7 +35,8 @@ impl SwapchainWrapper {
 
     /// Extent is used from surface capabilities. If does not exist, use `extent`
     pub fn new(device: VkDeviceRef, physical_device: PhysicalDevice,
-               extent: Extent2D, surface_ref: VkSurfaceRef, old_swapchain: Option<SwapchainKHR>) -> anyhow::Result<SwapchainWrapper> {
+               extent: Extent2D, surface_ref: VkSurfaceRef, old_swapchain: Option<SwapchainKHR>,
+               latency_tracking: bool, present_timing: bool) -> anyhow::Result<SwapchainWrapper> {
         let g = range_event_start!("[Vulkan] Init swapchain");
 
         let surface_loader = surface_ref.loader();
@@ -48,17 +53,17 @@ impl SwapchainWrapper {
         }).unwrap_or_else(|| {
             surface_formats.first().unwrap()
         });
-        //prefer MAILBOX then IMMEDIATE or default FIFO
+
+        // IMMEDIATE preferred over MAILBOX because of better presentation latency with present_timing (not confirmed)
         let present_mode = surface_present_modes.iter().find(|m| {
-            **m == vk::PresentModeKHR::MAILBOX
+            **m == vk::PresentModeKHR::IMMEDIATE
         }).unwrap_or_else(|| {
             surface_present_modes.iter().find(|m| {
-                **m == vk::PresentModeKHR::IMMEDIATE
+                **m == vk::PresentModeKHR::MAILBOX
             }).unwrap_or_else(|| {
                 surface_present_modes.first().unwrap()
             })
         });
-        // let present_mode = &PresentModeKHR::FIFO;
 
         // 1 additional image, so we can acquire 2 images at a time.
         let image_count = surface_capabilities.min_image_count + 1;
@@ -85,7 +90,11 @@ impl SwapchainWrapper {
         let swapchain_loader = swapchain::Device::new(device.instance(), &device);
         let swapchain_image_info = image_2d_info(surface_format.format, ImageUsageFlags::COLOR_ATTACHMENT | ImageUsageFlags::TRANSFER_DST,
                                              swapchain_extent, SampleCountFlags::TYPE_1, ImageTiling::OPTIMAL);
-        let swapchain_create_info = swapchain_info(swapchain_image_info, surface_format.color_space)
+
+        let latency_create_info = vk::SwapchainLatencyCreateInfoNV::default()
+            .latency_mode_enable(true);
+
+        let mut swapchain_create_info = swapchain_info(swapchain_image_info, surface_format.color_space)
             .surface(*surface)
             .min_image_count(image_count)
             .pre_transform(surface_capabilities.current_transform)
@@ -93,13 +102,23 @@ impl SwapchainWrapper {
             .present_mode(*present_mode)
             .clipped(true);
 
-        // add old swapchain
-        let swapchain_create_info = if let Some(old_swapchain) = old_swapchain {
-            swapchain_create_info.old_swapchain(old_swapchain)
+        #[cfg(feature = "present-timing")]
+        if present_timing {
+            // VK_SWAPCHAIN_CREATE_PRESENT_TIMING_BIT_EXT (bit 9). ash 0.38 doesn't
+            // define it, so we OR the raw value.
+            let raw = swapchain_create_info.flags.as_raw() | SWAPCHAIN_CREATE_PRESENT_TIMING_BIT_EXT;
+            swapchain_create_info = swapchain_create_info.flags(vk::SwapchainCreateFlagsKHR::from_raw(raw));
         }
-        else {
-            swapchain_create_info
-        };
+        let _ = present_timing; // silence unused warning when feature disabled
+
+        if let Some(old_swapchain) = old_swapchain {
+            swapchain_create_info = swapchain_create_info.old_swapchain(old_swapchain);
+        }
+
+        if latency_tracking {
+            // Chain VkSwapchainLatencyCreateInfoNV to enable per-frame timing data collection.
+            swapchain_create_info.p_next = (&latency_create_info as *const vk::SwapchainLatencyCreateInfoNV).cast();
+        }
 
         let swapchain = unsafe { swapchain_loader.create_swapchain(&swapchain_create_info, None)? };
         let swapchain_images = unsafe { swapchain_loader.get_swapchain_images(swapchain)? };
@@ -118,8 +137,14 @@ impl SwapchainWrapper {
             swapchain_extent,
 
             device,
-            surface: surface_ref
+            surface: surface_ref,
+            latency_tracking,
+            present_timing,
         })
+    }
+
+    pub fn image_count(&self) -> u32 {
+        self.swapchain_images.len() as u32
     }
 
     pub fn get_swapchain(&self) -> SwapchainKHR {
@@ -143,8 +168,10 @@ impl SwapchainWrapper {
                            extent: Extent2D, surface: VkSurfaceRef) -> anyhow::Result<SwapchainImages> {
 
         let swapchain = self.swapchain;
+        let latency_tracking = self.latency_tracking;
+        let present_timing = self.present_timing;
         let old_images = mem::take(&mut self.swapchain_images);
-        *self = Self::new(self.device.clone(), physical_device, extent, surface, Some(swapchain))?;
+        *self = Self::new(self.device.clone(), physical_device, extent, surface, Some(swapchain), latency_tracking, present_timing)?;
         Ok(old_images)
     }
 }

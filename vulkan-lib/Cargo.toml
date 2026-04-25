@@ -26,3 +26,5 @@ android = ["dep:ndk-sys", "dep:ndk", "dep:jni"]
 validation = []
 recording-logs = []
 sync-swapchain-recreate = []
+
+present-timing = []

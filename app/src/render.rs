@@ -22,7 +22,7 @@ use swash::FontRef;
 use swash::scale::{Render, ScaleContext, Source, StrikeWith};
 use winit::dpi::PhysicalSize;
 use render_macro::define_layout;
-use vulkan_lib::{descriptor_set, use_shader};
+use vulkan_lib::{descriptor_set, use_shader, ReflexMode};
 use vulkan_lib::vk::{BufferCreateFlags, ImageCreateFlags};
 use vulkan_lib::queue::GraphicsQueue;
 use vulkan_lib::queue::recording::BufferRange;
@@ -166,6 +166,7 @@ impl RenderTask {
     pub fn new(vulkan_renderer: GraphicsQueue, initial_size: PhysicalSize<u32>, pending_resize: AtomicResizeRequest) -> (Self, mpsc::Sender<RenderMessage>, Arc<AtomicBool>) {
         let (tx, rx) = mpsc::channel::<RenderMessage>();
         let render_finished = Arc::new(AtomicBool::new(true));
+        vulkan_renderer.set_reflex_mode(ReflexMode::Boost);
 
         (Self {
             rx,

@@ -20,6 +20,8 @@ use sparkles::{range_event_start, static_name};
 use sparkles::external_events::ExternalEventsSource;
 use strum::IntoDiscriminant;
 use crate::extensions::calibrated_timestamps::CalibratedTimestamps;
+use crate::extensions::low_latency2::{LowLatency2, ReflexMode};
+use crate::extensions::present_timing::PresentTiming;
 use crate::resources::image::ImageResource;
 use crate::resources::render_pass::{AttachmentUsage, FrameBufferAttachment, RenderPassResource};
 use crate::resources::VulkanAllocator;
@@ -97,6 +99,8 @@ pub struct GraphicsQueue {
 
     // extensions
     calibrated_timestamps: Option<CalibratedTimestamps>,
+    low_latency2: Option<LowLatency2>,
+    present_timing: Option<PresentTiming>,
 
 
     memory_manager: MemoryManager,
@@ -112,10 +116,16 @@ impl GraphicsQueue {
         swapchain_wrapper: SwapchainWrapper,
         calibrated_timestamps: Option<CalibratedTimestamps>,
         timestamp_pool: Option<TimestampPool>,
+        low_latency2: Option<LowLatency2>,
+        mut present_timing: Option<PresentTiming>,
         memory_types: Vec<MemoryType>,
         memory_heaps: Vec<MemoryHeap>,
     ) -> Self {
         let surface = swapchain_wrapper.surface();
+
+        if let Some(pt) = present_timing.as_mut() {
+            pt.on_swapchain_created(swapchain_wrapper.get_swapchain(), swapchain_wrapper.image_count());
+        }
 
         let mut sparkles_gpu_channel = ExternalEventsSource::new("Vulkan GPU".to_string());
         if let Some(calibrated_timestamps) = &calibrated_timestamps {
@@ -144,6 +154,8 @@ impl GraphicsQueue {
             sparkles_gpu_channel,
             timestamp_pool,
             calibrated_timestamps,
+            low_latency2,
+            present_timing,
 
             memory_manager: MemoryManager::new(
                 device.clone(),
@@ -363,6 +375,23 @@ impl GraphicsQueue {
         let seq_num = self.instance.shared_state.last_submission_num();
         self.recycled_swapchain_images.entry(seq_num).or_default()
             .extend(old_swapchain_images);
+
+        // Reset present-timing internal state for the freshly created swapchain.
+        if let Some(pt) = self.present_timing.as_mut() {
+            pt.on_swapchain_created(
+                self.swapchain_wrapper.get_swapchain(),
+                self.swapchain_wrapper.image_count(),
+            );
+        }
+    }
+
+    /// Toggle NVIDIA Reflex / Reflex+Boost on the current swapchain.
+    /// No-op if VK_NV_low_latency2 isn't available on this device.
+    /// Defaults to `ReflexMode::Off`; safe to call any time after the queue exists.
+    pub fn set_reflex_mode(&self, mode: ReflexMode) {
+        if let Some(ll2) = &self.low_latency2 {
+            ll2.set_mode(self.swapchain_wrapper.get_swapchain(), mode);
+        }
     }
 
     pub fn wait_idle(&mut self) {
@@ -1008,18 +1037,37 @@ impl GraphicsQueue {
         #[cfg(feature = "recording-logs")]
         info!("Recording command QueuePresent (image_index = {})", image_index);
 
-        unsafe {
+        let swapchain = self.swapchain_wrapper.get_swapchain();
+        let wait_sems = [wait_semaphore];
+        let swapchains = [swapchain];
+        let image_indices = [image_index];
+        let mut present_info = vk::PresentInfoKHR::default()
+            .wait_semaphores(&wait_sems)
+            .swapchains(&swapchains)
+            .image_indices(&image_indices);
+
+        // On sample frames PresentTiming hands back a pointer into its own field
+        // storage; valid until we touch `self.present_timing` again. We don't
+        // before queue_present returns. On skip frames the chain is null, the
+        // present takes the fast path with no timing overhead.
+        let pt_chain = self
+            .present_timing
+            .as_mut()
+            .and_then(|pt| pt.build_present_chain())
+            .unwrap_or(std::ptr::null());
+        present_info.p_next = pt_chain.cast();
+
+        let result = unsafe {
             self.swapchain_wrapper
                 .swapchain_loader
-                .queue_present(
-                    self.queue,
-                    &vk::PresentInfoKHR::default()
-                        .wait_semaphores(&[wait_semaphore])
-                        .swapchains(&[self.swapchain_wrapper.get_swapchain()])
-                        .image_indices(&[image_index]),
-                )
-                .context("queue_present")
+                .queue_present(self.queue, &present_info)
+        }.context("queue_present");
+
+        if let Some(pt) = self.present_timing.as_mut() {
+            pt.drain_and_log(swapchain);
         }
+
+        result
     }
 }
 

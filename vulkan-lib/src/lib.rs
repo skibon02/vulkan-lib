@@ -12,6 +12,11 @@ use crate::wrappers::debug_report::VkDebugReport;
 use crate::wrappers::device::VkDeviceRef;
 use crate::wrappers::surface::{VkSurface, VkSurfaceRef};
 use crate::extensions::calibrated_timestamps::CalibratedTimestamps;
+use crate::extensions::low_latency2::LowLatency2;
+pub use crate::extensions::low_latency2::ReflexMode;
+use crate::extensions::present_timing::{
+    PhysicalDevicePresentTimingFeaturesEXT, PresentTiming,
+};
 use crate::wrappers::timestamp_pool::TimestampPool;
 
 use crate::queue::GraphicsQueue;
@@ -79,6 +84,8 @@ impl VulkanInstance {
             ash_window::enumerate_required_extensions(display_handle)?;
         let mut instance_extensions: Vec<*const c_char> = surface_required_extensions.to_vec();
         instance_extensions.push(ash::ext::debug_report::NAME.as_ptr());
+        // Instance-level dependency of VK_EXT_present_timing.
+        instance_extensions.push(ash::khr::get_surface_capabilities2::NAME.as_ptr());
 
         let mut debug_report_callback_info = VkDebugReport::get_messenger_create_info();
 
@@ -145,8 +152,19 @@ impl VulkanInstance {
                 panic!("No available queue family found");
             });
 
-        // desired device extensions to be enabled
-        let device_extensions = vec![ash::khr::swapchain::NAME.as_ptr(), ash::ext::calibrated_timestamps::NAME.as_ptr()];
+        let present_timing_name = CString::new("VK_EXT_present_timing")?;
+        let calibrated_timestamps_khr_name = CString::new("VK_KHR_calibrated_timestamps")?;
+        let timeline_sem_name = CString::new("VK_KHR_timeline_semaphore")?;
+        let mut device_extensions = vec![
+            ash::khr::swapchain::NAME.as_ptr(),
+            ash::ext::calibrated_timestamps::NAME.as_ptr(),
+            ash::nv::low_latency2::NAME.as_ptr(),
+            timeline_sem_name.as_ptr(),
+        ];
+        if cfg!(feature = "present-timing") {
+            device_extensions.push(calibrated_timestamps_khr_name.as_ptr());
+            device_extensions.push(present_timing_name.as_ptr());
+        }
 
         let queue_create_infos = [vk::DeviceQueueCreateInfo::default()
             .queue_family_index(queue_family_index)
@@ -154,6 +172,17 @@ impl VulkanInstance {
         let mut device_create_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queue_create_infos)
             .enabled_extension_names(&device_extensions);
+
+        let mut pt_features = PhysicalDevicePresentTimingFeaturesEXT::enabled();
+        if cfg!(feature = "present-timing") {
+            device_create_info = caps_checker.try_chain_device_feature(
+                &instance,
+                physical_device,
+                device_create_info,
+                &present_timing_name,
+                &mut pt_features,
+            )?;
+        }
 
         let device = caps_checker.create_device(
             instance.clone(),
@@ -183,7 +212,25 @@ impl VulkanInstance {
             warn!("Calibrated timestamps extension is supported");
             None
         };
-
+        let low_latency2 = if caps_checker.is_device_extension_enabled(ash::nv::low_latency2::NAME) {
+            Some(LowLatency2::new(instance.as_ref(), device.as_ref()))
+        } else {
+            warn!("VK_NV_low_latency2 not available on this device");
+            None
+        };
+        let present_timing = if caps_checker.is_device_extension_enabled(present_timing_name.as_c_str()) {
+            match PresentTiming::new(instance.as_ref(), device.as_ref()) {
+                Some(pt) => {
+                    Some(pt)
+                }
+                None => {
+                    warn!("VK_EXT_present_timing reported as supported but proc addrs failed to load");
+                    None
+                }
+            }
+        } else {
+            None
+        };
 
         let queue = unsafe { device.get_device_queue(queue_family_index, 0) };
 
@@ -208,6 +255,8 @@ impl VulkanInstance {
             extent,
             surface,
             None,
+            low_latency2.is_some(),
+            present_timing.is_some(),
         )?;
 
         let shared_state = SharedState::new(device.clone());
@@ -232,6 +281,8 @@ impl VulkanInstance {
             swapchain_wrapper,
             calibrated_timestamps,
             timestamp_pool,
+            low_latency2,
+            present_timing,
             memory_types,
             memory_heaps,
         ))

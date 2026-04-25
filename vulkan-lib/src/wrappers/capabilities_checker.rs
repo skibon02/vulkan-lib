@@ -15,6 +15,12 @@ pub struct CapabilitiesChecker {
     activated_instance_extensions: BTreeSet<String>,
     activated_device_extensions: BTreeSet<String>,
 
+    /// Lazily filled by [`Self::ensure_device_probed`]; the set of all device extensions
+    /// reported as supported by the chosen physical device. Used by
+    /// [`Self::try_chain_device_feature`] to gate p_next chain insertion before
+    /// `create_device` is called.
+    probed_device_extensions: Option<BTreeSet<String>>,
+
     portability_enabled: bool,
 }
 
@@ -24,6 +30,7 @@ impl CapabilitiesChecker {
             activated_layers: BTreeSet::new(),
             activated_instance_extensions: BTreeSet::new(),
             activated_device_extensions: BTreeSet::new(),
+            probed_device_extensions: None,
 
             portability_enabled: false,
         }
@@ -171,6 +178,43 @@ impl CapabilitiesChecker {
 
     pub fn is_device_extension_enabled(&self, extension_name: &CStr) -> bool {
         self.activated_device_extensions.contains(extension_name.to_str().unwrap())
+    }
+
+    fn ensure_device_probed(&mut self, instance: &ash::Instance, physical_device: vk::PhysicalDevice) -> anyhow::Result<&BTreeSet<String>> {
+        if self.probed_device_extensions.is_none() {
+            let supported = unsafe { instance.enumerate_device_extension_properties(physical_device)? };
+            let names: BTreeSet<String> = supported.iter()
+                .filter_map(|e| unsafe { CStr::from_ptr(e.extension_name.as_ptr()) }
+                    .to_str().ok().map(String::from))
+                .collect();
+            self.probed_device_extensions = Some(names);
+        }
+        Ok(self.probed_device_extensions.as_ref().unwrap())
+    }
+
+    /// Returns whether `extension` is supported by `physical_device`. Lazily probes
+    /// (and caches) the supported-extension list on first call.
+    pub fn is_device_extension_supported(&mut self, instance: &ash::Instance, physical_device: vk::PhysicalDevice, extension: &CStr) -> anyhow::Result<bool> {
+        let probed = self.ensure_device_probed(instance, physical_device)?;
+        Ok(extension.to_str().map_or(false, |s| probed.contains(s)))
+    }
+
+    /// If `gate_extension` is supported on `physical_device`, prepends `feature` into
+    /// `create_info.p_next`. Otherwise returns `create_info` unchanged. The caller
+    /// must keep `feature` alive at least until `create_device` returns.
+    pub fn try_chain_device_feature<'a, T: vk::ExtendsDeviceCreateInfo + ?Sized>(
+        &mut self,
+        instance: &ash::Instance,
+        physical_device: vk::PhysicalDevice,
+        create_info: vk::DeviceCreateInfo<'a>,
+        gate_extension: &CStr,
+        feature: &'a mut T,
+    ) -> anyhow::Result<vk::DeviceCreateInfo<'a>> {
+        if self.is_device_extension_supported(instance, physical_device, gate_extension)? {
+            Ok(create_info.push_next(feature))
+        } else {
+            Ok(create_info)
+        }
     }
 }
 
