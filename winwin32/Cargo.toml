@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+drop_guard = "0.3.0"
 log = "0.4.29"
 raw-window-handle = "0.6.2"
 sparkles = { git="https://github.com/skibon02/sparkles.git", branch = "main", default-features = false }
@@ -40,3 +41,4 @@ windows-sys = { version = "0.61.2", features = [
 
 [dev-dependencies]
 simple_logger = "5.2.0"
+sparkles = { git="https://github.com/skibon02/sparkles.git", branch = "main" }
