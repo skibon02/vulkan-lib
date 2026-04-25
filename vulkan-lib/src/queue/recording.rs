@@ -161,9 +161,17 @@ impl RecordContext {
         self.bound_vertex_buffer = Some(buf);
     }
 
+    #[track_caller]
     pub fn copy_buffer(&mut self, src: impl Into<AnyBufferRange>, dst: BufferRange) {
         let src = src.into();
         let region = prepare_buffer_copy(&src, &dst);
+        if region.size == 0 {
+            warn!(
+                "copy_buffer at {} skipped: zero-size region (src.size={}, dst.len={})",
+                std::panic::Location::caller(), src.size(), dst.len()
+            );
+            return;
+        }
         let regions = smallvec![region];
         self.commands.push(DeviceCommand::CopyBuffer {
             src,

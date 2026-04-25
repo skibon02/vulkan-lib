@@ -184,19 +184,19 @@ impl App {
 
                     if self.instances_updated {
                         self.instances_updated = false;
-                        let g = range_event_start!("instance buffer prepare");
-
-                        // prepare new instances
                         let bytes_len = self.instances.len() * size_of::<SolidAttributes>();
-                        let mut range = self.staging.allocate(&mut self.allocator, bytes_len);
-                        range.update(|r| {
-                            let bytes = unsafe { from_raw_parts(self.instances.as_ptr() as *const u8, bytes_len) };
-                            r[..bytes_len].copy_from_slice(bytes);
-                        });
-                        self.render_tx.send(RenderMessage::UpdateInstances {
-                            staging: range,
-                            buf: self.instance_buffers.current().clone()
-                        }).unwrap();
+                        if bytes_len > 0 {
+                            let g = range_event_start!("instance buffer prepare");
+                            let mut range = self.staging.allocate(&mut self.allocator, bytes_len);
+                            range.update(|r| {
+                                let bytes = unsafe { from_raw_parts(self.instances.as_ptr() as *const u8, bytes_len) };
+                                r[..bytes_len].copy_from_slice(bytes);
+                            });
+                            self.render_tx.send(RenderMessage::UpdateInstances {
+                                staging: range,
+                                buf: self.instance_buffers.current().clone()
+                            }).unwrap();
+                        }
                     }
 
                     // Run layout and produce render rects

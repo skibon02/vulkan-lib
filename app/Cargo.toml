@@ -51,8 +51,9 @@ path = "debug.keystore"
 keystore_password = "android"
 
 [features]
-default = []
+default = ["validation"]
 validation = ["vulkan-lib/validation"]
+validation-verbose = ["vulkan-lib/validation-verbose"]
 android = ["vulkan-lib/android", "dep:ndk-sys", "dep:ndk", "dep:android_logger"]
 sync-swapchain-recreate = ["vulkan-lib/sync-swapchain-recreate"]
 present-timing = ["vulkan-lib/present-timing"]

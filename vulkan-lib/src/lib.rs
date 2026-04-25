@@ -86,8 +86,22 @@ impl VulkanInstance {
         instance_extensions.push(ash::ext::debug_report::NAME.as_ptr());
         // Instance-level dependency of VK_EXT_present_timing.
         instance_extensions.push(ash::khr::get_surface_capabilities2::NAME.as_ptr());
+        if cfg!(feature = "validation") {
+            instance_extensions.push(ash::ext::validation_features::NAME.as_ptr());
+        }
 
         let mut debug_report_callback_info = VkDebugReport::get_messenger_create_info();
+
+        let enabled_validation_features = [
+            vk::ValidationFeatureEnableEXT::BEST_PRACTICES,
+            vk::ValidationFeatureEnableEXT::SYNCHRONIZATION_VALIDATION,
+        ];
+        let validation_features = vk::ValidationFeaturesEXT::default()
+            .enabled_validation_features(&enabled_validation_features);
+        if cfg!(feature = "validation") {
+            debug_report_callback_info.p_next =
+                (&validation_features as *const vk::ValidationFeaturesEXT).cast();
+        }
 
         let mut caps_checker = CapabilitiesChecker::new();
 

@@ -24,6 +24,7 @@ strum = { version = "0.28.0", features = ["derive"] }
 default = []
 android = ["dep:ndk-sys", "dep:ndk", "dep:jni"]
 validation = []
+validation-verbose = ["validation"]
 recording-logs = []
 sync-swapchain-recreate = []
 

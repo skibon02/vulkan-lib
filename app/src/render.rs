@@ -394,17 +394,19 @@ impl RenderTask {
                                 self.pending_resize.store(self.extent[0] as u32, self.extent[1] as u32);
                             }
 
-                            let clear_values = smallvec![
+                            let mut clear_values = smallvec![
                                 ClearValue {
                                     color: bg_clear_color,
                                 },
                                 ClearValue {
                                     depth_stencil: ClearDepthStencilValue::default().depth(1.0)
                                 },
-                                ClearValue {
-                                    color: bg_clear_color,
-                                },
                             ];
+                            if need_resolve {
+                                clear_values.push(ClearValue {
+                                    color: bg_clear_color,
+                                });
+                            }
 
                             let (present_wait_ref, new_sub_num) = self.vulkan_renderer.record_device_commands_signal(Some(acquire_wait_ref.with_stages(PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)), |ctx| {
                                 if let Some(range) = global_range {
