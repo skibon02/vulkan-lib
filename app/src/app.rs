@@ -24,7 +24,7 @@ use vulkan_lib::vk::{BufferCreateFlags, BufferUsageFlags};
 use crate::component::Component;
 use crate::layout::calculator::LayoutCalculator;
 use crate::render;
-use crate::render::{RenderData, RenderThreadMessage, RenderRequest, SolidAttributes, UpdateInstances};
+use crate::render::{RenderData, RenderRequest, SolidAttributes, UpdateInstances};
 use crate::resources::get_resource;
 use crate::util::{AtomicResizeRequest, DoubleBuffered, FrameCounter, TrippleAutoStaging};
 
@@ -51,8 +51,7 @@ pub struct App {
     instance_buffers: DoubleBuffered<Arc<BufferResource>>,
 
     allocator: VulkanAllocator,
-    render_tx: mpsc::Sender<RenderThreadMessage>,
-    render_request_rx: mpsc::Receiver<RenderRequest>,
+    render_request_rx: Option<mpsc::Receiver<RenderRequest>>,
     render_thread: Option<JoinHandle<()>>,
     pending_resize: AtomicResizeRequest,
 
@@ -77,7 +76,7 @@ impl App {
         let shared = vulkan_renderer.shared();
         let mut allocator = vulkan_renderer.new_allocator();
         let pending_resize = AtomicResizeRequest::new();
-        let (render_task, render_tx, render_request_rx) = render::RenderTask::new(vulkan_renderer, inner_size, pending_resize.clone(), wakeup);
+        let (render_task, render_request_rx) = render::RenderTask::new(vulkan_renderer, inner_size, pending_resize.clone(), wakeup);
         let render_jh = render_task.spawn();
         
         // create UI component
@@ -115,8 +114,7 @@ impl App {
             shared,
             allocator,
 
-            render_tx,
-            render_request_rx,
+            render_request_rx: Some(render_request_rx),
             pending_resize,
             render_thread: Some(render_jh),
 
@@ -151,6 +149,8 @@ impl App {
             } => {
                 let g = range_event_start!("[APP] Close requested");
                 info!("Close requested...");
+                // Drop the render request receiver so the render thread's send() fails immediately
+                let _ = self.render_request_rx.take();
                 self.app_finished = true;
             }
 
@@ -234,7 +234,10 @@ impl App {
     }
 
     pub fn handle_wakeup(&mut self) {
-        let Ok(render_req) = self.render_request_rx.try_recv() else {
+        let Some(rx) = self.render_request_rx.as_ref() else {
+            return;
+        };
+        let Ok(render_req) = rx.try_recv() else {
             // spurious wakeup
             return;
         };
@@ -299,8 +302,7 @@ impl App {
 
 impl Drop for App {
     fn drop(&mut self) {
-        info!("AppState dropping, sending exit message to render thread");
-        let _ = self.render_tx.send(RenderThreadMessage::Exit);
+        info!("AppState dropping");
 
         if let Some(thread) = self.render_thread.take() {
             info!("Waiting for render thread to finish...");

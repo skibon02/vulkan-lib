@@ -96,12 +96,12 @@ impl ApplicationHandler for WinitApp {
         _window_id: WindowId,
         event: WindowEvent,
     ) {
-        if self.app.as_mut().unwrap().is_finished() {
-            info!("Exit requested!");
-            event_loop.exit();
-        }
         if let Err(e) = self.app.as_mut().unwrap().handle_event(event_loop, event) {
             error!("Error handling event: {:?}", e);
+        }
+        if self.app.as_ref().unwrap().is_finished() {
+            info!("Exit requested!");
+            event_loop.exit();
         }
     }
 

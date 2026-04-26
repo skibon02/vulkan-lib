@@ -13,10 +13,9 @@ use vulkan_lib::shaders::layout::types::GlslTypeVariant;
 use smallvec::{smallvec, SmallVec};
 use std::sync::{mpsc, Arc};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::TryRecvError;
 use std::thread;
 use std::thread::JoinHandle;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use log::{error, info, warn};
 use sparkles::range_event_start;
 use swash::FontRef;
@@ -38,16 +37,12 @@ use vulkan_lib::shaders::layout::types::{vec2, vec3, vec4, ivec2};
 use crate::resources::get_resource;
 use crate::util::{AtomicResizeRequest, DoubleBuffered, FrameCounter};
 
-pub enum RenderThreadMessage {
-    Exit,
-}
 pub struct UpdateInstances {
     pub staging: StagingBufferRange,
     pub buf: Arc<BufferResource>,
 }
 
 pub struct RenderTask {
-    render_msg_rx: mpsc::Receiver<RenderThreadMessage>,
     logic_wakeup: EventLoopProxy,
     render_request_tx: mpsc::Sender<RenderRequest>,
     vulkan_renderer: GraphicsQueue,
@@ -165,13 +160,11 @@ impl Default for SolidAttributes {
     }
 }
 impl RenderTask {
-    pub fn new(vulkan_renderer: GraphicsQueue, initial_size: PhysicalSize<u32>, pending_resize: AtomicResizeRequest, logic_wakeup: EventLoopProxy) -> (Self, mpsc::Sender<RenderThreadMessage>, mpsc::Receiver<RenderRequest>) {
-        let (render_msg_tx, render_msg_rx) = mpsc::channel::<RenderThreadMessage>();
+    pub fn new(vulkan_renderer: GraphicsQueue, initial_size: PhysicalSize<u32>, pending_resize: AtomicResizeRequest, logic_wakeup: EventLoopProxy) -> (Self, mpsc::Receiver<RenderRequest>) {
         let (render_request_tx, render_request_rx) = mpsc::channel::<RenderRequest>();
         vulkan_renderer.set_reflex_mode(ReflexMode::Boost);
 
         (Self {
-            render_msg_rx,
             logic_wakeup,
             render_request_tx,
             vulkan_renderer,
@@ -179,7 +172,7 @@ impl RenderTask {
             swapchain_recreated: false,
             last_print: Instant::now(),
             extent: [initial_size.width as i32, initial_size.height as i32],
-        }, render_msg_tx, render_request_rx)
+        }, render_request_rx)
     }
 
     pub fn spawn(mut self) -> JoinHandle<()> {
@@ -319,23 +312,6 @@ impl RenderTask {
             let mut waited_submission = self.vulkan_renderer.shared().last_host_waited_submission();
 
             loop {
-                match self.render_msg_rx.try_recv() {
-                    Ok(msg) =>  {
-                        match msg {
-                            RenderThreadMessage::Exit => {
-                                info!("Render thread exiting");
-                                break;
-                            }
-                        }
-
-                    }
-                    Err(TryRecvError::Disconnected) => {
-                        info!("Render thread exiting due to channel close");
-                        break;
-                    }
-                    Err(TryRecvError::Empty) => {}
-                };
-
                 // Mailbox resize: consume latest pending resize (if any)
                 if let Some((width,height)) = self.pending_resize.try_take() {
                     info!("[WINDOW RESIZE] Recreate swapchain...");
@@ -349,13 +325,22 @@ impl RenderTask {
                 let bg_color = [0.15, 0.12, 0.11];
                 let g = range_event_start!("Request rendering");
                 let (render_tx, render_rx) = oneshot::channel();
-                self.render_request_tx.send(RenderRequest {
+                if self.render_request_tx.send(RenderRequest {
                     extent: self.extent,
                     resp: render_tx,
-                }).unwrap();
+                }).is_err() {
+                    info!("Render thread exiting: request channel closed");
+                    break;
+                }
                 self.logic_wakeup.wake_up();
 
-                let render_data = render_rx.recv().unwrap();
+                let render_data = match render_rx.recv() {
+                    Ok(v) => v,
+                    Err(_) => {
+                        info!("Render thread exiting: response channel closed");
+                        break;
+                    }
+                };
                 drop(g);
                 if let Some(new_instances) = render_data.new_instances {
                     let staging = new_instances.staging;
