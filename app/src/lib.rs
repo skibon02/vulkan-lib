@@ -78,21 +78,16 @@ impl ApplicationHandler for WinitApp {
                 .with_title(":P"))
             .unwrap();
 
-        window.request_redraw();
-
+        // preserve instances between surface recreation on android (aka state ser/deser)
         let instances = self.app.take().map(|a| a.instances.clone());
-        let app_state = App::new_winit(window, instances.unwrap_or_default());
+        let wakeup = event_loop.create_proxy();
+        let app_state = App::new_winit(window, instances.unwrap_or_default(), wakeup);
         self.app = Some(app_state);
     }
 
     fn destroy_surfaces(&mut self, _event_loop: &dyn ActiveEventLoop) {
         info!("\t\t*** APP DESTROY SURFACES ***");
         self.app = None;
-    }
-
-    fn resumed(&mut self, event_loop: &dyn ActiveEventLoop) {
-        let g = range_event_start!("[WINIT] resumed");
-        info!("\t\t*** APP RESUMED ***");
     }
 
     fn window_event(
@@ -110,6 +105,12 @@ impl ApplicationHandler for WinitApp {
         }
     }
 
+    fn proxy_wake_up(&mut self, event_loop: &dyn ActiveEventLoop) {
+        if let Some(app) = self.app.as_mut() {
+            app.handle_wakeup();
+        }
+    }
+    //
     //
     // fn about_to_wait(&mut self, event_loop: &dyn ActiveEventLoop) {
     //     info!("\t\t*** APP ABOUT TO WAIT ***");

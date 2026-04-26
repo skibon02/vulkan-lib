@@ -11,7 +11,7 @@ use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use sparkles::{instant_event, range_event_start};
 use winit::dpi::PhysicalSize;
 use winit::event::{ButtonSource, ElementState, MouseButton, PointerSource, WindowEvent};
-use winit::event_loop::ActiveEventLoop;
+use winit::event_loop::{ActiveEventLoop, EventLoopProxy};
 use winit::{dpi, keyboard};
 use winit::keyboard::NamedKey;
 use winit::monitor::Fullscreen;
@@ -24,7 +24,7 @@ use vulkan_lib::vk::{BufferCreateFlags, BufferUsageFlags};
 use crate::component::Component;
 use crate::layout::calculator::LayoutCalculator;
 use crate::render;
-use crate::render::{RenderMessage, SolidAttributes};
+use crate::render::{RenderData, RenderThreadMessage, RenderRequest, SolidAttributes, UpdateInstances};
 use crate::resources::get_resource;
 use crate::util::{AtomicResizeRequest, DoubleBuffered, FrameCounter, TrippleAutoStaging};
 
@@ -45,15 +45,15 @@ pub struct App {
     // Rendering thread
     shared: SharedState,
     frame_counter: FrameCounter,
-    instances_updated: bool,
     pub instances: Vec<SolidAttributes>,
+    instances_changed: bool,
     staging: TrippleAutoStaging,
     instance_buffers: DoubleBuffered<Arc<BufferResource>>,
 
     allocator: VulkanAllocator,
-    render_tx: mpsc::Sender<RenderMessage>,
+    render_tx: mpsc::Sender<RenderThreadMessage>,
+    render_request_rx: mpsc::Receiver<RenderRequest>,
     render_thread: Option<JoinHandle<()>>,
-    render_ready: Arc<AtomicBool>,
     pending_resize: AtomicResizeRequest,
 
     // some stats
@@ -63,7 +63,7 @@ pub struct App {
 
 
 impl App {
-    pub fn new_winit(window: Box<dyn Window>, instances: Vec<SolidAttributes>) -> App {
+    pub fn new_winit(window: Box<dyn Window>, instances: Vec<SolidAttributes>, wakeup: EventLoopProxy) -> App {
         let raw_window_handle = window.window_handle().unwrap().as_raw();
         let raw_display_handle = window.display_handle().unwrap().as_raw();
         let inner_size = window.surface_size();
@@ -77,7 +77,7 @@ impl App {
         let shared = vulkan_renderer.shared();
         let mut allocator = vulkan_renderer.new_allocator();
         let pending_resize = AtomicResizeRequest::new();
-        let (render_task, render_tx, render_ready) = render::RenderTask::new(vulkan_renderer, inner_size, pending_resize.clone());
+        let (render_task, render_tx, render_request_rx) = render::RenderTask::new(vulkan_renderer, inner_size, pending_resize.clone(), wakeup);
         let render_jh = render_task.spawn();
         
         // create UI component
@@ -108,15 +108,15 @@ impl App {
 
             prev_win_size: PhysicalSize::default(),
             frame_counter,
-            instances_updated: true,
             instances,
+            instances_changed: false,
             staging,
             instance_buffers,
             shared,
             allocator,
 
             render_tx,
-            render_ready,
+            render_request_rx,
             pending_resize,
             render_thread: Some(render_jh),
 
@@ -131,7 +131,7 @@ impl App {
             d: 0.5.into(),
             color: [1.0, 1.0, 1.0, 1.0].into(),
         });
-        self.instances_updated = true;
+        self.instances_changed = true;
     }
     pub fn is_finished(&self) -> bool {
         self.app_finished
@@ -172,73 +172,6 @@ impl App {
                 } else {
                     let g = range_event_start!("[APP] Exit fullscreen mode");
                     self.window.set_fullscreen(None);
-                }
-            }
-
-            WindowEvent::RedrawRequested => 'handling: {
-                self.window.request_redraw();
-                if !self.app_finished && !self.is_collapsed {
-                    if !self.render_ready.swap(false, Ordering::Acquire) {
-                        break 'handling;
-                    }
-
-                    if self.instances_updated {
-                        self.instances_updated = false;
-                        let bytes_len = self.instances.len() * size_of::<SolidAttributes>();
-                        if bytes_len > 0 {
-                            let g = range_event_start!("instance buffer prepare");
-                            let mut range = self.staging.allocate(&mut self.allocator, bytes_len);
-                            range.update(|r| {
-                                let bytes = unsafe { from_raw_parts(self.instances.as_ptr() as *const u8, bytes_len) };
-                                r[..bytes_len].copy_from_slice(bytes);
-                            });
-                            self.render_tx.send(RenderMessage::UpdateInstances {
-                                staging: range,
-                                buf: self.instance_buffers.current().clone()
-                            }).unwrap();
-                        }
-                    }
-
-                    // Run layout and produce render rects
-                    let size = self.window.surface_size();
-                    if size != self.prev_win_size {
-                        self.prev_win_size = size;
-                        self.layout_calculator.calculate_layout(size.width, size.height);
-                        
-                        let (w, h) = self.layout_calculator.get_min_root_size();
-                        self.window.set_min_surface_size(Some(PhysicalSize::new(w, h).into()));
-
-                        let render_rects = self.layout_calculator.get_render_rects();
-                        self.instances.clear();
-                        for rect in &render_rects {
-                            self.instances.push(SolidAttributes {
-                                pos: [rect.x, rect.y].into(),
-                                size: [rect.w, rect.h].into(),
-                                d: rect.depth.into(),
-                                color: [rect.r, rect.g, rect.b, rect.a].into(),
-                            });
-                        }
-
-                        self.instances_updated = true;
-                    }
-
-                    self.frame_counter.increment_frame();
-                    instant_event!("Send redraw message");
-                    let _ = self.render_tx.send(RenderMessage::Redraw {
-                        bg_color: [0.15, 0.12, 0.11],
-                    });
-
-                    self.allocator.destroy_old_resources();
-
-                    // handle fps
-                    self.frame_cnt += 1;
-                    let elapsed_secs = self.last_sec.elapsed().as_secs_f32();
-                    if elapsed_secs >= 1.0 {
-                        let fps = self.frame_cnt as f32 / elapsed_secs;
-                        info!("FPS: {:.0}", fps);
-                        self.frame_cnt = 0;
-                        self.last_sec = Instant::now();
-                    }
                 }
             }
             WindowEvent::SurfaceResized(size) => {
@@ -299,12 +232,75 @@ impl App {
 
         Ok(())
     }
+
+    pub fn handle_wakeup(&mut self) {
+        let Ok(render_req) = self.render_request_rx.try_recv() else {
+            // spurious wakeup
+            return;
+        };
+
+        // Run layout and produce render rects
+        let size = self.window.surface_size();
+        if size != self.prev_win_size {
+            self.prev_win_size = size;
+            self.layout_calculator.calculate_layout(size.width, size.height);
+
+            let (w, h) = self.layout_calculator.get_min_root_size();
+            self.window.set_min_surface_size(Some(PhysicalSize::new(w, h).into()));
+
+            let render_rects = self.layout_calculator.get_render_rects();
+            self.instances.clear();
+            for rect in &render_rects {
+                self.instances.push(SolidAttributes {
+                    pos: [rect.x, rect.y].into(),
+                    size: [rect.w, rect.h].into(),
+                    d: rect.depth.into(),
+                    color: [rect.r, rect.g, rect.b, rect.a].into(),
+                });
+            }
+            self.instances_changed = true;
+        }
+
+        let bytes_len = self.instances.len() * size_of::<SolidAttributes>();
+        let new_instances = if self.instances_changed && bytes_len > 0 {
+            let g = range_event_start!("instance buffer prepare");
+            let mut range = self.staging.allocate(&mut self.allocator, bytes_len);
+            range.update(|r| {
+                let bytes = unsafe { from_raw_parts(self.instances.as_ptr() as *const u8, bytes_len) };
+                r[..bytes_len].copy_from_slice(bytes);
+            });
+            self.instances_changed = false;
+            Some(UpdateInstances {
+                staging: range,
+                buf: self.instance_buffers.current().clone()
+            })
+        } else {
+            None
+        };
+
+        self.frame_counter.increment_frame();
+        instant_event!("Send redraw message");
+        let _ = render_req.resp.send(RenderData {
+            new_instances
+        });
+        self.allocator.destroy_old_resources();
+
+        // handle fps
+        self.frame_cnt += 1;
+        let elapsed_secs = self.last_sec.elapsed().as_secs_f32();
+        if elapsed_secs >= 1.0 {
+            let fps = self.frame_cnt as f32 / elapsed_secs;
+            info!("FPS: {:.0}", fps);
+            self.frame_cnt = 0;
+            self.last_sec = Instant::now();
+        }
+    }
 }
 
 impl Drop for App {
     fn drop(&mut self) {
         info!("AppState dropping, sending exit message to render thread");
-        let _ = self.render_tx.send(RenderMessage::Exit);
+        let _ = self.render_tx.send(RenderThreadMessage::Exit);
 
         if let Some(thread) = self.render_thread.take() {
             info!("Waiting for render thread to finish...");
