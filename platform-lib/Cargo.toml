@@ -1,16 +1,16 @@
 [package]
-name = "winwin32"
+name = "platform-lib"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
 drop_guard = "0.3.0"
 log = "0.4.29"
-raw-window-handle = "0.6.2"
 sparkles = { git="https://github.com/skibon02/sparkles.git", branch = "main", default-features = false }
 
 # WINDOWS platform
-unicode-segmentation = "1.13.2"
+[target.'cfg(target_os="windows")'.dependencies]
+unicode-segmentation = { version = "1.13.2" }
 windows-sys = { version = "0.61.2", features = [
     "Win32_Devices_HumanInterfaceDevice",
     "Win32_Foundation",
@@ -42,3 +42,11 @@ windows-sys = { version = "0.61.2", features = [
 [dev-dependencies]
 simple_logger = "5.2.0"
 sparkles = { git="https://github.com/skibon02/sparkles.git", branch = "main" }
+
+[build-dependencies]
+cfg_aliases = "0.2.1"
+
+[features]
+default = ["only_wayland"]
+only_x11 = []
+only_wayland = []

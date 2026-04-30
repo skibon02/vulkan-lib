@@ -147,10 +147,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "app-lib"
-version = "0.1.0"
-
-[[package]]
 name = "arbitrary"
 version = "1.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1675,6 +1671,19 @@ name = "plain"
 version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
+
+[[package]]
+name = "platform-lib"
+version = "0.1.0"
+dependencies = [
+ "cfg_aliases",
+ "drop_guard",
+ "log",
+ "simple_logger",
+ "sparkles",
+ "unicode-segmentation",
+ "windows-sys 0.61.2",
+]
 
 [[package]]
 name = "png"
@@ -3225,19 +3234,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "09dac053f1cd375980747450bfc7250c264eaae0583872e845c0c7cd578872b5"
 dependencies = [
  "memchr",
-]
-
-[[package]]
-name = "winwin32"
-version = "0.1.0"
-dependencies = [
- "drop_guard",
- "log",
- "raw-window-handle",
- "simple_logger",
- "sparkles",
- "unicode-segmentation",
- "windows-sys 0.61.2",
 ]
 
 [[package]]

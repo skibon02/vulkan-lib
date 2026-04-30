@@ -1,5 +1,5 @@
 [workspace]
 resolver = "3"
-members = ["vulkan-lib", "app", "ui-macro", "winwin32", "app-lib"]
+members = ["vulkan-lib", "app", "ui-macro", "platform-lib"]
 
 [patch.crates-io]

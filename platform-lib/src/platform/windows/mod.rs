@@ -8,8 +8,7 @@ use windows_sys::Win32::System::Threading::INFINITE;
 use windows_sys::Win32::UI::WindowsAndMessaging::{DispatchMessageW, GetMessageW, MsgWaitForMultipleObjectsEx, PeekMessageW, TranslateMessage, MSG, MWMO_INPUTAVAILABLE, PM_REMOVE, QS_ALLINPUT};
 use crate::window::HANDLED;
 
-pub mod window;
-
+mod window;
 
 pub fn run_platform_loop() {
     let mut msg: MSG = unsafe { mem::zeroed() };

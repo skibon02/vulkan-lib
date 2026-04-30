@@ -1,5 +1,3 @@
-mod frame_counter;
-
 use std::f64::consts::PI;
 use vulkan_lib::vk::{DescriptorType, Extent2D, Pipeline};
 use vulkan_lib::vk::{BufferCopy, ClearColorValue, ClearDepthStencilValue, ClearValue, Filter, ImageUsageFlags, PipelineStageFlags};

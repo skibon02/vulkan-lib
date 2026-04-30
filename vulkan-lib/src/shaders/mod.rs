@@ -14,8 +14,8 @@ pub enum UniformBindingType {
 macro_rules! use_shader {
     ($name:expr) => {
         (
-            include_bytes!(concat!("../shaders/compiled/", $name, "_vert.spv")),
-            include_bytes!(concat!("../shaders/compiled/", $name, "_frag.spv"))
+            include_bytes!(concat!("../../shaders/compiled/", $name, "_vert.spv")),
+            include_bytes!(concat!("../../shaders/compiled/", $name, "_frag.spv"))
         )
     };
 }
