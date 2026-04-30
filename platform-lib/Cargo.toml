@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+bitflags = "2.11.1"
 drop_guard = "0.3.0"
 log = "0.4.29"
 sparkles = { git="https://github.com/skibon02/sparkles.git", branch = "main", default-features = false }

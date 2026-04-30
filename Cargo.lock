@@ -1676,6 +1676,7 @@ checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
 name = "platform-lib"
 version = "0.1.0"
 dependencies = [
+ "bitflags 2.11.1",
  "cfg_aliases",
  "drop_guard",
  "log",
