@@ -3,9 +3,7 @@ use std::cell::Cell;
 use std::ffi::OsStr;
 use std::iter::once;
 use std::os::windows::prelude::*;
-use std::rc::Rc;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use log::{info, warn};
+use log::info;
 use sparkles::{instant_event, range_event_start};
 use windows_sys::Win32::Foundation::{HMODULE, HWND, LPARAM, LRESULT, WPARAM};
 use windows_sys::Win32::System::SystemServices::IMAGE_DOS_HEADER;
@@ -28,24 +26,12 @@ impl InitData {
     }
 }
 pub struct EventLoopState {
-    windows_active: Cell<usize>
 }
 
 impl EventLoopState {
     fn new() -> EventLoopState {
         EventLoopState {
-            windows_active: Cell::new(0)
         }
-    }
-    pub fn increment_win_cnt(&self) {
-        self.windows_active.set(self.windows_active.get() + 1);
-    }
-
-    pub fn decrement_win_cnt(&self) -> bool {
-        if self.windows_active.get() > 0 {
-            self.windows_active.set(self.windows_active.get() - 1);
-        }
-        self.windows_active.get() == 0
     }
 }
 

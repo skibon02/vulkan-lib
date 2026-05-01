@@ -2,13 +2,16 @@ use log::{info, warn};
 use sparkles::instant_event;
 use windows_sys::Win32::Foundation::{LPARAM, RECT, WPARAM};
 use windows_sys::Win32::UI::WindowsAndMessaging::{*};
-use crate::platform::windows::types::{Activate, HitTest, Icon, MouseKeys, Size, SizeEdge, SystemCommand};
+use crate::platform::windows::types::{Activate, CreateStructGuard, HitTest, Icon, KeyStateFlags, NcCalcSize, RectGuard, Size, SizeEdge, SystemCommand, WindowPos, WindowPosChangingGuard};
 
 #[derive(Debug)]
 pub enum MouseMessage {
     NcHitTest(i16, i16),
     NCMouseMove(i16, i16, HitTest),
-    MouseMove(i16, i16, MouseKeys),
+    MouseMove(i16, i16, KeyStateFlags),
+    NcMouseHover(i16, i16, HitTest),
+    NcMouseLeave,
+    CaptureChanged,
 }
 
 #[derive(Debug)]
@@ -23,6 +26,7 @@ pub enum KeyboardMessage {
     KeyDown {
         vk: u32
     },
+    AppCommand(AppCommandInfo)
 }
 
 
@@ -33,18 +37,23 @@ pub enum RawInputMessage {
 }
 
 #[derive(Debug)]
-pub enum WindowMessage {
+pub enum WindowMessage<'a> {
+    NcCreate,
     Create {
-        createstruct: *mut CREATESTRUCTW,
+        createstruct: CreateStructGuard<'a>,
     },
     SystemCommand(SystemCommand, (i16, i16)),
     SetCursor(HitTest, u32),
     Move(i16, i16),
     /// Can modify fields in RECT. return TRUE if message is handled and RECT changed
-    Moving(*mut RECT),
+    Moving(RectGuard<'a>),
     Size(Size, u16, u16),
     /// Can modify fields in RECT. return TRUE if message is handled and RECT changed
-    Sizing(SizeEdge, *mut RECT),
+    Sizing(SizeEdge, RectGuard<'a>),
+    EnterSizeMove,
+    ExitSizeMove,
+    WindowPosChanged(WindowPos),
+    WindowPosChanging(WindowPosChangingGuard<'a>),
 
     /// active
     ActivateApp{
@@ -55,6 +64,7 @@ pub enum WindowMessage {
         active: bool,
         nc_repaint: bool,
     },
+    NcCalcSize(NcCalcSize),
 
     Enable(bool),
     Close,
@@ -65,6 +75,8 @@ pub enum WindowMessage {
     GetIcon(Icon, u32),
     Paint,
     NcPaint,
+    /// Should return non-zero if application erases the background
+    EraseBkgnd,
     Quit(usize),
 }
 
@@ -72,18 +84,21 @@ use WindowMessage::*;
 use KeyboardMessage::*;
 use MouseMessage::*;
 use RawInputMessage::*;
+use crate::platform::platform_impl::types::AppCommandInfo;
+
 #[derive(Debug)]
-pub enum RawMessage {
-    WindowMessage(WindowMessage),
+pub enum RawMessage<'a> {
+    WindowMessage(WindowMessage<'a>),
     KeyboardMessage(KeyboardMessage),
     MouseMessage(MouseMessage),
 }
 
-impl RawMessage {
-    pub fn try_parse(msg: u32, wparam: WPARAM, lparam: LPARAM) -> Option<RawMessage> {
+impl<'a> RawMessage<'a> {
+    pub unsafe fn try_parse(msg: u32, wparam: WPARAM, lparam: LPARAM) -> Option<RawMessage<'a>> {
         match msg {
+            WM_NCCREATE => Some(RawMessage::WindowMessage(NcCreate)),
             WM_CREATE => Some(RawMessage::WindowMessage(Create{
-                createstruct: lparam as *mut CREATESTRUCTW,
+                createstruct: unsafe { CreateStructGuard::from_lparam(lparam) },
             })),
             WM_SYSCOMMAND => {
                 let sc = SystemCommand::from_raw(wparam, lparam);
@@ -104,8 +119,7 @@ impl RawMessage {
                 Some(RawMessage::WindowMessage(Move(x, y)))
             }
             WM_MOVING => {
-                let rect = lparam as *mut RECT;
-                Some(RawMessage::WindowMessage(Moving(rect)))
+                Some(RawMessage::WindowMessage(Moving(RectGuard::from_lparam(lparam))))
             }
             WM_ACTIVATEAPP => {
                 let active = wparam != 0;
@@ -125,8 +139,7 @@ impl RawMessage {
             }
             WM_SIZING => {
                 let size_edge = SizeEdge::from_wparam(wparam);
-                let rect = lparam as *mut RECT;
-                Some(RawMessage::WindowMessage(Sizing(size_edge, rect)))
+                Some(RawMessage::WindowMessage(Sizing(size_edge, RectGuard::from_lparam(lparam))))
             }
             WM_ENABLE => {
                 let enabled = wparam != 0;
@@ -147,49 +160,26 @@ impl RawMessage {
                 let exit_code = wparam as usize;
                 Some(RawMessage::WindowMessage(Quit(exit_code)))
             }
+            WM_ERASEBKGND => Some(RawMessage::WindowMessage(EraseBkgnd)),
+            WM_NCCALCSIZE => {
+                let need_indicate = wparam != 0;
+                let res = if need_indicate {
+                    NcCalcSize::CalcsizeParams(lparam as *mut NCCALCSIZE_PARAMS)
+                }
+                else {
+                    NcCalcSize::Rect(lparam as *mut RECT)
+                };
 
-
-            // Keyboard messages
-            WM_KEYUP => Some(RawMessage::KeyboardMessage(KeyUp {
-                vk: wparam as u32
-            })),
-            WM_ACTIVATE => {
-                let active = Activate::from_wparam(wparam & 0xFFFF);
-                let is_minimized = (wparam >> 16) != 0;
-                Some(RawMessage::KeyboardMessage(KeyboardMessage::Activate{active, is_minimized}))
+                Some(RawMessage::WindowMessage(WindowMessage::NcCalcSize(res)))
             }
-            WM_KEYDOWN => Some(RawMessage::KeyboardMessage(KeyDown {
-                vk: wparam as u32
-            })),
-
-            // Mouse messages
-            WM_NCMOUSEMOVE => {
-                let hit_test = HitTest::from_i16((lparam & 0xFFFF) as i16);
-                let x = (lparam & 0xFFFF) as i16;
-                let y = (lparam >> 16) as i16;
-                Some(RawMessage::MouseMessage(NCMouseMove(x, y, hit_test)))
+            WM_ENTERSIZEMOVE => Some(RawMessage::WindowMessage(EnterSizeMove)),
+            WM_EXITSIZEMOVE => Some(RawMessage::WindowMessage(ExitSizeMove)),
+            WM_WINDOWPOSCHANGED => {
+                let pos = unsafe {*(lparam as *const WINDOWPOS)};
+                Some(RawMessage::WindowMessage(WindowPosChanged(WindowPos::from_original(pos))))
             }
-            WM_MOUSEMOVE => {
-                let keys = MouseKeys::from_bits_truncate(wparam);
-                let x = (lparam & 0xFFFF) as i16;
-                let y = (lparam >> 16) as i16;
-                Some(RawMessage::MouseMessage(MouseMove(x, y, keys)))
-            }
-            WM_NCHITTEST => {
-                let x = (lparam & 0xFFFF) as i16;
-                let y = (lparam >> 16) as i16;
-                Some(RawMessage::MouseMessage(NcHitTest(x, y)))
-            }
-
-
-
-            WM_ENTERSIZEMOVE => {
-                instant_event!("WM_ENTERSIZEMOVE");
-                None
-            }
-            WM_EXITSIZEMOVE => {
-                instant_event!("WM_EXITSIZEMOVE");
-                None
+            WM_WINDOWPOSCHANGING => {
+                Some(RawMessage::WindowMessage(WindowPosChanging(unsafe { WindowPosChangingGuard::from_lparam(lparam) })))
             }
             WM_GETMINMAXINFO => {
                 instant_event!("WM_GETMINMAXINFO");
@@ -223,22 +213,56 @@ impl RawMessage {
                 instant_event!("WM_USERCHANGED");
                 None
             }
-            WM_WINDOWPOSCHANGED => {
-                instant_event!("WM_WINDOWPOSCHANGED");
-                None
+
+
+            // Keyboard messages
+            WM_KEYUP => Some(RawMessage::KeyboardMessage(KeyUp {
+                vk: wparam as u32
+            })),
+            WM_ACTIVATE => {
+                let active = Activate::from_wparam(wparam & 0xFFFF);
+                let is_minimized = (wparam >> 16) != 0;
+                Some(RawMessage::KeyboardMessage(KeyboardMessage::Activate{active, is_minimized}))
             }
-            WM_WINDOWPOSCHANGING => {
-                instant_event!("WM_WINDOWPOSCHANGING");
-                None
+            WM_KEYDOWN => Some(RawMessage::KeyboardMessage(KeyDown {
+                vk: wparam as u32
+            })),
+            WM_APPCOMMAND => {
+                // wparam, lparam
+                let info = AppCommandInfo::from_lparam(lparam);
+                Some(RawMessage::KeyboardMessage(AppCommand(info)))
+            }
+
+            // Mouse messages
+            WM_NCMOUSEMOVE => {
+                let hit_test = HitTest::from_i16((wparam & 0xFFFF) as i16);
+                let x = (lparam & 0xFFFF) as i16;
+                let y = (lparam >> 16) as i16;
+                Some(RawMessage::MouseMessage(NCMouseMove(x, y, hit_test)))
+            }
+            WM_MOUSEMOVE => {
+                let keys = KeyStateFlags::from_bits_truncate(wparam);
+                let x = (lparam & 0xFFFF) as i16;
+                let y = (lparam >> 16) as i16;
+                Some(RawMessage::MouseMessage(MouseMove(x, y, keys)))
+            }
+            WM_NCHITTEST => {
+                let x = (lparam & 0xFFFF) as i16;
+                let y = (lparam >> 16) as i16;
+                Some(RawMessage::MouseMessage(NcHitTest(x, y)))
             }
             WM_NCMOUSEHOVER => {
-                instant_event!("WM_NCMOUSEHOVER");
-                None
+                let hit_test = HitTest::from_i16((wparam & 0xFFFF) as i16);
+                let x = (lparam & 0xFFFF) as i16;
+                let y = (lparam >> 16) as i16;
+                Some(RawMessage::MouseMessage(NcMouseHover(x, y, hit_test)))
             }
-            WM_NCMOUSELEAVE => {
-                instant_event!("WM_NCMOUSELEAVE");
-                None
-            }
+            WM_NCMOUSELEAVE => Some(RawMessage::MouseMessage(NcMouseLeave)),
+            WM_CAPTURECHANGED => Some(RawMessage::MouseMessage(CaptureChanged)),
+
+
+
+
             WM_MOUSEWHEEL => {
                 instant_event!("WM_MOUSEWHEEL");
                 None
@@ -256,32 +280,23 @@ impl RawMessage {
                 None
             }
             WM_ENTERMENULOOP => {
-                warn!("WM_ENTERMENULOOP!");
                 instant_event!("WM_ENTERMENULOOP");
                 None
             }
             WM_INITMENU => {
-                warn!("WM_INITMENU!");
                 instant_event!("WM_INITMENU");
                 None
             }
             WM_MENUSELECT => {
-                warn!("WM_MENUSELECT!");
                 instant_event!("WM_MENUSELECT");
                 None
             }
             WM_ENTERIDLE => {
-                warn!("WM_ENTERIDLE!");
                 instant_event!("WM_ENTERIDLE");
                 None
             }
             WM_EXITMENULOOP => {
-                warn!("WM_EXITMENULOOP");
                 instant_event!("WM_EXITMENULOOP");
-                None
-            }
-            WM_CAPTURECHANGED => {
-                instant_event!("WM_CAPTURECHANGED");
                 None
             }
             WM_SYSKEYDOWN => {
@@ -294,10 +309,6 @@ impl RawMessage {
             }
             WM_CHAR => {
                 instant_event!("WM_CHAR");
-                None
-            }
-            WM_NCCALCSIZE => {
-                instant_event!("WM_NCCALCSIZE");
                 None
             }
             WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN | WM_XBUTTONDOWN => {
@@ -324,15 +335,7 @@ impl RawMessage {
                 instant_event!("WM_NC*BUTTONDBLCLK");
                 None
             }
-            WM_APPCOMMAND => {
-                instant_event!("WM_APPCOMMAND");
-                None
-            }
             WM_GETOBJECT => {
-                instant_event!("WM_ERASEBKGND");
-                None
-            }
-            WM_ERASEBKGND => {
                 instant_event!("WM_ERASEBKGND");
                 None
             }

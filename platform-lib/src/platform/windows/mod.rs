@@ -53,19 +53,20 @@ enum HandleResult {
     Custom(LRESULT)
 }
 
+static CREATED_WINDOWS: AtomicUsize = AtomicUsize::new(0);
 fn handle_message_inner(window: HWND, msg: RawMessage, state: &EventLoopState) -> HandleResult {
     match msg {
         RawMessage::WindowMessage(win) => match win {
             WindowMessage::Create {
                 createstruct
             } => {
-                state.increment_win_cnt();
+                CREATED_WINDOWS.fetch_add(1, Ordering::Relaxed);
                 info!("\t\tINCREMENTED {:x}", state as *const EventLoopState as usize);
                 HandleResult::Default
             },
             WindowMessage::Destroy => {
                 info!("Window message[{:x}]: {:?}", window as usize, win);
-                if state.decrement_win_cnt() {
+                if CREATED_WINDOWS.fetch_sub(1, Ordering::Relaxed) == 1 {
                     info!("All windows closed! Will exit now");
                     // should exit
                     unsafe { PostQuitMessage(0); }
@@ -114,6 +115,7 @@ fn handle_message_inner(window: HWND, msg: RawMessage, state: &EventLoopState) -
 static DEPTH: AtomicUsize = AtomicUsize::new(0);
 pub static HANDLED: AtomicUsize = AtomicUsize::new(0);
 
+/// TODO: handle panics in this callback correctly!
 unsafe extern "system" fn public_window_callback(
     window: HWND,
     raw_msg: u32,
@@ -131,26 +133,24 @@ unsafe extern "system" fn public_window_callback(
     }
     HANDLED.fetch_add(1, Ordering::Relaxed);
 
-    let Some(msg) = RawMessage::try_parse(raw_msg, wparam, lparam)  else {
+    let Some(msg) = (unsafe {RawMessage::try_parse(raw_msg, wparam, lparam)}) else {
         warn!("unknown message {:?}", raw_msg);
         let g = range_event_start!("UNKNOW");
         return unsafe { DefWindowProcW(window, raw_msg, wparam, lparam) };
     };
 
-    if let RawMessage::WindowMessage(WindowMessage::Create {
-            createstruct
-        }) = msg {
-        let Some(createstruct) = (unsafe {createstruct.as_mut()}) else {
-            panic!("CREATESTRUCT address is null!");
-        };
-
-        let init_data_ptr = createstruct.lpCreateParams as *mut window::InitData;
+    if let RawMessage::WindowMessage(WindowMessage::Create { createstruct }) = &msg {
+        let init_data_ptr = createstruct.cs.lpCreateParams as *mut window::InitData;
         let Some(init_data) = (unsafe{init_data_ptr.as_mut()}) else {
             panic!("INIT_DATA address is null!");
         };
         let state = init_data.create_state();
         unsafe { SetWindowLongPtrW(window, GWL_USERDATA, Box::into_raw(state) as isize) };
     };
+
+    if let RawMessage::WindowMessage(WindowMessage::NcCreate{..}) = &msg {
+        return unsafe { DefWindowProcW(window, raw_msg, wparam, lparam) };
+    }
 
     let state = unsafe { GetWindowLongPtrW(window, GWL_USERDATA) } as *const EventLoopState;
     if state.is_null() {
