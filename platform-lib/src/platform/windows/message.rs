@@ -96,7 +96,7 @@ impl RawMessage {
                 let hit_test = HitTest::from_i16((lparam & 0xFFFF) as i16);
                 let trig_msg = ((lparam >> 16) & 0xFFFF) as u32;
 
-                Some(RawMessage::WindowMessage(SetCursor(hit_test, trig_msg)))
+                Some(RawMessage::WindowMessage(WindowMessage::SetCursor(hit_test, trig_msg)))
             }
             WM_MOVE => {
                 let x = (lparam & 0xFFFF) as i16;
@@ -154,7 +154,7 @@ impl RawMessage {
                 vk: wparam as u32
             })),
             WM_ACTIVATE => {
-                let activate = Activate::from_wparam(wparam & 0xFFFF);
+                let active = Activate::from_wparam(wparam & 0xFFFF);
                 let is_minimized = (wparam >> 16) != 0;
                 Some(RawMessage::KeyboardMessage(KeyboardMessage::Activate{active, is_minimized}))
             }

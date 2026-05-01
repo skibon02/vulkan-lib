@@ -114,9 +114,7 @@ pub enum HitTest {
 
 impl HitTest {
     pub fn from_i16(value: i16) -> Self {
-        match value {
-            HTERROR => Self::Error,
-            HTTRANSPARENT => Self::Transparent,
+        match value  as u32{
             HTNOWHERE => Self::Nowhere,
             HTCLIENT => Self::Client,
             HTCAPTION => Self::Caption,
@@ -138,6 +136,8 @@ impl HitTest {
             HTBORDER => Self::Border,
             HTCLOSE => Self::Close,
             HTHELP => Self::Help,
+            ht if ht == HTERROR as u32=> Self::Error,
+            ht if ht == HTTRANSPARENT as u32=> Self::Transparent,
             _ => Self::Client,
         }
     }
@@ -152,7 +152,7 @@ pub enum Activate {
 
 impl Activate {
     pub fn from_wparam(wparam: WPARAM) -> Self {
-        match wparam {
+        match wparam as u32 {
             WA_ACTIVE => Activate::Active,
             WA_CLICKACTIVE => Activate::ClickActive,
             WA_INACTIVE => Activate::Inactive,
@@ -173,7 +173,7 @@ pub enum Size {
 
 impl Size {
     pub fn from_wparam(wparam: WPARAM) -> Self {
-        match wparam {
+        match wparam as u32 {
             SIZE_RESTORED => Size::Restored,
             SIZE_MINIMIZED => Size::Minimized,
             SIZE_MAXIMIZED => Size::Maximized,
@@ -198,7 +198,7 @@ pub enum SizeEdge {
 
 impl SizeEdge {
     pub fn from_wparam(wparam: WPARAM) -> Self {
-        match wparam {
+        match wparam as u32 {
             WMSZ_LEFT => SizeEdge::Left,
             WMSZ_RIGHT => SizeEdge::Right,
             WMSZ_TOP => SizeEdge::Top,
@@ -221,7 +221,7 @@ pub enum Icon {
 
 impl Icon {
     pub fn from_wparam(wparam: WPARAM) -> Self {
-        match wparam {
+        match wparam as u32 {
             ICON_BIG => Icon::Big,
             ICON_SMALL => Icon::Small,
             ICON_SMALL2 => Icon::Small2,
