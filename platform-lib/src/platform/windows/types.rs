@@ -1,5 +1,8 @@
+use bitflags::bitflags;
+use windows_sys::Win32::Foundation::{LPARAM, WPARAM};
+use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Copy, Clone)]
 pub enum MonitorPower {
     PoweringOn,
     GoingLowPower,
@@ -19,7 +22,7 @@ impl MonitorPower {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Copy, Clone)]
 pub enum SystemCommand {
     Close,
     VScroll,
@@ -69,10 +72,6 @@ impl SystemCommand {
     }
 }
 
-use bitflags::bitflags;
-use windows_sys::Win32::Foundation::{LPARAM, WPARAM};
-use windows_sys::Win32::UI::WindowsAndMessaging::{SC_CLOSE, SC_CONTEXTHELP, SC_DEFAULT, SC_HOTKEY, SC_HSCROLL, SC_KEYMENU, SC_MAXIMIZE, SC_MINIMIZE, SC_MONITORPOWER, SC_MOUSEMENU, SC_MOVE, SC_NEXTWINDOW, SC_PREVWINDOW, SC_RESTORE, SC_SIZE, SC_TASKLIST, SC_VSCROLL};
-
 bitflags! {
     #[derive(Debug, Clone, Copy)]
     pub struct MouseKeys: usize {
@@ -87,60 +86,146 @@ bitflags! {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(i32)]
 pub enum HitTest {
-    Error       = -2,
-    Transparent = -1,
-    Nowhere     =  0,
-    Client      =  1,
-    Caption     =  2,
-    SysMenu     =  3,
-    GrowBox     =  4, // same as Size
-    Menu        =  5,
-    HScroll     =  6,
-    VScroll     =  7,
-    MinButton   =  8, // same as Reduce
-    MaxButton   =  9, // same as Zoom
-    Left        = 10,
-    Right       = 11,
-    Top         = 12,
-    TopLeft     = 13,
-    TopRight    = 14,
-    Bottom      = 15,
-    BottomLeft  = 16,
-    BottomRight = 17,
-    Border      = 18,
-    Close       = 20,
-    Help        = 21,
+    Error,
+    Transparent,
+    Nowhere,
+    Client,
+    Caption,
+    SysMenu,
+    GrowBox,
+    Menu,
+    HScroll,
+    VScroll,
+    MinButton,
+    MaxButton,
+    Left,
+    Right,
+    Top,
+    TopLeft,
+    TopRight,
+    Bottom,
+    BottomLeft,
+    BottomRight,
+    Border,
+    Close,
+    Help,
 }
 
 impl HitTest {
-    pub fn from_isize(value: isize) -> Option<Self> {
+    pub fn from_i16(value: i16) -> Self {
         match value {
-            -2 => Some(Self::Error),
-            -1 => Some(Self::Transparent),
-            0 => Some(Self::Nowhere),
-            1 => Some(Self::Client),
-            2 => Some(Self::Caption),
-            3 => Some(Self::SysMenu),
-            4 => Some(Self::GrowBox),
-            5 => Some(Self::Menu),
-            6 => Some(Self::HScroll),
-            7 => Some(Self::VScroll),
-            8 => Some(Self::MinButton),
-            9 => Some(Self::MaxButton),
-            10 => Some(Self::Left),
-            11 => Some(Self::Right),
-            12 => Some(Self::Top),
-            13 => Some(Self::TopLeft),
-            14 => Some(Self::TopRight),
-            15 => Some(Self::Bottom),
-            16 => Some(Self::BottomLeft),
-            17 => Some(Self::BottomRight),
-            18 => Some(Self::Border),
-            20 => Some(Self::Close),
-            21 => Some(Self::Help),
-            _ => None,
+            HTERROR => Self::Error,
+            HTTRANSPARENT => Self::Transparent,
+            HTNOWHERE => Self::Nowhere,
+            HTCLIENT => Self::Client,
+            HTCAPTION => Self::Caption,
+            HTSYSMENU => Self::SysMenu,
+            HTSIZE => Self::GrowBox,
+            HTMENU => Self::Menu,
+            HTHSCROLL => Self::HScroll,
+            HTVSCROLL => Self::VScroll,
+            HTMINBUTTON => Self::MinButton,
+            HTMAXBUTTON => Self::MaxButton,
+            HTLEFT => Self::Left,
+            HTRIGHT => Self::Right,
+            HTTOP => Self::Top,
+            HTTOPLEFT => Self::TopLeft,
+            HTTOPRIGHT => Self::TopRight,
+            HTBOTTOM => Self::Bottom,
+            HTBOTTOMLEFT => Self::BottomLeft,
+            HTBOTTOMRIGHT => Self::BottomRight,
+            HTBORDER => Self::Border,
+            HTCLOSE => Self::Close,
+            HTHELP => Self::Help,
+            _ => Self::Client,
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum Activate {
+    Active,
+    ClickActive,
+    Inactive,
+}
+
+impl Activate {
+    pub fn from_wparam(wparam: WPARAM) -> Self {
+        match wparam {
+            WA_ACTIVE => Activate::Active,
+            WA_CLICKACTIVE => Activate::ClickActive,
+            WA_INACTIVE => Activate::Inactive,
+            _ => Activate::Active,
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum Size {
+    MaxHide,
+    Maximized,
+    MaxShow,
+    Minimized,
+    Restored,
+    Unknown
+}
+
+impl Size {
+    pub fn from_wparam(wparam: WPARAM) -> Self {
+        match wparam {
+            SIZE_RESTORED => Size::Restored,
+            SIZE_MINIMIZED => Size::Minimized,
+            SIZE_MAXIMIZED => Size::Maximized,
+            SIZE_MAXSHOW => Size::MaxShow,
+            SIZE_MAXHIDE => Size::MaxHide,
+            _ => Size::Unknown,
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum SizeEdge {
+    Left,
+    Right,
+    Top,
+    TopLeft,
+    TopRight,
+    Bottom,
+    BottomLeft,
+    BottomRight,
+}
+
+impl SizeEdge {
+    pub fn from_wparam(wparam: WPARAM) -> Self {
+        match wparam {
+            WMSZ_LEFT => SizeEdge::Left,
+            WMSZ_RIGHT => SizeEdge::Right,
+            WMSZ_TOP => SizeEdge::Top,
+            WMSZ_TOPLEFT => SizeEdge::TopLeft,
+            WMSZ_TOPRIGHT => SizeEdge::TopRight,
+            WMSZ_BOTTOM => SizeEdge::Bottom,
+            WMSZ_BOTTOMLEFT => SizeEdge::BottomLeft,
+            WMSZ_BOTTOMRIGHT => SizeEdge::BottomRight,
+            _ => SizeEdge::Top,
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum Icon {
+    Big,
+    Small,
+    Small2
+}
+
+impl Icon {
+    pub fn from_wparam(wparam: WPARAM) -> Self {
+        match wparam {
+            ICON_BIG => Icon::Big,
+            ICON_SMALL => Icon::Small,
+            ICON_SMALL2 => Icon::Small2,
+            _ => Icon::Big,
         }
     }
 }

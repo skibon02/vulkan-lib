@@ -1,13 +1,16 @@
 use std::{mem, ptr, thread};
+use std::cell::Cell;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use drop_guard::guard;
 use log::{info, warn};
 use sparkles::range_event_start;
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WAIT_FAILED, WPARAM};
-use windows_sys::Win32::UI::WindowsAndMessaging::{DefWindowProcW, DispatchMessageW, GetMessageW, PeekMessageW, PostQuitMessage, TranslateMessage, CREATESTRUCTW, MSG, MWMO_INPUTAVAILABLE, PM_REMOVE, QS_ALLINPUT, SC_KEYMENU, WMSZ_BOTTOM, WMSZ_BOTTOMLEFT, WMSZ_BOTTOMRIGHT, WMSZ_LEFT, WMSZ_RIGHT, WMSZ_TOP, WMSZ_TOPLEFT, WMSZ_TOPRIGHT, WM_ACTIVATE, WM_ACTIVATEAPP, WM_APPCOMMAND, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_CONTEXTMENU, WM_CREATE, WM_DESTROY, WM_DWMNCRENDERINGCHANGED, WM_ENABLE, WM_ENTERIDLE, WM_ENTERMENULOOP, WM_ENTERSIZEMOVE, WM_ERASEBKGND, WM_EXITMENULOOP, WM_EXITSIZEMOVE, WM_GETICON, WM_GETMINMAXINFO, WM_GETOBJECT, WM_IME_CONTROL, WM_IME_NOTIFY, WM_IME_REQUEST, WM_IME_SETCONTEXT, WM_INITMENU, WM_INPUTLANGCHANGE, WM_INPUTLANGCHANGEREQUEST, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDBLCLK, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MENUSELECT, WM_MOUSEACTIVATE, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_MOVE, WM_MOVING, WM_NCACTIVATE, WM_NCCALCSIZE, WM_NCCREATE, WM_NCDESTROY, WM_NCHITTEST, WM_NCLBUTTONDBLCLK, WM_NCLBUTTONDOWN, WM_NCLBUTTONUP, WM_NCMBUTTONDBLCLK, WM_NCMBUTTONDOWN, WM_NCMBUTTONUP, WM_NCMOUSEHOVER, WM_NCMOUSELEAVE, WM_NCMOUSEMOVE, WM_NCPAINT, WM_NCRBUTTONDBLCLK, WM_NCRBUTTONDOWN, WM_NCRBUTTONUP, WM_NCXBUTTONDBLCLK, WM_NCXBUTTONDOWN, WM_NCXBUTTONUP, WM_PAINT, WM_QUERYOPEN, WM_QUIT, WM_RBUTTONDBLCLK, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_SHOWWINDOW, WM_SIZE, WM_SIZING, WM_STYLECHANGED, WM_STYLECHANGING, WM_SYSCOMMAND, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_THEMECHANGED, WM_USERCHANGED, WM_WINDOWPOSCHANGED, WM_WINDOWPOSCHANGING, WM_XBUTTONDBLCLK, WM_XBUTTONDOWN, WM_XBUTTONUP};
-use crate::platform::windows::message::RawMessage;
+use windows_sys::Win32::UI::WindowsAndMessaging::{DefWindowProcW, DispatchMessageW, GetMessageW, GetWindowLongPtrW, PeekMessageW, PostQuitMessage, SetWindowLongPtrW, SetWindowLongW, TranslateMessage, CREATESTRUCTW, GWL_USERDATA, MSG, MWMO_INPUTAVAILABLE, PM_REMOVE, QS_ALLINPUT, SC_KEYMENU, WMSZ_BOTTOM, WMSZ_BOTTOMLEFT, WMSZ_BOTTOMRIGHT, WMSZ_LEFT, WMSZ_RIGHT, WMSZ_TOP, WMSZ_TOPLEFT, WMSZ_TOPRIGHT, WM_ACTIVATE, WM_ACTIVATEAPP, WM_APPCOMMAND, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_CONTEXTMENU, WM_CREATE, WM_DESTROY, WM_DWMNCRENDERINGCHANGED, WM_ENABLE, WM_ENTERIDLE, WM_ENTERMENULOOP, WM_ENTERSIZEMOVE, WM_ERASEBKGND, WM_EXITMENULOOP, WM_EXITSIZEMOVE, WM_GETICON, WM_GETMINMAXINFO, WM_GETOBJECT, WM_IME_CONTROL, WM_IME_NOTIFY, WM_IME_REQUEST, WM_IME_SETCONTEXT, WM_INITMENU, WM_INPUTLANGCHANGE, WM_INPUTLANGCHANGEREQUEST, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDBLCLK, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MENUSELECT, WM_MOUSEACTIVATE, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_MOVE, WM_MOVING, WM_NCACTIVATE, WM_NCCALCSIZE, WM_NCCREATE, WM_NCDESTROY, WM_NCHITTEST, WM_NCLBUTTONDBLCLK, WM_NCLBUTTONDOWN, WM_NCLBUTTONUP, WM_NCMBUTTONDBLCLK, WM_NCMBUTTONDOWN, WM_NCMBUTTONUP, WM_NCMOUSEHOVER, WM_NCMOUSELEAVE, WM_NCMOUSEMOVE, WM_NCPAINT, WM_NCRBUTTONDBLCLK, WM_NCRBUTTONDOWN, WM_NCRBUTTONUP, WM_NCXBUTTONDBLCLK, WM_NCXBUTTONDOWN, WM_NCXBUTTONUP, WM_PAINT, WM_QUERYOPEN, WM_QUIT, WM_RBUTTONDBLCLK, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_SHOWWINDOW, WM_SIZE, WM_SIZING, WM_STYLECHANGED, WM_STYLECHANGING, WM_SYSCOMMAND, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_THEMECHANGED, WM_USERCHANGED, WM_WINDOWPOSCHANGED, WM_WINDOWPOSCHANGING, WM_XBUTTONDBLCLK, WM_XBUTTONDOWN, WM_XBUTTONUP};
+use crate::platform::platform_impl::message::WindowMessage;
+use crate::platform::windows::message::{MouseMessage, RawMessage};
 use crate::platform::windows::types::SystemCommand;
+use crate::window::EventLoopState;
 
 pub mod window;
 mod message;
@@ -51,36 +54,54 @@ enum HandleResult {
     Custom(LRESULT)
 }
 
-fn handle_message_inner(msg: RawMessage) -> HandleResult {
+fn handle_message_inner(msg: RawMessage, state: &EventLoopState) -> HandleResult {
     match msg {
-        RawMessage::Create {
-            createstruct
-        } => {
-            let Some(createstruct) = (unsafe {createstruct.as_mut()}) else {
-                panic!("CREATESTRUCT address is null!");
-            };
-
-            let init_data_ptr = createstruct.lpCreateParams as *mut window::InitData;
-            let Some(init_data) = (unsafe{init_data_ptr.as_mut()}) else {
-                panic!("INIT_DATA address is null!");
-            };
-
-            HandleResult::Default
-        },
-        RawMessage::Close => {
-            info!("Close requested! ignoring...");
-            HandleResult::Handled
-        }
-        RawMessage::SystemCommand(sc, (x, y)) => {
-            if sc == SystemCommand::KeyMenu {
+        RawMessage::WindowMessage(win) => match win {
+            WindowMessage::Create {
+                createstruct
+            } => {
+                state.increment_win_cnt();
+                HandleResult::Default
+            },
+            WindowMessage::Destroy => {
+                info!("Window message: {:?}", win);
+                if state.decrement_win_cnt() {
+                    // should exit
+                    unsafe { PostQuitMessage(0); }
+                }
                 HandleResult::Handled
             }
-            else {
-                info!("Got {:?} at ({}, {})", sc, x, y);
+            
+            
+            WindowMessage::SystemCommand(sc, (x, y)) => {
+                info!("Window message: {:?}", win);
+                if sc == SystemCommand::KeyMenu {
+                    HandleResult::Handled
+                } else {
+                    HandleResult::Default
+                }
+            }
+            _ => {
+                info!("Window message: {:?}", win);
+                HandleResult::Default
+            }
+        },
+        RawMessage::MouseMessage(mouse) => match mouse {
+            MouseMessage::MouseMove(..) => {
+                // don't print them
+                HandleResult::Default
+            }
+            m => {
+                info!("Mouse: {:?}", m);
                 HandleResult::Default
             }
         }
-        _ => HandleResult::Default
+        RawMessage::KeyboardMessage(keyboard) => match keyboard {
+            m => {
+                info!("Keyboard: {:?}", m);
+                HandleResult::Default
+            }
+        }
     }
 }
 
@@ -110,7 +131,24 @@ unsafe extern "system" fn public_window_callback(
         return unsafe { DefWindowProcW(window, raw_msg, wparam, lparam) };
     };
 
-    let res =  handle_message_inner(msg);
+    let app_state = if let RawMessage::WindowMessage(WindowMessage::Create {
+            createstruct
+        }) = msg {
+        let Some(createstruct) = (unsafe {createstruct.as_mut()}) else {
+            panic!("CREATESTRUCT address is null!");
+        };
+
+        let init_data_ptr = createstruct.lpCreateParams as *mut window::InitData;
+        let Some(init_data) = (unsafe{init_data_ptr.as_mut()}) else {
+            panic!("INIT_DATA address is null!");
+        };
+        let state = init_data.create_state();
+        SetWindowLongPtrW(window, GWL_USERDATA, Box::into_raw(state) as isize);
+    };
+
+    let state = GetWindowLongPtrW(window, GWL_USERDATA) as *const EventLoopState;
+    let state = unsafe {&*state};
+    let res =  handle_message_inner(msg, state);
 
     match res {
         HandleResult::Handled => {
