@@ -1,9 +1,10 @@
-use std::fmt::{Debug, Formatter};
+use std::fmt;
+use std::fmt::Debug;
 use bitflags::bitflags;
+use windows_sys::Win32::Foundation;
 use windows_sys::Win32::Foundation::{LPARAM, RECT, WPARAM};
 use windows_sys::Win32::System::SystemServices::*;
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
-use crate::window::Window;
 
 #[derive(Debug, PartialEq, Copy, Clone)]
 pub enum MonitorPower {
@@ -455,7 +456,7 @@ impl<'a> WindowPosChangingGuard<'a> {
 }
 
 impl<'a> Debug for WindowPosChangingGuard<'a> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("WindowPosChangingGuard")
             .field("x", &self.inner.x)
             .field("y", &self.inner.y)
@@ -525,4 +526,249 @@ impl<'a> std::fmt::Debug for CreateStructGuard<'a> {
             .field("style", &format_args!("{:#x}", self.cs.style))
             .finish()
     }
+}
+
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct POINT {
+    pub x: i32,
+    pub y: i32,
+}
+pub struct MinMaxInfoGuard<'a> {
+    pub info: &'a mut MINMAXINFO,
+}
+
+impl<'a> MinMaxInfoGuard<'a> {
+    pub unsafe fn from_lparam(lparam: isize) -> Self {
+        Self {
+            info: &mut *(lparam as *mut MINMAXINFO),
+        }
+    }
+
+    pub fn set_min_track_size(&mut self, width: i32, height: i32) {
+        self.info.ptMinTrackSize.x = width;
+        self.info.ptMinTrackSize.y = height;
+    }
+
+    pub fn set_max_track_size(&mut self, width: i32, height: i32) {
+        self.info.ptMaxTrackSize.x = width;
+        self.info.ptMaxTrackSize.y = height;
+    }
+}
+
+struct PointDebug<'a>(&'a Foundation::POINT);
+impl<'a> Debug for PointDebug<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "({}, {})", self.0.x, self.0.y)
+    }
+}
+impl<'a> Debug for MinMaxInfoGuard<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("MinMaxInfoGuard")
+            .field("max_size", &PointDebug(&self.info.ptMaxSize))
+            .field("max_position", &PointDebug(&self.info.ptMaxPosition))
+            .field("min_track_size", &PointDebug(&self.info.ptMinTrackSize))
+            .field("max_track_size", &PointDebug(&self.info.ptMaxTrackSize))
+            .finish()
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, Copy, Clone)]
+pub enum WindowStatus {
+    ParentClosing,
+    OtherZoom,
+    ParentOpening,
+    OtherUnzoom,
+}
+
+impl WindowStatus {
+    pub fn from_lparam(lparam: LPARAM) -> Self {
+        match lparam as u32 {
+            SW_PARENTCLOSING => WindowStatus::ParentClosing,
+            SW_OTHERZOOM => WindowStatus::OtherZoom,
+            SW_PARENTOPENING => WindowStatus::ParentOpening,
+            SW_OTHERUNZOOM => WindowStatus::OtherUnzoom,
+            _ => WindowStatus::OtherZoom,
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, Copy, Clone)]
+pub enum StyleKind {
+    Style,
+    ExStyle
+}
+
+impl StyleKind {
+    pub fn from_wparam(wparam: WPARAM) -> Self {
+        match wparam as i32 {
+            GWL_STYLE => StyleKind::Style,
+            GWL_EXSTYLE => StyleKind::ExStyle,
+            _ => StyleKind::Style,
+        }
+    }
+}
+
+bitflags! {
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    pub struct WindowStyle: u32 {
+        const OVERLAPPED       = WS_OVERLAPPED;
+        const POPUP            = WS_POPUP;
+        const CHILD            = WS_CHILD;
+        const MINIMIZE         = WS_MINIMIZE;
+        const VISIBLE          = WS_VISIBLE;
+        const DISABLED         = WS_DISABLED;
+        const CLIP_SIBLINGS    = WS_CLIPSIBLINGS;
+        const CLIP_CHILDREN    = WS_CLIPCHILDREN;
+        const MAXIMIZE         = WS_MAXIMIZE;
+        const CAPTION          = WS_CAPTION; // BORDER | DLGFRAME
+        const BORDER           = WS_BORDER;
+        const DLG_FRAME        = WS_DLGFRAME;
+        const VSCROLL          = WS_VSCROLL;
+        const HSCROLL          = WS_HSCROLL;
+        const SYSMENU          = WS_SYSMENU;
+        const THICK_FRAME      = WS_THICKFRAME;
+        const GROUP            = WS_GROUP;
+        const TAB_STOP         = WS_TABSTOP;
+        const MINIMIZE_BOX     = WS_MINIMIZEBOX;
+        const MAXIMIZE_BOX     = WS_MAXIMIZEBOX;
+        const TILED            = WS_TILED;
+        const ICONIC           = WS_ICONIC;
+        const SIZE_BOX         = WS_SIZEBOX;
+
+        const ACTIVE_CAPTION    = WS_ACTIVECAPTION;
+    }
+}
+
+bitflags! {
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    pub struct WindowExStyle: u32 {
+        const DLG_MODAL_FRAME       = WS_EX_DLGMODALFRAME;
+        const NO_PARENT_NOTIFY      = WS_EX_NOPARENTNOTIFY;
+        const TOPMOST               = WS_EX_TOPMOST;
+        const ACCEPT_FILES          = WS_EX_ACCEPTFILES;
+        const TRANSPARENT           = WS_EX_TRANSPARENT;
+        const MDI_CHILD             = WS_EX_MDICHILD;
+        const TOOL_WINDOW           = WS_EX_TOOLWINDOW;
+        const WINDOW_EDGE           = WS_EX_WINDOWEDGE;
+        const CLIENT_EDGE           = WS_EX_CLIENTEDGE;
+        const CONTEXT_HELP          = WS_EX_CONTEXTHELP;
+        const RIGHT                 = WS_EX_RIGHT;
+        const LEFT                  = WS_EX_LEFT;
+        const RTL_READING           = WS_EX_RTLREADING;
+        const LTR_READING           = WS_EX_LTRREADING;
+        const LEFTSCROLLBAR         = WS_EX_LEFTSCROLLBAR;
+        const RIGHTSCROLLBAR        = WS_EX_RIGHTSCROLLBAR;
+        const CONTROL_PARENT        = WS_EX_CONTROLPARENT;
+        const STATIC_EDGE           = WS_EX_STATICEDGE;
+        const APP_WINDOW            = WS_EX_APPWINDOW;
+        const LAYERED               = WS_EX_LAYERED;
+        const NO_INHERIT_LAYOUT     = WS_EX_NOINHERITLAYOUT;
+        const LAYOUT_RTL            = WS_EX_LAYOUTRTL;
+        const COMPOSITED            = WS_EX_COMPOSITED;
+        const NO_ACTIVATE           = WS_EX_NOACTIVATE;
+        const NO_REDIRECTION_BITMAP = WS_EX_NOREDIRECTIONBITMAP;
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum Style {
+    Style(WindowStyle),
+    ExStyle(WindowExStyle),
+}
+
+impl Style {
+    pub fn from_params(wparam: WPARAM, lparam: LPARAM) -> Self {
+        match StyleKind::from_wparam(wparam) {
+            StyleKind::Style => {
+                Self::Style(WindowStyle::from_bits_truncate(lparam as u32))
+            }
+            StyleKind::ExStyle => {
+                Self::ExStyle(WindowExStyle::from_bits_truncate(lparam as u32))
+            }
+        }
+    }
+}
+
+pub struct StyleStructGuard<'a> {
+    pub inner: &'a mut STYLESTRUCT,
+    pub style_kind: StyleKind,
+}
+
+impl<'a> StyleStructGuard<'a> {
+    pub unsafe fn from_params(wparam: WPARAM, lparam: LPARAM) -> Self {
+        Self {
+            inner: &mut *(lparam as *mut STYLESTRUCT),
+            style_kind: StyleKind::from_wparam(wparam),
+        }
+    }
+
+    pub fn set_new_style(&mut self, style: u32) {
+        self.inner.styleNew = style;
+    }
+}
+
+impl<'a> std::fmt::Debug for StyleStructGuard<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut ds = f.debug_struct("StyleStructGuard");
+
+        match self.style_kind {
+            StyleKind::Style => {
+                ds.field("old", &WindowStyle::from_bits_truncate(self.inner.styleOld))
+                    .field("new", &WindowStyle::from_bits_truncate(self.inner.styleNew));
+            }
+            StyleKind::ExStyle => {
+                ds.field("old", &WindowExStyle::from_bits_truncate(self.inner.styleOld))
+                    .field("new", &WindowExStyle::from_bits_truncate(self.inner.styleNew));
+            }
+        }
+
+        ds.finish()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeystrokeFlags {
+    pub repeat_count: u16,
+    pub scan_code: u8,
+    pub is_extended: bool,
+    pub context_code: bool,
+    pub previous_state: bool,
+    pub transition_state: bool,
+}
+
+impl KeystrokeFlags {
+    pub fn from_lparam(lparam: isize) -> Self {
+        let lp = lparam as u32;
+
+        Self {
+            repeat_count: (lp & 0xFFFF) as u16,
+            scan_code: ((lp >> 16) & 0xFF) as u8,
+            is_extended: (lp & (1 << 24)) != 0,
+            context_code: (lp & (1 << 29)) != 0,
+            previous_state: (lp & (1 << 30)) != 0,
+            transition_state: (lp & (1 << 31)) != 0,
+        }
+    }
+
+    pub fn is_autorepeat(&self) -> bool {
+        self.previous_state && !self.transition_state
+    }
+
+    pub fn event_type(&self) -> KeyEventType {
+        if self.transition_state {
+            KeyEventType::Release
+        } else if self.previous_state {
+            KeyEventType::Repeat
+        } else {
+            KeyEventType::Press
+        }
+    }
+}
+#[derive(Debug, PartialEq)]
+pub enum KeyEventType {
+    Press,
+    Repeat,
+    Release,
 }

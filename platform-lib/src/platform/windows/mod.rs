@@ -1,4 +1,6 @@
 use std::{mem, ptr, thread};
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use drop_guard::guard;
@@ -9,7 +11,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{DefWindowProcW, DispatchMessag
 use crate::platform::platform_impl::message::WindowMessage;
 use crate::platform::windows::message::{MouseMessage, RawMessage};
 use crate::platform::windows::types::SystemCommand;
-use crate::window::EventLoopState;
+use crate::window::WindowState;
 
 pub mod window;
 mod message;
@@ -54,14 +56,11 @@ enum HandleResult {
 }
 
 static CREATED_WINDOWS: AtomicUsize = AtomicUsize::new(0);
-fn handle_message_inner(window: HWND, msg: RawMessage, state: &EventLoopState) -> HandleResult {
+fn handle_message_inner(window: HWND, msg: RawMessage, state: &WindowState) -> HandleResult {
     match msg {
         RawMessage::WindowMessage(win) => match win {
-            WindowMessage::Create {
-                createstruct
-            } => {
+            WindowMessage::NcCreate { .. } => {
                 CREATED_WINDOWS.fetch_add(1, Ordering::Relaxed);
-                info!("\t\tINCREMENTED {:x}", state as *const EventLoopState as usize);
                 HandleResult::Default
             },
             WindowMessage::Destroy => {
@@ -71,8 +70,7 @@ fn handle_message_inner(window: HWND, msg: RawMessage, state: &EventLoopState) -
                     // should exit
                     unsafe { PostQuitMessage(0); }
                 }
-                info!("\t\tDECREMENTED{:x}", state as *const EventLoopState as usize);
-                HandleResult::Handled
+                HandleResult::Default
             }
             
             
@@ -94,7 +92,7 @@ fn handle_message_inner(window: HWND, msg: RawMessage, state: &EventLoopState) -
             }
         },
         RawMessage::MouseMessage(mouse) => match mouse {
-            MouseMessage::MouseMove(..) | MouseMessage::NCMouseMove(..) => {
+            MouseMessage::MouseMove(..) | MouseMessage::NCMouseMove(..) | MouseMessage::NcHitTest(_, _)=> {
                 // don't print them
                 HandleResult::Default
             }
@@ -110,6 +108,51 @@ fn handle_message_inner(window: HWND, msg: RawMessage, state: &EventLoopState) -
             }
         }
     }
+}
+
+#[derive(Default)]
+struct EventLoopWindowLocal {
+    last_surrogate: u16
+}
+struct EventLoopData {
+    windows: HashMap<HWND, EventLoopWindowLocal>,
+}
+
+impl EventLoopData {
+    fn new() -> EventLoopData {
+        EventLoopData {
+            windows: HashMap::new()
+        }
+    }
+
+    pub fn push_u16_char(&mut self, hwnd: HWND, unit: u16) -> Option<char> {
+        let state = self.windows.entry(hwnd).or_insert_with(Default::default);
+
+        match (state.last_surrogate, unit) {
+            (0, u) if (0xD800..=0xDBFF).contains(&u) => {
+                state.last_surrogate = u;
+                None
+            }
+            (high, low) if (0xDC00..=0xDFFF).contains(&low) && high != 0 => {
+                state.last_surrogate = 0;
+                char::decode_utf16([high, low]).next()?.ok()
+            }
+            (_, u) => {
+                state.last_surrogate = 0;
+                char::decode_utf16([u]).next()?.ok()
+            }
+        }
+    }
+    fn add_window(&mut self, window: HWND) {
+        self.windows.insert(window, Default::default());
+    }
+    fn remove_window(&mut self, window: HWND) {
+        self.windows.remove(&window);
+    }
+}
+
+thread_local! {
+    static EVENT_LOOP_DATA: RefCell<EventLoopData> = RefCell::new(EventLoopData::new());
 }
 
 static DEPTH: AtomicUsize = AtomicUsize::new(0);
@@ -133,31 +176,43 @@ unsafe extern "system" fn public_window_callback(
     }
     HANDLED.fetch_add(1, Ordering::Relaxed);
 
-    let Some(msg) = (unsafe {RawMessage::try_parse(raw_msg, wparam, lparam)}) else {
+    let msg = EVENT_LOOP_DATA.with_borrow_mut(|event_loop_data| {
+        unsafe {RawMessage::try_parse(raw_msg, wparam, lparam, window, event_loop_data)}
+    });
+    
+    let Some(msg) = msg else {
         warn!("unknown message {:?}", raw_msg);
         let g = range_event_start!("UNKNOW");
         return unsafe { DefWindowProcW(window, raw_msg, wparam, lparam) };
     };
 
-    if let RawMessage::WindowMessage(WindowMessage::Create { createstruct }) = &msg {
+    if let RawMessage::WindowMessage(WindowMessage::NcCreate { createstruct }) = &msg {
+        EVENT_LOOP_DATA.with_borrow_mut(|data| {
+            data.add_window(window);
+        });
         let init_data_ptr = createstruct.cs.lpCreateParams as *mut window::InitData;
         let Some(init_data) = (unsafe{init_data_ptr.as_mut()}) else {
             panic!("INIT_DATA address is null!");
         };
         let state = init_data.create_state();
         unsafe { SetWindowLongPtrW(window, GWL_USERDATA, Box::into_raw(state) as isize) };
+    }
+
+    if let RawMessage::WindowMessage(WindowMessage::NcDestroy) = &msg {
+        EVENT_LOOP_DATA.with_borrow_mut(|data| {
+            data.remove_window(window);
+        });
+    }
+
+    let state = unsafe { GetWindowLongPtrW(window, GWL_USERDATA) } as *const WindowState;
+    let res = if state.is_null() {
+        warn!("WindowState not yet initialized! Message: {:?}. Running default handler", &msg);
+        HandleResult::Default
+    }
+    else {
+        let state = unsafe {&*state};
+        handle_message_inner(window, msg, state)
     };
-
-    if let RawMessage::WindowMessage(WindowMessage::NcCreate{..}) = &msg {
-        return unsafe { DefWindowProcW(window, raw_msg, wparam, lparam) };
-    }
-
-    let state = unsafe { GetWindowLongPtrW(window, GWL_USERDATA) } as *const EventLoopState;
-    if state.is_null() {
-        panic!("GetWindowLongPtrW returned null!");
-    }
-    let state = unsafe {&*state};
-    let res =  handle_message_inner(window, msg, state);
 
     match res {
         HandleResult::Handled => {

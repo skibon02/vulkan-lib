@@ -1,8 +1,8 @@
 use log::{info, warn};
 use sparkles::instant_event;
-use windows_sys::Win32::Foundation::{LPARAM, RECT, WPARAM};
+use windows_sys::Win32::Foundation::{HWND, LPARAM, RECT, WPARAM};
 use windows_sys::Win32::UI::WindowsAndMessaging::{*};
-use crate::platform::windows::types::{Activate, CreateStructGuard, HitTest, Icon, KeyStateFlags, NcCalcSize, RectGuard, Size, SizeEdge, SystemCommand, WindowPos, WindowPosChangingGuard};
+use crate::platform::windows::types::{Activate, CreateStructGuard, HitTest, Icon, KeyStateFlags, KeystrokeFlags, MinMaxInfoGuard, NcCalcSize, RectGuard, Size, SizeEdge, Style, StyleKind, StyleStructGuard, SystemCommand, WindowPos, WindowPosChangingGuard, WindowStatus};
 
 #[derive(Debug)]
 pub enum MouseMessage {
@@ -21,10 +21,16 @@ pub enum KeyboardMessage {
         is_minimized: bool
     },
     KeyUp {
-        vk: u32
+        vk: u32,
+        flags: KeystrokeFlags,
     },
     KeyDown {
-        vk: u32
+        vk: u32,
+        flags: KeystrokeFlags,
+    },
+    Char {
+        code: Option<char>,
+        flags: KeystrokeFlags,
     },
     AppCommand(AppCommandInfo)
 }
@@ -38,7 +44,9 @@ pub enum RawInputMessage {
 
 #[derive(Debug)]
 pub enum WindowMessage<'a> {
-    NcCreate,
+    NcCreate {
+        createstruct: CreateStructGuard<'a>,
+    },
     Create {
         createstruct: CreateStructGuard<'a>,
     },
@@ -54,6 +62,12 @@ pub enum WindowMessage<'a> {
     ExitSizeMove,
     WindowPosChanged(WindowPos),
     WindowPosChanging(WindowPosChangingGuard<'a>),
+    GetMinMaxInfo(MinMaxInfoGuard<'a>),
+    InputLangChange,
+    InputLangChangeRequest,
+    ShowWindow(bool, WindowStatus),
+    StyleChanging(StyleStructGuard<'a>),
+    StyleChanged(Style),
 
     /// active
     ActivateApp{
@@ -77,6 +91,7 @@ pub enum WindowMessage<'a> {
     NcPaint,
     /// Should return non-zero if application erases the background
     EraseBkgnd,
+    UserChanged,
     Quit(usize),
 }
 
@@ -85,6 +100,7 @@ use KeyboardMessage::*;
 use MouseMessage::*;
 use RawInputMessage::*;
 use crate::platform::platform_impl::types::AppCommandInfo;
+use crate::platform::windows::EventLoopData;
 
 #[derive(Debug)]
 pub enum RawMessage<'a> {
@@ -94,9 +110,11 @@ pub enum RawMessage<'a> {
 }
 
 impl<'a> RawMessage<'a> {
-    pub unsafe fn try_parse(msg: u32, wparam: WPARAM, lparam: LPARAM) -> Option<RawMessage<'a>> {
+    pub unsafe fn try_parse(msg: u32, wparam: WPARAM, lparam: LPARAM, window: HWND, event_loop_data: &mut EventLoopData) -> Option<RawMessage<'a>> {
         match msg {
-            WM_NCCREATE => Some(RawMessage::WindowMessage(NcCreate)),
+            WM_NCCREATE => Some(RawMessage::WindowMessage(NcCreate{
+                createstruct: unsafe { CreateStructGuard::from_lparam(lparam) },
+            })),
             WM_CREATE => Some(RawMessage::WindowMessage(Create{
                 createstruct: unsafe { CreateStructGuard::from_lparam(lparam) },
             })),
@@ -181,57 +199,40 @@ impl<'a> RawMessage<'a> {
             WM_WINDOWPOSCHANGING => {
                 Some(RawMessage::WindowMessage(WindowPosChanging(unsafe { WindowPosChangingGuard::from_lparam(lparam) })))
             }
-            WM_GETMINMAXINFO => {
-                instant_event!("WM_GETMINMAXINFO");
-                None
-            }
-            WM_INPUTLANGCHANGE => {
-                instant_event!("WM_INPUTLANGCHANGE");
-                None
-            }
-            WM_INPUTLANGCHANGEREQUEST => {
-                instant_event!("WM_INPUTLANGCHANGEREQUEST");
-                None
-            }
-            WM_SHOWWINDOW => {
-                instant_event!("WM_SHOWWINDOW");
-                None
-            }
-            WM_STYLECHANGING => {
-                instant_event!("WM_STYLECHANGING");
-                None
-            }
-            WM_STYLECHANGED => {
-                instant_event!("WM_STYLECHANGED");
-                None
-            }
-            WM_THEMECHANGED => {
-                instant_event!("WM_THEMECHANGED");
-                None
-            }
-            WM_USERCHANGED => {
-                instant_event!("WM_USERCHANGED");
-                None
-            }
+            WM_GETMINMAXINFO => Some(RawMessage::WindowMessage(GetMinMaxInfo(unsafe {MinMaxInfoGuard::from_lparam(lparam)}))),
+            WM_INPUTLANGCHANGE => Some(RawMessage::WindowMessage(InputLangChange)),
+            WM_INPUTLANGCHANGEREQUEST => Some(RawMessage::WindowMessage(InputLangChangeRequest)),
+            WM_SHOWWINDOW => Some(RawMessage::WindowMessage(WindowMessage::ShowWindow(wparam != 0, WindowStatus::from_lparam(lparam)))),
+            WM_STYLECHANGING => Some(RawMessage::WindowMessage(StyleChanging(unsafe { StyleStructGuard::from_params(wparam, lparam) }))),
+            WM_STYLECHANGED => Some(RawMessage::WindowMessage(StyleChanged(Style::from_params(wparam, lparam)))),
+            WM_USERCHANGED => Some(RawMessage::WindowMessage(UserChanged)),
 
 
             // Keyboard messages
             WM_KEYUP => Some(RawMessage::KeyboardMessage(KeyUp {
-                vk: wparam as u32
+                vk: wparam as u32,
+                flags: KeystrokeFlags::from_lparam(lparam)
+            })),
+            WM_KEYDOWN => Some(RawMessage::KeyboardMessage(KeyDown {
+                vk: wparam as u32,
+                flags: KeystrokeFlags::from_lparam(lparam)
             })),
             WM_ACTIVATE => {
                 let active = Activate::from_wparam(wparam & 0xFFFF);
                 let is_minimized = (wparam >> 16) != 0;
                 Some(RawMessage::KeyboardMessage(KeyboardMessage::Activate{active, is_minimized}))
             }
-            WM_KEYDOWN => Some(RawMessage::KeyboardMessage(KeyDown {
-                vk: wparam as u32
-            })),
             WM_APPCOMMAND => {
                 // wparam, lparam
                 let info = AppCommandInfo::from_lparam(lparam);
                 Some(RawMessage::KeyboardMessage(AppCommand(info)))
             }
+            WM_CHAR => {
+                Some(RawMessage::KeyboardMessage(Char {
+                    code: event_loop_data.push_u16_char(window, wparam as u16),
+                    flags: KeystrokeFlags::from_lparam(lparam)
+                }))
+            },
 
             // Mouse messages
             WM_NCMOUSEMOVE => {
@@ -305,10 +306,6 @@ impl<'a> RawMessage<'a> {
             }
             WM_SYSKEYUP => {
                 instant_event!("WM_SYSKEYUP");
-                None
-            }
-            WM_CHAR => {
-                instant_event!("WM_CHAR");
                 None
             }
             WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN | WM_XBUTTONDOWN => {

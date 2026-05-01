@@ -13,6 +13,6 @@ fn main() {
 
     let g = sparkles::range_event_start!("The whole program");
     let win = Window::new();
-    let win2 = Window::new();
+    // let win2 = Window::new();
     run_platform_loop();
 }

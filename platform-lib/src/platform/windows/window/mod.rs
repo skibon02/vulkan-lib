@@ -19,18 +19,18 @@ pub struct InitData {
 }
 
 impl InitData {
-    pub fn create_state(&mut self) -> Box<EventLoopState> {
+    pub fn create_state(&mut self) -> Box<WindowState> {
         Box::new(
-            EventLoopState::new()
+            WindowState::new()
         )
     }
 }
-pub struct EventLoopState {
+pub struct WindowState {
 }
 
-impl EventLoopState {
-    fn new() -> EventLoopState {
-        EventLoopState {
+impl WindowState {
+    fn new() -> WindowState {
+        WindowState {
         }
     }
 }
