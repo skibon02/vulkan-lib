@@ -2,7 +2,7 @@ use std::fmt;
 use std::fmt::Debug;
 use bitflags::bitflags;
 use windows_sys::Win32::Foundation;
-use windows_sys::Win32::Foundation::{LPARAM, RECT, WPARAM};
+use windows_sys::Win32::Foundation::{LPARAM, LRESULT, RECT, WPARAM};
 use windows_sys::Win32::System::SystemServices::*;
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
@@ -234,10 +234,10 @@ impl Icon {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
-pub enum NcCalcSize {
+#[derive(Debug)]
+pub enum NcCalcSize<'a> {
     CalcsizeParams(*mut NCCALCSIZE_PARAMS),
-    Rect(*mut RECT),
+    Rect(RectGuard<'a>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -771,4 +771,52 @@ pub enum KeyEventType {
     Press,
     Repeat,
     Release,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum MouseButton {
+    Left,
+    Middle,
+    Right,
+    X,
+}
+
+impl MouseButton {
+    pub fn from_msg(msg: u16) -> Self {
+        match msg as u32 {
+            WM_LBUTTONDOWN => MouseButton::Left,
+            WM_NCLBUTTONDOWN => MouseButton::Left,
+            WM_MBUTTONDOWN => MouseButton::Middle,
+            WM_NCMBUTTONDOWN => MouseButton::Right,
+            WM_RBUTTONDOWN => MouseButton::Right,
+            WM_NCRBUTTONDOWN => MouseButton::Right,
+            WM_XBUTTONDOWN => MouseButton::X,
+            WM_NCXBUTTONDOWN => MouseButton::X,
+            _ => MouseButton::Left
+        }
+    }
+}
+
+#[derive(Debug, Copy, Clone)]
+pub struct MouseActivateResult {
+    activate: bool,
+    eat: bool
+}
+impl MouseActivateResult {
+    pub fn new() -> Self {
+        Self {
+            activate: true,
+            eat: false
+        }
+    }
+
+    pub fn as_num(&self) -> LRESULT {
+        let res = match (self.activate, self.eat) {
+            (false, false) => MA_NOACTIVATE,
+            (false, true) => MA_NOACTIVATEANDEAT,
+            (true, false) => MA_ACTIVATE,
+            (true, true) => MA_ACTIVATEANDEAT,
+        };
+        res as LRESULT
+    }
 }

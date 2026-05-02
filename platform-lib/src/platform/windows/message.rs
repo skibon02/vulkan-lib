@@ -2,45 +2,9 @@ use log::{info, warn};
 use sparkles::instant_event;
 use windows_sys::Win32::Foundation::{HWND, LPARAM, RECT, WPARAM};
 use windows_sys::Win32::UI::WindowsAndMessaging::{*};
-use crate::platform::windows::types::{Activate, CreateStructGuard, HitTest, Icon, KeyStateFlags, KeystrokeFlags, MinMaxInfoGuard, NcCalcSize, RectGuard, Size, SizeEdge, Style, StyleKind, StyleStructGuard, SystemCommand, WindowPos, WindowPosChangingGuard, WindowStatus};
+use crate::platform::windows::types::{Activate, AppCommandInfo, CreateStructGuard, HitTest, Icon, KeyStateFlags, KeystrokeFlags, MinMaxInfoGuard, MouseButton, NcCalcSize, RectGuard, Size, SizeEdge, Style, StyleStructGuard, SystemCommand, WindowPos, WindowPosChangingGuard, WindowStatus};
+use crate::platform::windows::EventLoopData;
 
-#[derive(Debug)]
-pub enum MouseMessage {
-    NcHitTest(i16, i16),
-    NCMouseMove(i16, i16, HitTest),
-    MouseMove(i16, i16, KeyStateFlags),
-    NcMouseHover(i16, i16, HitTest),
-    NcMouseLeave,
-    CaptureChanged,
-}
-
-#[derive(Debug)]
-pub enum KeyboardMessage {
-    Activate {
-        active: Activate,
-        is_minimized: bool
-    },
-    KeyUp {
-        vk: u32,
-        flags: KeystrokeFlags,
-    },
-    KeyDown {
-        vk: u32,
-        flags: KeystrokeFlags,
-    },
-    Char {
-        code: Option<char>,
-        flags: KeystrokeFlags,
-    },
-    AppCommand(AppCommandInfo)
-}
-
-
-#[derive(Debug)]
-pub enum RawInputMessage {
-    Input,
-    InputDeviceChange
-}
 
 #[derive(Debug)]
 pub enum WindowMessage<'a> {
@@ -78,7 +42,7 @@ pub enum WindowMessage<'a> {
         active: bool,
         nc_repaint: bool,
     },
-    NcCalcSize(NcCalcSize),
+    NcCalcSize(NcCalcSize<'a>),
 
     Enable(bool),
     Close,
@@ -93,20 +57,82 @@ pub enum WindowMessage<'a> {
     EraseBkgnd,
     UserChanged,
     Quit(usize),
+
+    DwmNcRenderingChanged,
+    DwmColorizationColorChanged(u8, u8, u8, u8, bool),
+}
+
+#[derive(Debug)]
+pub enum KeyboardMessage {
+    Activate {
+        active: Activate,
+        is_minimized: bool
+    },
+    KeyUp {
+        vk: u32,
+        flags: KeystrokeFlags,
+    },
+    KeyDown {
+        vk: u32,
+        flags: KeystrokeFlags,
+    },
+    Char {
+        code: Option<char>,
+        flags: KeystrokeFlags,
+    },
+    AppCommand(AppCommandInfo)
+}
+
+#[derive(Debug)]
+pub enum MouseMessage {
+    ButtonDown(MouseButton, i16, i16, KeyStateFlags),
+    ButtonUp(MouseButton, i16, i16, KeyStateFlags),
+    ButtonDoubleClk(MouseButton, i16, i16, KeyStateFlags),
+    NcHitTest(i16, i16),
+    MouseMove(i16, i16, KeyStateFlags),
+    NcMouseHover(i16, i16, HitTest),
+    NcMouseLeave,
+    CaptureChanged,
+    MouseWheel(i16, i16, i16, KeyStateFlags),
+    /// Return value: MouseActivateResult::as_num
+    MouseActivate(MouseButton),
+
+    NcButtonDown(MouseButton, i16, i16, KeyStateFlags),
+    NcButtonUp(MouseButton, i16, i16, KeyStateFlags),
+    NcButtonDoubleClk(MouseButton, i16, i16, KeyStateFlags),
+    NcMouseMove(i16, i16, HitTest),
+}
+
+#[derive(Debug)]
+pub enum RawInputMessage {
+    Input,
+    InputDeviceChange
+}
+
+#[derive(Debug)]
+pub enum ImeMessage {
+    SetContext,
+    Select,
+    Request,
+    Notify,
+    KeyUp,
+    KeyDown,
+    Control,
 }
 
 use WindowMessage::*;
 use KeyboardMessage::*;
 use MouseMessage::*;
 use RawInputMessage::*;
-use crate::platform::platform_impl::types::AppCommandInfo;
-use crate::platform::windows::EventLoopData;
+use ImeMessage::*;
 
 #[derive(Debug)]
 pub enum RawMessage<'a> {
     WindowMessage(WindowMessage<'a>),
     KeyboardMessage(KeyboardMessage),
     MouseMessage(MouseMessage),
+    RawInputMessage(RawInputMessage),
+    ImeMessage(ImeMessage),
 }
 
 impl<'a> RawMessage<'a> {
@@ -185,7 +211,7 @@ impl<'a> RawMessage<'a> {
                     NcCalcSize::CalcsizeParams(lparam as *mut NCCALCSIZE_PARAMS)
                 }
                 else {
-                    NcCalcSize::Rect(lparam as *mut RECT)
+                    NcCalcSize::Rect(RectGuard::from_lparam(lparam))
                 };
 
                 Some(RawMessage::WindowMessage(WindowMessage::NcCalcSize(res)))
@@ -206,14 +232,23 @@ impl<'a> RawMessage<'a> {
             WM_STYLECHANGING => Some(RawMessage::WindowMessage(StyleChanging(unsafe { StyleStructGuard::from_params(wparam, lparam) }))),
             WM_STYLECHANGED => Some(RawMessage::WindowMessage(StyleChanged(Style::from_params(wparam, lparam)))),
             WM_USERCHANGED => Some(RawMessage::WindowMessage(UserChanged)),
+            WM_DWMNCRENDERINGCHANGED => Some(RawMessage::WindowMessage(DwmNcRenderingChanged)),
+            WM_DWMCOLORIZATIONCOLORCHANGED => {
+                let b = wparam as u8;
+                let g = (wparam >> 8) as u8;
+                let r = (wparam >> 16) as u8;
+                let a = (wparam >> 24) as u8;
+                let blended = lparam != 0;
+                Some(RawMessage::WindowMessage(DwmColorizationColorChanged(r,g,b,a,blended)))
+            },
 
 
             // Keyboard messages
-            WM_KEYUP => Some(RawMessage::KeyboardMessage(KeyUp {
+            WM_KEYUP | WM_SYSKEYUP => Some(RawMessage::KeyboardMessage(KeyboardMessage::KeyUp {
                 vk: wparam as u32,
                 flags: KeystrokeFlags::from_lparam(lparam)
             })),
-            WM_KEYDOWN => Some(RawMessage::KeyboardMessage(KeyDown {
+            WM_KEYDOWN | WM_SYSKEYDOWN => Some(RawMessage::KeyboardMessage(KeyboardMessage::KeyDown {
                 vk: wparam as u32,
                 flags: KeystrokeFlags::from_lparam(lparam)
             })),
@@ -239,7 +274,7 @@ impl<'a> RawMessage<'a> {
                 let hit_test = HitTest::from_i16((wparam & 0xFFFF) as i16);
                 let x = (lparam & 0xFFFF) as i16;
                 let y = (lparam >> 16) as i16;
-                Some(RawMessage::MouseMessage(NCMouseMove(x, y, hit_test)))
+                Some(RawMessage::MouseMessage(NcMouseMove(x, y, hit_test)))
             }
             WM_MOUSEMOVE => {
                 let keys = KeyStateFlags::from_bits_truncate(wparam);
@@ -260,104 +295,101 @@ impl<'a> RawMessage<'a> {
             }
             WM_NCMOUSELEAVE => Some(RawMessage::MouseMessage(NcMouseLeave)),
             WM_CAPTURECHANGED => Some(RawMessage::MouseMessage(CaptureChanged)),
-
-
-
-
             WM_MOUSEWHEEL => {
-                instant_event!("WM_MOUSEWHEEL");
-                None
-            }
-            WM_MOUSEHWHEEL => {
-                instant_event!("WM_MOUSEWHEEL");
-                None
-            }
+                let keys = KeyStateFlags::from_bits_truncate(wparam & 0xFFFF);
+                let dist = (wparam >> 16) as i16;
+                let x = (lparam & 0xFFFF) as i16;
+                let y = (lparam >> 16) as i16;
+                Some(RawMessage::MouseMessage(MouseWheel(x, y, dist, keys)))
+            },
             WM_MOUSEACTIVATE => {
-                instant_event!("WM_MOUSEACTIVATE");
-                None
-            }
-            WM_CONTEXTMENU => {
-                instant_event!("WM_CONTEXTMENU");
-                None
-            }
-            WM_ENTERMENULOOP => {
-                instant_event!("WM_ENTERMENULOOP");
-                None
-            }
-            WM_INITMENU => {
-                instant_event!("WM_INITMENU");
-                None
-            }
-            WM_MENUSELECT => {
-                instant_event!("WM_MENUSELECT");
-                None
-            }
-            WM_ENTERIDLE => {
-                instant_event!("WM_ENTERIDLE");
-                None
-            }
-            WM_EXITMENULOOP => {
-                instant_event!("WM_EXITMENULOOP");
-                None
-            }
-            WM_SYSKEYDOWN => {
-                instant_event!("WM_SYSKEYDOWN");
-                None
-            }
-            WM_SYSKEYUP => {
-                instant_event!("WM_SYSKEYUP");
-                None
-            }
+                let btn = MouseButton::from_msg((lparam >> 16) as u16);
+                Some(RawMessage::MouseMessage(MouseActivate(btn)))
+            },
             WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN | WM_XBUTTONDOWN => {
-                instant_event!("WM_*BUTTONDOWN");
-                None
-            }
-            WM_NCLBUTTONDOWN | WM_NCRBUTTONDOWN | WM_NCMBUTTONDOWN | WM_NCXBUTTONDOWN => {
-                instant_event!("WM_NC*BUTTONDOWN");
-                None
+                let flags = KeyStateFlags::from_bits_truncate(wparam);
+                let x = (lparam & 0xFFFF) as i16;
+                let y = (lparam >> 16) as i16;
+                let button = match msg {
+                    WM_LBUTTONDOWN => MouseButton::Left,
+                    WM_RBUTTONDOWN => MouseButton::Right,
+                    WM_MBUTTONDOWN => MouseButton::Middle,
+                    WM_XBUTTONDOWN => MouseButton::X,
+                    _ => unreachable!()
+                };
+                Some(RawMessage::MouseMessage(ButtonDown(button, x, y, flags)))
             }
             WM_LBUTTONUP | WM_RBUTTONUP | WM_MBUTTONUP | WM_XBUTTONUP=> {
-                instant_event!("WM_*BUTTONUP");
-                None
-            }
-            WM_NCLBUTTONUP | WM_NCRBUTTONUP | WM_NCMBUTTONUP | WM_NCXBUTTONUP=> {
-                instant_event!("WM_NC*BUTTONUP");
-                None
+                let flags = KeyStateFlags::from_bits_truncate(wparam);
+                let x = (lparam & 0xFFFF) as i16;
+                let y = (lparam >> 16) as i16;
+                let button = match msg {
+                    WM_LBUTTONUP => MouseButton::Left,
+                    WM_RBUTTONUP => MouseButton::Right,
+                    WM_MBUTTONUP => MouseButton::Middle,
+                    WM_XBUTTONUP => MouseButton::X,
+                    _ => unreachable!()
+                };
+                Some(RawMessage::MouseMessage(ButtonUp(button, x, y, flags)))
             }
             WM_LBUTTONDBLCLK | WM_RBUTTONDBLCLK | WM_MBUTTONDBLCLK | WM_XBUTTONDBLCLK => {
-                instant_event!("WM_*BUTTONDBLCLK");
-                None
+                let flags = KeyStateFlags::from_bits_truncate(wparam);
+                let x = (lparam & 0xFFFF) as i16;
+                let y = (lparam >> 16) as i16;
+                let button = match msg {
+                    WM_LBUTTONDBLCLK => MouseButton::Left,
+                    WM_RBUTTONDBLCLK => MouseButton::Right,
+                    WM_MBUTTONDBLCLK => MouseButton::Middle,
+                    WM_XBUTTONDBLCLK => MouseButton::X,
+                    _ => unreachable!()
+                };
+                Some(RawMessage::MouseMessage(ButtonDoubleClk(button, x, y, flags)))
+            }
+            WM_NCLBUTTONDOWN | WM_NCRBUTTONDOWN | WM_NCMBUTTONDOWN | WM_NCXBUTTONDOWN => {
+                let flags = KeyStateFlags::from_bits_truncate(wparam);
+                let x = (lparam & 0xFFFF) as i16;
+                let y = (lparam >> 16) as i16;
+                let button = match msg {
+                    WM_NCLBUTTONDOWN => MouseButton::Left,
+                    WM_NCRBUTTONDOWN => MouseButton::Right,
+                    WM_NCMBUTTONDOWN => MouseButton::Middle,
+                    WM_NCXBUTTONDOWN => MouseButton::X,
+                    _ => unreachable!()
+                };
+                Some(RawMessage::MouseMessage(NcButtonDown(button, x, y, flags)))
+            }
+            WM_NCLBUTTONUP | WM_NCRBUTTONUP | WM_NCMBUTTONUP | WM_NCXBUTTONUP=> {
+                let flags = KeyStateFlags::from_bits_truncate(wparam);
+                let x = (lparam & 0xFFFF) as i16;
+                let y = (lparam >> 16) as i16;
+                let button = match msg {
+                    WM_NCLBUTTONUP => MouseButton::Left,
+                    WM_NCRBUTTONUP => MouseButton::Right,
+                    WM_NCMBUTTONUP => MouseButton::Middle,
+                    WM_NCXBUTTONUP => MouseButton::X,
+                    _ => unreachable!()
+                };
+                Some(RawMessage::MouseMessage(NcButtonUp(button, x, y, flags)))
             }
             WM_NCLBUTTONDBLCLK | WM_NCRBUTTONDBLCLK | WM_NCMBUTTONDBLCLK | WM_NCXBUTTONDBLCLK => {
-                instant_event!("WM_NC*BUTTONDBLCLK");
-                None
-            }
-            WM_GETOBJECT => {
-                instant_event!("WM_ERASEBKGND");
-                None
-            }
-            WM_DWMNCRENDERINGCHANGED => {
-                instant_event!("WM_DWMNCRENDERINGCHANGED");
-                None
+                let flags = KeyStateFlags::from_bits_truncate(wparam);
+                let x = (lparam & 0xFFFF) as i16;
+                let y = (lparam >> 16) as i16;
+                let button = match msg {
+                    WM_NCLBUTTONDBLCLK => MouseButton::Left,
+                    WM_NCRBUTTONDBLCLK => MouseButton::Right,
+                    WM_NCMBUTTONDBLCLK => MouseButton::Middle,
+                    WM_NCXBUTTONDBLCLK => MouseButton::X,
+                    _ => unreachable!()
+                };
+                Some(RawMessage::MouseMessage(NcButtonDoubleClk(button, x, y, flags)))
             }
 
             // ime
-            WM_IME_SETCONTEXT => {
-                instant_event!("WM_IME_SETCONTEXT");
-                None
-            }
-            WM_IME_NOTIFY => {
-                instant_event!("WM_IME_NOTIFY");
-                None
-            }
-            WM_IME_REQUEST => {
-                instant_event!("WM_IME_REQUEST");
-                None
-            }
-            WM_IME_CONTROL => {
-                instant_event!("WM_IME_CONTROL");
-                None
-            }
+            WM_IME_SETCONTEXT => Some(RawMessage::ImeMessage(SetContext)),
+            WM_IME_NOTIFY => Some(RawMessage::ImeMessage(Notify)),
+            WM_IME_REQUEST => Some(RawMessage::ImeMessage(Request)),
+            WM_IME_CONTROL => Some(RawMessage::ImeMessage(Control)),
             _ => None
         }
     }

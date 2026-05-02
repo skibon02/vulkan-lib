@@ -92,7 +92,7 @@ fn handle_message_inner(window: HWND, msg: RawMessage, state: &WindowState) -> H
             }
         },
         RawMessage::MouseMessage(mouse) => match mouse {
-            MouseMessage::MouseMove(..) | MouseMessage::NCMouseMove(..) | MouseMessage::NcHitTest(_, _)=> {
+            MouseMessage::MouseMove(..) | MouseMessage::NcMouseMove(..) | MouseMessage::NcHitTest(_, _)=> {
                 // don't print them
                 HandleResult::Default
             }
@@ -104,6 +104,18 @@ fn handle_message_inner(window: HWND, msg: RawMessage, state: &WindowState) -> H
         RawMessage::KeyboardMessage(keyboard) => match keyboard {
             m => {
                 info!("Keyboard: {:?}", m);
+                HandleResult::Default
+            }
+        }
+        RawMessage::RawInputMessage(raw) => match raw {
+            m => {
+                info!("Raw input: {:?}", m);
+                HandleResult::Default
+            }
+        }
+        RawMessage::ImeMessage(ime) => match ime {
+            m => {
+                info!("Ime: {:?}", m);
                 HandleResult::Default
             }
         }
@@ -226,4 +238,3 @@ unsafe extern "system" fn public_window_callback(
         }
     }
 }
-
