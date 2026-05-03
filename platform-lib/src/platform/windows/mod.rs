@@ -1,36 +1,56 @@
-use std::{mem, ptr, thread};
+use std::{mem, ptr};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Duration;
 use drop_guard::guard;
 use log::{info, warn};
-use sparkles::range_event_start;
+use sparkles::{instant_event, range_event_start};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
-use windows_sys::Win32::UI::WindowsAndMessaging::{DefWindowProcW, DispatchMessageW, GetMessageW, GetWindowLongPtrW, PostQuitMessage, SetWindowLongPtrW, SetWindowLongW, TranslateMessage, CREATESTRUCTW, GWL_USERDATA, MSG, MWMO_INPUTAVAILABLE, PM_REMOVE, QS_ALLINPUT, SC_KEYMENU, WMSZ_BOTTOM, WMSZ_BOTTOMLEFT, WMSZ_BOTTOMRIGHT, WMSZ_LEFT, WMSZ_RIGHT, WMSZ_TOP, WMSZ_TOPLEFT, WMSZ_TOPRIGHT, WM_ACTIVATE, WM_ACTIVATEAPP, WM_APPCOMMAND, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_CONTEXTMENU, WM_CREATE, WM_DESTROY, WM_DWMNCRENDERINGCHANGED, WM_ENABLE, WM_ENTERIDLE, WM_ENTERMENULOOP, WM_ENTERSIZEMOVE, WM_ERASEBKGND, WM_EXITMENULOOP, WM_EXITSIZEMOVE, WM_GETICON, WM_GETMINMAXINFO, WM_GETOBJECT, WM_IME_CONTROL, WM_IME_NOTIFY, WM_IME_REQUEST, WM_IME_SETCONTEXT, WM_INITMENU, WM_INPUTLANGCHANGE, WM_INPUTLANGCHANGEREQUEST, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDBLCLK, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MENUSELECT, WM_MOUSEACTIVATE, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_MOVE, WM_MOVING, WM_NCACTIVATE, WM_NCCALCSIZE, WM_NCCREATE, WM_NCDESTROY, WM_NCHITTEST, WM_NCLBUTTONDBLCLK, WM_NCLBUTTONDOWN, WM_NCLBUTTONUP, WM_NCMBUTTONDBLCLK, WM_NCMBUTTONDOWN, WM_NCMBUTTONUP, WM_NCMOUSEHOVER, WM_NCMOUSELEAVE, WM_NCMOUSEMOVE, WM_NCPAINT, WM_NCRBUTTONDBLCLK, WM_NCRBUTTONDOWN, WM_NCRBUTTONUP, WM_NCXBUTTONDBLCLK, WM_NCXBUTTONDOWN, WM_NCXBUTTONUP, WM_PAINT, WM_QUERYOPEN, WM_QUIT, WM_RBUTTONDBLCLK, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_SHOWWINDOW, WM_SIZE, WM_SIZING, WM_STYLECHANGED, WM_STYLECHANGING, WM_SYSCOMMAND, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_THEMECHANGED, WM_USERCHANGED, WM_WINDOWPOSCHANGED, WM_WINDOWPOSCHANGING, WM_XBUTTONDBLCLK, WM_XBUTTONDOWN, WM_XBUTTONUP};
+use windows_sys::Win32::UI::WindowsAndMessaging::{DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW, GetWindowLongPtrW, PostMessageW, PostQuitMessage, SetWindowLongPtrW, SetWindowLongW, SetWindowPos, TranslateMessage, CREATESTRUCTW, GWL_USERDATA, MSG, MWMO_INPUTAVAILABLE, PM_REMOVE, QS_ALLINPUT, SC_KEYMENU, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, WMSZ_BOTTOM, WMSZ_BOTTOMLEFT, WMSZ_BOTTOMRIGHT, WMSZ_LEFT, WMSZ_RIGHT, WMSZ_TOP, WMSZ_TOPLEFT, WMSZ_TOPRIGHT, WM_ACTIVATE, WM_ACTIVATEAPP, WM_APPCOMMAND, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_CONTEXTMENU, WM_CREATE, WM_DESTROY, WM_DWMNCRENDERINGCHANGED, WM_ENABLE, WM_ENTERIDLE, WM_ENTERMENULOOP, WM_ENTERSIZEMOVE, WM_ERASEBKGND, WM_EXITMENULOOP, WM_EXITSIZEMOVE, WM_GETICON, WM_GETMINMAXINFO, WM_GETOBJECT, WM_IME_CONTROL, WM_IME_NOTIFY, WM_IME_REQUEST, WM_IME_SETCONTEXT, WM_INITMENU, WM_INPUTLANGCHANGE, WM_INPUTLANGCHANGEREQUEST, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDBLCLK, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MENUSELECT, WM_MOUSEACTIVATE, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_MOVE, WM_MOVING, WM_NCACTIVATE, WM_NCCALCSIZE, WM_NCCREATE, WM_NCDESTROY, WM_NCHITTEST, WM_NCLBUTTONDBLCLK, WM_NCLBUTTONDOWN, WM_NCLBUTTONUP, WM_NCMBUTTONDBLCLK, WM_NCMBUTTONDOWN, WM_NCMBUTTONUP, WM_NCMOUSEHOVER, WM_NCMOUSELEAVE, WM_NCMOUSEMOVE, WM_NCPAINT, WM_NCRBUTTONDBLCLK, WM_NCRBUTTONDOWN, WM_NCRBUTTONUP, WM_NCXBUTTONDBLCLK, WM_NCXBUTTONDOWN, WM_NCXBUTTONUP, WM_PAINT, WM_QUERYOPEN, WM_QUIT, WM_RBUTTONDBLCLK, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_SHOWWINDOW, WM_SIZE, WM_SIZING, WM_STYLECHANGED, WM_STYLECHANGING, WM_SYSCOMMAND, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_THEMECHANGED, WM_USER, WM_USERCHANGED, WM_WINDOWPOSCHANGED, WM_WINDOWPOSCHANGING, WM_XBUTTONDBLCLK, WM_XBUTTONDOWN, WM_XBUTTONUP};
 use crate::platform::platform_impl::message::WindowMessage;
+use crate::platform::windows::global_window::GlobalWindow;
 use crate::platform::windows::message::{MouseMessage, RawMessage};
-use crate::platform::windows::types::SystemCommand;
-use crate::window::WindowState;
+use crate::platform::windows::types::{Size, SystemCommand};
+use crate::window::{UserWindowMessage, Window, WindowAttributes, WindowState};
 
 pub mod window;
 mod message;
 mod types;
+mod global_window;
 
-pub fn run_platform_loop() {
+pub struct WindowManager {
+    hwnd: u64,
+}
+
+pub enum GlobalUserMessage {
+    CreateWindow(WindowAttributes),
+}
+
+impl WindowManager {
+    pub fn create_window(&mut self, attrib: WindowAttributes) -> Window {
+        let msg = Box::new(GlobalUserMessage::CreateWindow(attrib));
+        let addr = Box::into_raw(msg) as u64;
+        let (tx, mut rx) = oneshot::channel();
+        let boxed_sender = Box::new(tx);
+        let sender_addr = Box::into_raw(boxed_sender) as u64;
+        unsafe { PostMessageW(self.hwnd as HWND, WM_USER, addr as WPARAM, sender_addr as LPARAM); }
+        rx.recv().unwrap()
+    }
+}
+
+
+pub trait ApplicationLogic {
+    fn spawn_logic_task(manager: WindowManager);
+}
+
+pub fn start_app<T: ApplicationLogic>() {
     let mut msg: MSG = unsafe { mem::zeroed() };
 
-    thread::spawn(|| {
-        let mut cnt = 0;
-        loop {
-            thread::sleep(Duration::from_secs(1));
-            let cur = HANDLED.load(Ordering::Relaxed);
-            let new = cur - cnt;
+    // create hidden window for handling window creation events and raw input events
+    let global_window = GlobalWindow::new();
+    let window_manager = WindowManager { hwnd: global_window.hwnd() };
+    T::spawn_logic_task(window_manager);
 
-            info!("{} e/s", new);
-            cnt = cur;
-        }
-    });
     loop {
         unsafe {
             let g = range_event_start!("GetMessage");
@@ -56,7 +76,7 @@ enum HandleResult {
 }
 
 static CREATED_WINDOWS: AtomicUsize = AtomicUsize::new(0);
-fn handle_message_inner(window: HWND, msg: RawMessage, state: &WindowState) -> HandleResult {
+fn handle_message_inner(hwnd: HWND, msg: RawMessage, state: &WindowState) -> HandleResult {
     match msg {
         RawMessage::WindowMessage(win) => match win {
             WindowMessage::NcCreate { .. } => {
@@ -64,7 +84,7 @@ fn handle_message_inner(window: HWND, msg: RawMessage, state: &WindowState) -> H
                 HandleResult::Default
             },
             WindowMessage::Destroy => {
-                info!("Window message[{:x}]: {:?}", window as usize, win);
+                info!("Window message[{:x}]: {:?}", hwnd as usize, win);
                 if CREATED_WINDOWS.fetch_sub(1, Ordering::Relaxed) == 1 {
                     info!("All windows closed! Will exit now");
                     // should exit
@@ -72,10 +92,31 @@ fn handle_message_inner(window: HWND, msg: RawMessage, state: &WindowState) -> H
                 }
                 HandleResult::Default
             }
-            
-            
+
+
+            WindowMessage::Size(kind, width, height) => {
+                if kind != Size::Minimized {
+                    info!("    Size changed: {}x{}", width, height);
+                    state.set_size((width, height))
+                }
+                HandleResult::Default
+            }
+            WindowMessage::Move(x, y) => {
+                let is_minimized = x == -32000 && y == -32000;
+                let was_minimized = state.is_minimized();
+                if is_minimized && !was_minimized {
+                    info!("\t\t**MINIMIZED")
+                }
+                if !is_minimized && was_minimized {
+                    info!("\t\t**RESTORED")
+                }
+                state.set_minimized(is_minimized);
+                HandleResult::Default
+            }
+
+            // cancel single alt press
             WindowMessage::SystemCommand(sc, (x, y)) => {
-                info!("Window message[{:x}]: {:?}", window as usize, win);
+                info!("Window message[{:x}]: {:?}", hwnd as usize, win);
                 if sc == SystemCommand::KeyMenu {
                     HandleResult::Handled
                 } else {
@@ -87,15 +128,19 @@ fn handle_message_inner(window: HWND, msg: RawMessage, state: &WindowState) -> H
                 HandleResult::Default
             }
             _ => {
-                info!("Window messag[{:x}]: {:?}", window as usize, win);
+                info!("Window message[{:x}]: {:?}", hwnd as usize, win);
                 HandleResult::Default
             }
         },
         RawMessage::MouseMessage(mouse) => match mouse {
-            MouseMessage::MouseMove(..) | MouseMessage::NcMouseMove(..) | MouseMessage::NcHitTest(_, _)=> {
-                // don't print them
+            // don't print them
+            MouseMessage::NcHitTest(x, y) => {
                 HandleResult::Default
             }
+            MouseMessage::MouseMove(..) | MouseMessage::NcMouseMove(..) => {
+                HandleResult::Default
+            }
+
             m => {
                 info!("Mouse: {:?}", m);
                 HandleResult::Default
@@ -118,6 +163,29 @@ fn handle_message_inner(window: HWND, msg: RawMessage, state: &WindowState) -> H
                 info!("Ime: {:?}", m);
                 HandleResult::Default
             }
+        }
+        RawMessage::UserMessage(data1, data2) => {
+            let msg = unsafe {Box::from_raw(data1 as *mut UserWindowMessage)};
+            info!("Got message! {:?}", msg);
+            match *msg {
+                UserWindowMessage::Close => {
+                    info!("\t\tHANDLING CLOSE FOR {:x}", hwnd as usize);
+                    unsafe { DestroyWindow(hwnd); }
+                }
+                UserWindowMessage::Resize(width, height) => {
+                    unsafe { SetWindowPos(
+                        hwnd,
+                        ptr::null_mut(),
+                        0,
+                        0,
+                        width as i32,
+                        height as i32,
+                        SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE
+                    )};
+                }
+            }
+
+            HandleResult::Handled
         }
     }
 }
@@ -191,7 +259,7 @@ unsafe extern "system" fn public_window_callback(
     let msg = EVENT_LOOP_DATA.with_borrow_mut(|event_loop_data| {
         unsafe {RawMessage::try_parse(raw_msg, wparam, lparam, window, event_loop_data)}
     });
-    
+
     let Some(msg) = msg else {
         warn!("unknown message {:?}", raw_msg);
         let g = range_event_start!("UNKNOW");

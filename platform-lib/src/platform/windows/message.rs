@@ -133,6 +133,7 @@ pub enum RawMessage<'a> {
     MouseMessage(MouseMessage),
     RawInputMessage(RawInputMessage),
     ImeMessage(ImeMessage),
+    UserMessage(usize, usize),
 }
 
 impl<'a> RawMessage<'a> {
@@ -390,6 +391,9 @@ impl<'a> RawMessage<'a> {
             WM_IME_NOTIFY => Some(RawMessage::ImeMessage(Notify)),
             WM_IME_REQUEST => Some(RawMessage::ImeMessage(Request)),
             WM_IME_CONTROL => Some(RawMessage::ImeMessage(Control)),
+            
+            // user
+            WM_USER => Some(RawMessage::UserMessage(wparam, lparam as usize)),
             _ => None
         }
     }
