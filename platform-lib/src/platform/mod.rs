@@ -18,5 +18,5 @@ pub mod x11_or_wayland;
 #[cfg(all(wayland_platform, x11_platform))]
 pub use x11_or_wayland as platform_impl;
 
-#[cfg(any(android_platform, orbital_platform, x11_platform))]
+#[cfg(any(android_platform, orbital_platform))]
 compile_error!("Unsupported platform");
