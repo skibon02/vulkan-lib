@@ -12,7 +12,7 @@ rand = "0.10.1"
 sparkles = { git="https://github.com/skibon02/sparkles.git", branch = "main", default-features = false }
 tempfile = "3.27.0"
 
-[target.'cfg(all(unix, not(target_vendor = "apple"), not(target_os="android"), not(target_os="emscripten"), not(target_os="redox"), not(feature="only_x11")))'.dependencies]
+[target.'cfg(all(unix, not(target_vendor = "apple"), not(target_os="android"), not(target_os="emscripten"), not(target_os="redox")))'.dependencies]
 wayland-client = "0.31.14"
 wayland-protocols = { version = "0.32.12", features = ["wayland-client", "client"] }
 
