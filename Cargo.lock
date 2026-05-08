@@ -1746,6 +1746,8 @@ name = "platform-lib"
 version = "0.1.0"
 dependencies = [
  "bitflags 2.11.1",
+ "calloop",
+ "calloop-wayland-source",
  "cfg_aliases",
  "drop_guard",
  "log",

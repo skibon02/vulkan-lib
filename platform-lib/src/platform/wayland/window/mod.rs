@@ -1,3 +1,6 @@
+use calloop::channel::Sender;
+use crate::DirectWindowMessage;
+use crate::platform::wayland::WindowMessage;
 
 #[derive(Default)]
 pub struct WindowAttributes {
@@ -7,13 +10,19 @@ pub struct WindowAttributes {
     pub borderless: bool,
 }
 
-pub struct Window;
+pub struct Window {
+    id: u64,
+    tx: Sender<WindowMessage>
+}
 
 impl Window {
-    pub fn new() -> Window {
-        Window
+    pub fn new(id: u64, tx: Sender<WindowMessage>) -> Window {
+        Window {
+            id,
+            tx
+        }
     }
     pub fn close_window(mut self) {
-
+        let _ = self.tx.send(WindowMessage::Direct(self.id, DirectWindowMessage::Close));
     }
 }

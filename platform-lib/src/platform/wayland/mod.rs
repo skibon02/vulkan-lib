@@ -1,9 +1,12 @@
+use std::cell::Cell;
 use std::fs::File;
 use std::os::fd::AsFd;
-use std::sync::mpsc;
-use std::sync::mpsc::Sender;
+use std::sync::atomic::{AtomicU64, Ordering};
+use calloop::{channel, EventLoop};
+use calloop::channel::{Event, Sender};
+use calloop_wayland_source::WaylandSource;
 use log::info;
-use wayland_client::{delegate_noop, Connection, Dispatch, QueueHandle, WEnum};
+use wayland_client::{delegate_noop, Connection, Dispatch, Proxy, QueueHandle, WEnum};
 use wayland_client::protocol::{wl_buffer, wl_compositor, wl_keyboard, wl_registry, wl_seat, wl_shm, wl_shm_pool, wl_surface};
 use wayland_client::protocol::wl_compositor::WlCompositor;
 use wayland_client::protocol::wl_keyboard::KeyState;
@@ -16,12 +19,17 @@ use crate::window::{Window, WindowAttributes};
 
 pub mod window;
 
+pub enum DirectWindowMessage {
+    Close,
+}
+
 enum WindowMessage {
     CreateWindow(WindowAttributes, oneshot::Sender<Window>),
+    Direct(u64, DirectWindowMessage),
 }
 
 pub struct WindowManager {
-    tx: Sender<WindowMessage>,
+    tx: channel::Sender<WindowMessage>,
 }
 
 impl WindowManager {
@@ -36,16 +44,17 @@ struct WindowInner {
     base_surface: WlSurface,
     xdg_surface: XdgSurface,
     toplevel: XdgToplevel,
+    id: u64
 }
 
 pub trait ApplicationLogic {
     fn spawn_logic_task(manager: WindowManager);
 }
 
-pub fn start_app<T: crate::ApplicationLogic>() {
+pub fn start_app<T: ApplicationLogic>() {
     let conn = Connection::connect_to_env().unwrap();
 
-    let mut event_queue = conn.new_event_queue();
+    let event_queue = conn.new_event_queue();
     let qhandle = event_queue.handle();
 
     let display = conn.display();
@@ -56,29 +65,61 @@ pub fn start_app<T: crate::ApplicationLogic>() {
         compositor: None,
         buffer: None,
         wm_base: None,
-        configured: false,
         surfaces: vec![],
+        last_window_id: 0,
     };
 
-    let (tx, rx) = mpsc::channel();
-    T::spawn_logic_task(WindowManager {
-        tx
-    });
+    let (event_tx, rx) = channel::channel();
 
     println!("Starting the example window app, press <ESC> to quit.");
 
-    while state.running {
-        // TODO: find way to multiplex waiting
-        event_queue.blocking_dispatch(&mut state).unwrap();
-        if let Ok(msg) = rx.try_recv() {
-            match msg {
+    let mut event_loop: EventLoop<State> = EventLoop::try_new().unwrap();
+    let loop_handle = event_loop.handle();
+
+    loop_handle.insert_source(rx, |msg, _, state| {
+        match msg {
+            Event::Msg(msg) => match msg {
                 WindowMessage::CreateWindow(attrib, tx) => {
-                    let window = state.create_surface(&qhandle, attrib);
+                    let window = state.create_surface(&qhandle, attrib, event_tx.clone());
                     tx.send(window).unwrap();
                 }
+                WindowMessage::Direct(win_id, direct_msg) => match direct_msg {
+                    DirectWindowMessage::Close => {
+                        for win in state.surfaces.extract_if(.., |s| s.id == win_id) {
+                            win.toplevel.destroy();
+                            win.xdg_surface.destroy();
+                            win.base_surface.destroy();
+                            break;
+                        }
+                        if state.surfaces.is_empty() {
+                            state.running = false;
+                        }
+                    }
+                }
+            }
+            Event::Closed => {
+                println!("Logic thread disconnected! closing event loop...");
+                state.running = false;
             }
         }
+    }).unwrap();
+
+    WaylandSource::new(conn, event_queue).insert(loop_handle).unwrap();
+
+    let mut tx = Some(event_tx.clone());
+    while state.running {
+        event_loop.dispatch(None, &mut state).unwrap();
+        if let Some(tx) = tx.take() && state.is_initialized() {
+            T::spawn_logic_task(WindowManager {
+                tx
+            });
+        }
     }
+}
+
+#[derive(Default, Copy, Clone)]
+struct WindowState {
+    id: u64
 }
 
 struct State {
@@ -86,8 +127,19 @@ struct State {
     compositor: Option<WlCompositor>,
     buffer: Option<wl_buffer::WlBuffer>,
     wm_base: Option<xdg_wm_base::XdgWmBase>,
-    configured: bool,
     surfaces: Vec<WindowInner>,
+    last_window_id: u64,
+}
+
+impl State {
+    pub fn is_initialized(&self) -> bool {
+        self.compositor.is_some() && self.buffer.is_some() && self.wm_base.is_some()
+    }
+    pub fn new_window_id(&mut self) -> u64 {
+        let id = self.last_window_id;
+        self.last_window_id += 1;
+        id
+    }
 }
 
 impl Dispatch<WlRegistry, ()> for State {
@@ -132,12 +184,6 @@ impl Dispatch<WlRegistry, ()> for State {
     }
 }
 
-// Ignore events from these object types in this example.
-delegate_noop!(State: ignore wl_compositor::WlCompositor);
-delegate_noop!(State: ignore wl_surface::WlSurface);
-delegate_noop!(State: ignore wl_shm::WlShm);
-delegate_noop!(State: ignore wl_shm_pool::WlShmPool);
-delegate_noop!(State: ignore wl_buffer::WlBuffer);
 
 fn draw(tmp: &mut File, (buf_x, buf_y): (u32, u32)) {
     use std::{cmp::min, io::Write};
@@ -155,28 +201,43 @@ fn draw(tmp: &mut File, (buf_x, buf_y): (u32, u32)) {
 }
 
 impl State {
-    fn create_surface(&mut self, qh: &QueueHandle<State>, attrib: WindowAttributes) -> Window {
+    fn create_surface(&mut self, qh: &QueueHandle<State>, attrib: WindowAttributes, tx: Sender<WindowMessage>) -> Window {
+        let window_id = self.new_window_id();
+        let window_state = WindowState {
+            id: window_id
+        };
+
         let compositor = self.compositor.as_ref().unwrap();
         let wm_base = self.wm_base.as_ref().unwrap();
-        let base_surface = compositor.create_surface(qh, ());
+        let base_surface = compositor.create_surface(qh, window_state);
 
-        let xdg_surface = wm_base.get_xdg_surface(&base_surface, qh, ());
-        let toplevel = xdg_surface.get_toplevel(qh, ());
+        let xdg_surface = wm_base.get_xdg_surface(&base_surface, qh, window_state);
+        let toplevel = xdg_surface.get_toplevel(qh, window_state);
         toplevel.set_title("A fantastic window!".into());
         base_surface.commit();
 
         self.surfaces.push(WindowInner {
             base_surface,
             xdg_surface,
-            toplevel
+            toplevel,
+            id: window_id
         });
 
-        Window {
-
-        }
+        Window::new(window_id, tx)
     }
 }
 
+delegate_noop!(State: ignore wl_compositor::WlCompositor);
+delegate_noop!(State: ignore wl_shm::WlShm);
+delegate_noop!(State: ignore wl_shm_pool::WlShmPool);
+delegate_noop!(State: ignore wl_buffer::WlBuffer);
+
+impl Dispatch<wl_surface::WlSurface, WindowState> for State {
+    fn event(state: &mut Self, proxy: &WlSurface, event: wl_surface::Event, win: &WindowState, conn: &Connection, qhandle: &QueueHandle<Self>) {
+        let id = win.id;
+        info!("wl_surface({id}): {:?}", event);
+    }
+}
 impl Dispatch<xdg_wm_base::XdgWmBase, ()> for State {
     fn event(
         _: &mut Self,
@@ -193,19 +254,19 @@ impl Dispatch<xdg_wm_base::XdgWmBase, ()> for State {
     }
 }
 
-impl Dispatch<xdg_surface::XdgSurface, ()> for State {
+impl Dispatch<xdg_surface::XdgSurface, WindowState> for State {
     fn event(
         state: &mut Self,
         xdg_surface: &xdg_surface::XdgSurface,
         event: xdg_surface::Event,
-        _: &(),
+        win: &WindowState,
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
-        info!("xdg_surface: {:?}", event);
+        let id = win.id;
+        info!("xdg_surface ({id}): {:?}", event);
         if let xdg_surface::Event::Configure { serial, .. } = event {
             xdg_surface.ack_configure(serial);
-            state.configured = true;
             for surface in &state.surfaces {
                 if let Some(ref buffer) = state.buffer {
                     surface.base_surface.attach(Some(buffer), 0, 0);
@@ -216,16 +277,17 @@ impl Dispatch<xdg_surface::XdgSurface, ()> for State {
     }
 }
 
-impl Dispatch<xdg_toplevel::XdgToplevel, ()> for State {
+impl Dispatch<xdg_toplevel::XdgToplevel, WindowState> for State {
     fn event(
         state: &mut Self,
         _: &xdg_toplevel::XdgToplevel,
         event: xdg_toplevel::Event,
-        _: &(),
+        win: &WindowState,
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
-        info!("xdg_toplevel: {:?}", event);
+        let id = win.id;
+        info!("xdg_toplevel ({id}): {:?}", event);
         if let xdg_toplevel::Event::Close = event {
             state.running = false;
         }
@@ -244,23 +306,29 @@ impl Dispatch<wl_seat::WlSeat, ()> for State {
         info!("wl_seat: {:?}", event);
         if let wl_seat::Event::Capabilities { capabilities: WEnum::Value(capabilities) } = event {
             if capabilities.contains(wl_seat::Capability::Keyboard) {
-                seat.get_keyboard(qh, ());
+                seat.get_keyboard(qh, KbState {
+                    entered: AtomicU64::new(0),
+                });
             }
         }
     }
 }
 
-impl Dispatch<wl_keyboard::WlKeyboard, ()> for State {
+pub struct KbState {
+    entered: AtomicU64
+}
+impl Dispatch<wl_keyboard::WlKeyboard, KbState> for State {
     fn event(
         state: &mut Self,
         _: &wl_keyboard::WlKeyboard,
         event: wl_keyboard::Event,
-        _: &(),
+        kb: &KbState,
         _: &Connection,
         qh: &QueueHandle<Self>,
     ) {
-        info!("wl_keyboard: {:?}", event);
         if let wl_keyboard::Event::Key { key, state: key_state, .. } = event {
+            let id = kb.entered.load(Ordering::Relaxed);
+            info!("wl_keyboard (win {id}): {:?}", event);
             if key_state == WEnum::Value(KeyState::Pressed) {
                 if key == 1 {
                     // ESC key
@@ -280,6 +348,14 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for State {
                 //     }
                 // }
             }
+        }
+        else {
+            info!("wl_keyboard: {:?}", event);
+        }
+        if let wl_keyboard::Event::Enter {surface, ..} = event {
+            let win: &WindowState = surface.data().unwrap();
+            let id = win.id;
+            kb.entered.store(id, Ordering::Relaxed)
         }
     }
 }
