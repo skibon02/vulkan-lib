@@ -16,13 +16,19 @@ pub struct Window {
 }
 
 impl Window {
-    pub fn new(id: u64, tx: Sender<WindowMessage>) -> Window {
+    pub(crate) fn new(id: u64, tx: Sender<WindowMessage>) -> Window {
         Window {
             id,
             tx
         }
     }
     pub fn close_window(mut self) {
+        let _ = self.tx.send(WindowMessage::Direct(self.id, DirectWindowMessage::Close));
+    }
+}
+
+impl Drop for Window {
+    fn drop(&mut self) {
         let _ = self.tx.send(WindowMessage::Direct(self.id, DirectWindowMessage::Close));
     }
 }

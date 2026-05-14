@@ -1,3 +1,5 @@
+pub mod event;
+
 #[cfg(windows_platform)]
 pub mod windows;
 #[cfg(windows_platform)]
@@ -15,6 +17,7 @@ pub use wayland as platform_impl;
 
 #[cfg(all(wayland_platform, x11_platform))]
 pub mod x11_or_wayland;
+
 #[cfg(all(wayland_platform, x11_platform))]
 pub use x11_or_wayland as platform_impl;
 

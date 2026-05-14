@@ -2,6 +2,7 @@ use std::cell::Cell;
 use std::fs::File;
 use std::os::fd::AsFd;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc;
 use calloop::{channel, EventLoop};
 use calloop::channel::{Event, Sender};
 use calloop_wayland_source::WaylandSource;
@@ -15,6 +16,7 @@ use wayland_client::protocol::wl_surface::WlSurface;
 use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base};
 use wayland_protocols::xdg::shell::client::xdg_surface::XdgSurface;
 use wayland_protocols::xdg::shell::client::xdg_toplevel::XdgToplevel;
+use crate::platform;
 use crate::window::{Window, WindowAttributes};
 
 pub mod window;
@@ -30,13 +32,20 @@ enum WindowMessage {
 
 pub struct WindowManager {
     tx: channel::Sender<WindowMessage>,
+    event_rx: mpsc::Receiver<platform::event::Event>,
 }
 
 impl WindowManager {
+    /// Create a new window. Returned handle should be preserved. When you drop `Window`, it automatically closes
+    #[must_use]
     pub fn create_window(&mut self, attrib: WindowAttributes) -> Window {
         let (tx, rx) = oneshot::channel();
         self.tx.send(WindowMessage::CreateWindow(attrib, tx)).unwrap();
         rx.recv().unwrap()
+    }
+
+    pub fn read_event(&mut self) -> Option<platform::event::Event> {
+        self.event_rx.recv().ok()
     }
 }
 
@@ -52,13 +61,16 @@ pub trait ApplicationLogic {
 }
 
 pub fn start_app<T: ApplicationLogic>() {
-    let conn = Connection::connect_to_env().unwrap();
+    let conn = Connection::connect_to_env().expect("Connection to wayland compositor");
 
     let event_queue = conn.new_event_queue();
     let qhandle = event_queue.handle();
 
     let display = conn.display();
     display.get_registry(&qhandle, ());
+
+    let (event_in_tx, event_in_rx) = channel::channel();
+    let (event_tx, event_rx) = mpsc::channel();
 
     let mut state = State {
         running: true,
@@ -67,20 +79,19 @@ pub fn start_app<T: ApplicationLogic>() {
         wm_base: None,
         surfaces: vec![],
         last_window_id: 0,
+        event_tx,
     };
-
-    let (event_tx, rx) = channel::channel();
 
     println!("Starting the example window app, press <ESC> to quit.");
 
     let mut event_loop: EventLoop<State> = EventLoop::try_new().unwrap();
     let loop_handle = event_loop.handle();
 
-    loop_handle.insert_source(rx, |msg, _, state| {
+    loop_handle.insert_source(event_in_rx, |msg, _, state| {
         match msg {
             Event::Msg(msg) => match msg {
                 WindowMessage::CreateWindow(attrib, tx) => {
-                    let window = state.create_surface(&qhandle, attrib, event_tx.clone());
+                    let window = state.create_surface(&qhandle, attrib, event_in_tx.clone());
                     tx.send(window).unwrap();
                 }
                 WindowMessage::Direct(win_id, direct_msg) => match direct_msg {
@@ -106,12 +117,15 @@ pub fn start_app<T: ApplicationLogic>() {
 
     WaylandSource::new(conn, event_queue).insert(loop_handle).unwrap();
 
-    let mut tx = Some(event_tx.clone());
+    let mut tx = Some(event_in_tx.clone());
+    let mut event_rx = Some(event_rx);
     while state.running {
         event_loop.dispatch(None, &mut state).unwrap();
-        if let Some(tx) = tx.take() && state.is_initialized() {
+        if let Some(tx) = tx.take() &&
+            let Some(event_rx) = event_rx.take() && state.is_initialized() {
             T::spawn_logic_task(WindowManager {
-                tx
+                tx,
+                event_rx,
             });
         }
     }
@@ -129,6 +143,7 @@ struct State {
     wm_base: Option<xdg_wm_base::XdgWmBase>,
     surfaces: Vec<WindowInner>,
     last_window_id: u64,
+    event_tx: mpsc::Sender<platform::event::Event>,
 }
 
 impl State {
