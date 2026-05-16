@@ -5,8 +5,8 @@ use raw_window_handle::{RawDisplayHandle, RawWindowHandle, WaylandDisplayHandle,
 use wayland_client::protocol::wl_display::WlDisplay;
 use wayland_client::protocol::wl_surface::WlSurface;
 use wayland_client::Proxy;
-use crate::DirectWindowMessage;
-use crate::platform::wayland::WindowMessage;
+use crate::WindowCommand;
+use crate::platform::wayland::EventLoopCommand;
 
 #[derive(Default)]
 pub struct WindowAttributes {
@@ -18,13 +18,13 @@ pub struct WindowAttributes {
 
 pub struct Window {
     id: u64,
-    tx: Sender<WindowMessage>,
+    tx: Sender<EventLoopCommand>,
     window: WlSurface,
     display: WlDisplay,
 }
 
 impl Window {
-    pub(crate) fn new(id: u64, tx: Sender<WindowMessage>, window: WlSurface, display: WlDisplay) -> Window {
+    pub(crate) fn new(id: u64, tx: Sender<EventLoopCommand>, window: WlSurface, display: WlDisplay) -> Window {
         Window {
             id,
             tx,
@@ -33,7 +33,7 @@ impl Window {
         }
     }
     pub fn close_window(mut self) {
-        let _ = self.tx.send(WindowMessage::Direct(self.id, DirectWindowMessage::Close));
+        let _ = self.tx.send(EventLoopCommand::WindowCommand(self.id, WindowCommand::Close));
     }
 
     pub fn rwh(&self) -> RawWindowHandle {
@@ -51,6 +51,6 @@ impl Window {
 
 impl Drop for Window {
     fn drop(&mut self) {
-        let _ = self.tx.send(WindowMessage::Direct(self.id, DirectWindowMessage::Close));
+        let _ = self.tx.send(EventLoopCommand::WindowCommand(self.id, WindowCommand::Close));
     }
 }

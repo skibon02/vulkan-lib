@@ -10,10 +10,16 @@ pub enum MouseButton {
     X1,
     X2,
 }
+
 #[derive(Debug, Clone, Copy)]
-pub enum Event {
+pub enum WindowNotification {
+    CloseRequested,
     KeyPressed(u32),
     KeyReleased(u32),
     MouseMoved(Pos),
     MouseButtonPressed(MouseButton, Pos),
+}
+#[derive(Debug, Clone, Copy)]
+pub enum Notification {
+    WindowNotification(u64, WindowNotification),
 }

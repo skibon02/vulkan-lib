@@ -2,6 +2,7 @@ use std::thread;
 use std::time::Duration;
 use log::{error, warn, LevelFilter};
 use sparkles::config::SparklesConfig;
+use tokio::task::block_in_place;
 use wayland_client::backend::smallvec::smallvec;
 use platform_lib::{start_app, ApplicationLogic, WindowManager};
 use platform_lib::window::WindowAttributes;
@@ -136,14 +137,17 @@ impl ApplicationLogic for MyApp {
     }
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     simple_logger::SimpleLogger::new().with_level(LevelFilter::Info).init().unwrap();
     let g = sparkles::init(SparklesConfig::default()
         .without_file_sender()
         .with_udp_multicast_default());
+    
+    block_in_place(|| {
+        // sparkles::wait_client_connected();
 
-    // sparkles::wait_client_connected();
-
-    let g = sparkles::range_event_start!("The whole program");
-    start_app::<MyApp>();
+        let g = sparkles::range_event_start!("The whole program");
+        start_app::<MyApp>();
+    })
 }

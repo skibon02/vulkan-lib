@@ -11,6 +11,7 @@ oneshot = { version = "0.2.1", features = ["std"] }
 rand = "0.10.1"
 sparkles = { git="https://github.com/skibon02/sparkles.git", branch = "main", default-features = false }
 tempfile = "3.27.0"
+tokio = { version = "1.52.3", features = ["sync"] }
 
 [target.'cfg(all(unix, not(target_vendor = "apple"), not(target_os="android"), not(target_os="emscripten"), not(target_os="redox")))'.dependencies]
 wayland-client = { version = "0.31.14", features = ["system"] }
@@ -55,6 +56,7 @@ simple_logger = "5.2.0"
 sparkles = { git="https://github.com/skibon02/sparkles.git", branch = "main" }
 rand = "0.10.1"
 vulkan-lib = { path = "../vulkan-lib" }
+tokio = { version = "1.52.3", features = ["sync", "macros", "rt-multi-thread"] }
 
 [build-dependencies]
 cfg_aliases = "0.2.1"

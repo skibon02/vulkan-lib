@@ -1,9 +1,9 @@
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc;
 use calloop::{channel, EventLoop};
-use calloop::channel::{Event, Sender};
+use calloop::channel::Event;
 use calloop_wayland_source::WaylandSource;
 use log::info;
+use tokio::sync::mpsc;
 use wayland_client::{delegate_noop, Connection, Dispatch, Proxy, QueueHandle, WEnum};
 use wayland_client::protocol::{wl_compositor, wl_keyboard, wl_registry, wl_seat, wl_shm, wl_shm_pool, wl_surface};
 use wayland_client::protocol::wl_compositor::WlCompositor;
@@ -20,18 +20,18 @@ use crate::window::{Window, WindowAttributes};
 
 pub mod window;
 
-pub enum DirectWindowMessage {
+enum EventLoopCommand {
+    CreateWindow(WindowAttributes, oneshot::Sender<Window>),
+    WindowCommand(u64, WindowCommand),
+}
+
+pub enum WindowCommand {
     Close,
 }
 
-enum WindowMessage {
-    CreateWindow(WindowAttributes, oneshot::Sender<Window>),
-    Direct(u64, DirectWindowMessage),
-}
-
 pub struct WindowManager {
-    tx: channel::Sender<WindowMessage>,
-    event_rx: mpsc::Receiver<platform::event::Event>,
+    tx: channel::Sender<EventLoopCommand>,
+    notification_rx: mpsc::Receiver<platform::event::Notification>,
 }
 
 impl WindowManager {
@@ -39,12 +39,12 @@ impl WindowManager {
     #[must_use]
     pub fn create_window(&mut self, attrib: WindowAttributes) -> Window {
         let (tx, rx) = oneshot::channel();
-        self.tx.send(WindowMessage::CreateWindow(attrib, tx)).unwrap();
+        self.tx.send(EventLoopCommand::CreateWindow(attrib, tx)).unwrap();
         rx.recv().unwrap()
     }
 
-    pub fn read_event(&mut self) -> Option<platform::event::Event> {
-        self.event_rx.recv().ok()
+    pub async fn read_notification(&mut self) -> Option<platform::event::Notification> {
+        self.notification_rx.recv().await
     }
 }
 
@@ -68,8 +68,8 @@ pub fn start_app<T: ApplicationLogic>() {
     let display = conn.display();
     display.get_registry(&qhandle, ());
 
-    let (event_in_tx, event_in_rx) = channel::channel();
-    let (event_tx, event_rx) = mpsc::channel();
+    let (cmd_tx, cmd_rx) = channel::channel();
+    let (notification_tx, notification_rx) = mpsc::channel(100);
 
     let mut state = State {
         running: true,
@@ -80,7 +80,7 @@ pub fn start_app<T: ApplicationLogic>() {
         surfaces: vec![],
         decoration_manager: None,
         last_window_id: 0,
-        event_tx,
+        notification_tx,
     };
 
     println!("Starting the example window app, press <ESC> to quit.");
@@ -88,15 +88,15 @@ pub fn start_app<T: ApplicationLogic>() {
     let mut event_loop: EventLoop<State> = EventLoop::try_new().unwrap();
     let loop_handle = event_loop.handle();
 
-    loop_handle.insert_source(event_in_rx, |msg, _, state| {
+    loop_handle.insert_source(cmd_rx, |msg, _, state| {
         match msg {
             Event::Msg(msg) => match msg {
-                WindowMessage::CreateWindow(attrib, tx) => {
-                    let window = state.create_surface(&qhandle, attrib, event_in_tx.clone());
+                EventLoopCommand::CreateWindow(attrib, tx) => {
+                    let window = state.create_surface(&qhandle, attrib, cmd_tx.clone());
                     tx.send(window).unwrap();
                 }
-                WindowMessage::Direct(win_id, direct_msg) => match direct_msg {
-                    DirectWindowMessage::Close => {
+                EventLoopCommand::WindowCommand(win_id, direct_msg) => match direct_msg {
+                    WindowCommand::Close => {
                         for win in state.surfaces.extract_if(.., |s| s.id == win_id) {
                             win.toplevel.destroy();
                             win.xdg_surface.destroy();
@@ -118,16 +118,16 @@ pub fn start_app<T: ApplicationLogic>() {
 
     WaylandSource::new(conn, event_queue).insert(loop_handle).unwrap();
 
-    let mut tx = Some(event_in_tx.clone());
-    let mut event_rx = Some(event_rx);
+    let mut cmd_tx = Some(cmd_tx.clone());
+    let mut notification_rx = Some(notification_rx);
     while state.running {
         event_loop.dispatch(None, &mut state).unwrap();
         if state.is_initialized() &&
-            let Some(tx) = tx.take() &&
-            let Some(event_rx) = event_rx.take() {
+            let Some(tx) = cmd_tx.take() &&
+            let Some(notification_rx) = notification_rx.take() {
             T::spawn_logic_task(WindowManager {
                 tx,
-                event_rx,
+                notification_rx,
             });
         }
     }
@@ -147,7 +147,7 @@ struct State {
     surfaces: Vec<WindowInner>,
     decoration_manager: Option<zxdg_decoration_manager_v1::ZxdgDecorationManagerV1>,
     last_window_id: u64,
-    event_tx: mpsc::Sender<platform::event::Event>,
+    notification_tx: mpsc::Sender<platform::event::Notification>,
 }
 
 impl State {
@@ -191,7 +191,7 @@ impl Dispatch<WlRegistry, ()> for State {
 use wayland_protocols::xdg::decoration::zv1::client::zxdg_toplevel_decoration_v1::Mode;
 
 impl State {
-    fn create_surface(&mut self, qh: &QueueHandle<State>, attrib: WindowAttributes, tx: Sender<WindowMessage>) -> Window {
+    fn create_surface(&mut self, qh: &QueueHandle<State>, attrib: WindowAttributes, tx: channel::Sender<EventLoopCommand>) -> Window {
         let window_id = self.new_window_id();
         let window_state = WindowState {
             id: window_id
@@ -340,19 +340,6 @@ impl Dispatch<wl_keyboard::WlKeyboard, KbState> for State {
                     // ESC key
                     state.running = false;
                 }
-                // else if key == 33 {
-                //     state.create_surface(qh);
-                // }
-                // else if key == 32 {
-                //     if let Some(win) = state.surfaces.pop() {
-                //         win.toplevel.destroy();
-                //         win.xdg_surface.destroy()
-                //         win.base_surface.destroy();
-                //     }
-                //     if state.surfaces.is_empty() {
-                //         state.running = false;
-                //     }
-                // }
             }
         }
         else {
