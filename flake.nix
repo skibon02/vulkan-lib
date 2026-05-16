@@ -33,6 +33,7 @@
           pkg-config
           androidSdk
           jdk17
+          wayland
 
             cargo-apk
             androidenv.androidPkgs.platform-tools

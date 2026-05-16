@@ -13,10 +13,11 @@ sparkles = { git="https://github.com/skibon02/sparkles.git", branch = "main", de
 tempfile = "3.27.0"
 
 [target.'cfg(all(unix, not(target_vendor = "apple"), not(target_os="android"), not(target_os="emscripten"), not(target_os="redox")))'.dependencies]
-wayland-client = "0.31.14"
+wayland-client = { version = "0.31.14", features = ["system"] }
 wayland-protocols = { version = "0.32.12", features = ["wayland-client", "client"] }
 calloop = "0.14.4"
 calloop-wayland-source = "0.4.1"
+raw-window-handle = { version = "0.6.2", features = ["std", "alloc"] }
 
 # WINDOWS platform
 [target.'cfg(target_os="windows")'.dependencies]
@@ -53,6 +54,7 @@ windows-sys = { version = "0.61.2", features = [
 simple_logger = "5.2.0"
 sparkles = { git="https://github.com/skibon02/sparkles.git", branch = "main" }
 rand = "0.10.1"
+vulkan-lib = { path = "../vulkan-lib" }
 
 [build-dependencies]
 cfg_aliases = "0.2.1"

@@ -1,6 +1,3 @@
-use std::cell::Cell;
-use std::fs::File;
-use std::os::fd::AsFd;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use calloop::{channel, EventLoop};
@@ -8,8 +5,9 @@ use calloop::channel::{Event, Sender};
 use calloop_wayland_source::WaylandSource;
 use log::info;
 use wayland_client::{delegate_noop, Connection, Dispatch, Proxy, QueueHandle, WEnum};
-use wayland_client::protocol::{wl_buffer, wl_compositor, wl_keyboard, wl_registry, wl_seat, wl_shm, wl_shm_pool, wl_surface};
+use wayland_client::protocol::{wl_compositor, wl_keyboard, wl_registry, wl_seat, wl_shm, wl_shm_pool, wl_surface};
 use wayland_client::protocol::wl_compositor::WlCompositor;
+use wayland_client::protocol::wl_display::WlDisplay;
 use wayland_client::protocol::wl_keyboard::KeyState;
 use wayland_client::protocol::wl_registry::WlRegistry;
 use wayland_client::protocol::wl_surface::WlSurface;
@@ -74,9 +72,10 @@ pub fn start_app<T: ApplicationLogic>() {
 
     let mut state = State {
         running: true,
+        configured: false,
         compositor: None,
-        buffer: None,
         wm_base: None,
+        display: display.clone(),
         surfaces: vec![],
         last_window_id: 0,
         event_tx,
@@ -121,8 +120,9 @@ pub fn start_app<T: ApplicationLogic>() {
     let mut event_rx = Some(event_rx);
     while state.running {
         event_loop.dispatch(None, &mut state).unwrap();
-        if let Some(tx) = tx.take() &&
-            let Some(event_rx) = event_rx.take() && state.is_initialized() {
+        if state.is_initialized() &&
+            let Some(tx) = tx.take() &&
+            let Some(event_rx) = event_rx.take() {
             T::spawn_logic_task(WindowManager {
                 tx,
                 event_rx,
@@ -138,9 +138,10 @@ struct WindowState {
 
 struct State {
     running: bool,
+    configured: bool,
     compositor: Option<WlCompositor>,
-    buffer: Option<wl_buffer::WlBuffer>,
     wm_base: Option<xdg_wm_base::XdgWmBase>,
+    display: WlDisplay,
     surfaces: Vec<WindowInner>,
     last_window_id: u64,
     event_tx: mpsc::Sender<platform::event::Event>,
@@ -148,7 +149,7 @@ struct State {
 
 impl State {
     pub fn is_initialized(&self) -> bool {
-        self.compositor.is_some() && self.buffer.is_some() && self.wm_base.is_some()
+        self.compositor.is_some() && self.wm_base.is_some()
     }
     pub fn new_window_id(&mut self) -> u64 {
         let id = self.last_window_id;
@@ -167,25 +168,6 @@ impl Dispatch<WlRegistry, ()> for State {
                         registry.bind::<wl_compositor::WlCompositor, _, _>(name, 1, qh, ());
                     state.compositor = Some(compositor);
                 }
-                "wl_shm" => {
-                    let shm = registry.bind::<wl_shm::WlShm, _, _>(name, 1, qh, ());
-
-                    let (init_w, init_h) = (320, 240);
-
-                    let mut file = tempfile::tempfile().unwrap();
-                    draw(&mut file, (init_w, init_h));
-                    let pool = shm.create_pool(file.as_fd(), (init_w * init_h * 4) as i32, qh, ());
-                    let buffer = pool.create_buffer(
-                        0,
-                        init_w as i32,
-                        init_h as i32,
-                        (init_w * 4) as i32,
-                        wl_shm::Format::Argb8888,
-                        qh,
-                        (),
-                    );
-                    state.buffer = Some(buffer.clone());
-                }
                 "wl_seat" => {
                     registry.bind::<wl_seat::WlSeat, _, _>(name, 1, qh, ());
                 }
@@ -197,22 +179,6 @@ impl Dispatch<WlRegistry, ()> for State {
             }
         }
     }
-}
-
-
-fn draw(tmp: &mut File, (buf_x, buf_y): (u32, u32)) {
-    use std::{cmp::min, io::Write};
-    let mut buf = std::io::BufWriter::new(tmp);
-    for y in 0..buf_y {
-        for x in 0..buf_x {
-            let a = 0xFF;
-            let r = min(((buf_x - x) * 0xFF) / buf_x, ((buf_y - y) * 0xFF) / buf_y);
-            let g = min((x * 0xFF) / buf_x, ((buf_y - y) * 0xFF) / buf_y);
-            let b = min(((buf_x - x) * 0xFF) / buf_x, (y * 0xFF) / buf_y);
-            buf.write_all(&[b as u8, g as u8, r as u8, a as u8]).unwrap();
-        }
-    }
-    buf.flush().unwrap();
 }
 
 impl State {
@@ -232,20 +198,20 @@ impl State {
         base_surface.commit();
 
         self.surfaces.push(WindowInner {
-            base_surface,
+            base_surface: base_surface.clone(),
             xdg_surface,
             toplevel,
             id: window_id
         });
 
-        Window::new(window_id, tx)
+        Window::new(window_id, tx, base_surface, self.display.clone())
     }
 }
 
 delegate_noop!(State: ignore wl_compositor::WlCompositor);
 delegate_noop!(State: ignore wl_shm::WlShm);
 delegate_noop!(State: ignore wl_shm_pool::WlShmPool);
-delegate_noop!(State: ignore wl_buffer::WlBuffer);
+delegate_noop!(State: ignore WlDisplay);
 
 impl Dispatch<wl_surface::WlSurface, WindowState> for State {
     fn event(state: &mut Self, proxy: &WlSurface, event: wl_surface::Event, win: &WindowState, conn: &Connection, qhandle: &QueueHandle<Self>) {
@@ -282,12 +248,7 @@ impl Dispatch<xdg_surface::XdgSurface, WindowState> for State {
         info!("xdg_surface ({id}): {:?}", event);
         if let xdg_surface::Event::Configure { serial, .. } = event {
             xdg_surface.ack_configure(serial);
-            for surface in &state.surfaces {
-                if let Some(ref buffer) = state.buffer {
-                    surface.base_surface.attach(Some(buffer), 0, 0);
-                    surface.base_surface.commit();
-                }
-            }
+            state.configured = true;
         }
     }
 }
