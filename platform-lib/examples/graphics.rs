@@ -27,7 +27,7 @@ impl ApplicationLogic for MyApp {
                 // init vulkan
                 // let res = manager.read_event();
 
-                let mut vulkan = VulkanInstance::new_for_handle(wh, dh, (500, 800), API_VERSION_1_3).unwrap() ;
+                let mut vulkan = VulkanInstance::new_1_0(":P").unwrap() ;
                 let mut allocator = vulkan.new_allocator();
 
                 // Create render pass
@@ -143,7 +143,7 @@ async fn main() {
     let g = sparkles::init(SparklesConfig::default()
         .without_file_sender()
         .with_udp_multicast_default());
-    
+
     block_in_place(|| {
         // sparkles::wait_client_connected();
 

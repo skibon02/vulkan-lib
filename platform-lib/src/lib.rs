@@ -1,7 +1,7 @@
 mod platform;
 
 use std::ffi::c_void;
-use wayland_client::{Connection, Proxy};
+use std::sync::OnceLock;
 pub use platform::platform_impl::*;
 
 #[derive(Copy, Clone, Debug)]
@@ -32,11 +32,21 @@ pub const fn current_platform() -> PlatformKind {
 }
 
 
+#[cfg(wayland_platform)]
+use wayland_client::{Connection, Proxy};
+
+// todo: consider using mutex for cases where wayland connection got available dynamically
+#[cfg(wayland_platform)]
+static DUMMY_CONNECTION: OnceLock<Option<Connection>> = OnceLock::new();
+
 /// If wayland is available, returns raw pointer to wl_display
 pub fn wayland_connection() -> Option<*mut c_void> {
     #[cfg(wayland_platform)]
     {
-        if let Ok(con) = Connection::connect_to_env() {
+        let con = DUMMY_CONNECTION.get_or_init(|| {
+            Connection::connect_to_env().ok()
+        });
+        if let Some(con) = con {
             Some(con.display().id().as_ptr() as *mut c_void)
         }
         else {

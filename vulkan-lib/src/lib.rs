@@ -2,11 +2,11 @@ use std::ffi::{c_char, CString};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use anyhow::bail;
 use ash::Entry;
-use ash::vk::{make_api_version, ApplicationInfo, BufferCreateInfo, Extent2D, PhysicalDevice, API_VERSION_1_0};
+use ash::khr::{wayland_surface, win32_surface};
+use ash::vk::{make_api_version, wl_display, ApplicationInfo, BufferCreateInfo, Extent2D, PhysicalDevice, PhysicalDeviceType, API_VERSION_1_0};
 use log::{info, warn};
 use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
 use sparkles::range_event_start;
-use crate::swapchain_wrapper::SwapchainWrapper;
 use crate::wrappers::capabilities_checker::CapabilitiesChecker;
 use crate::wrappers::debug_report::VkDebugReport;
 use crate::wrappers::device::VkDeviceRef;
@@ -56,6 +56,7 @@ impl VulkanInstance {
     pub fn new_1_0(app_name: &str) -> anyhow::Result<GraphicsQueue> {
         let api_version = API_VERSION_1_0;
         let platform = current_platform();
+        info!("Vulkan: Initializing for: {:?}", platform);
 
         let Ok(entry) = (unsafe { Entry::load() }) else {
             bail!("Failed to load Vulkan entry");
@@ -141,60 +142,79 @@ impl VulkanInstance {
         let debug_report = VkDebugReport::new(&entry, instance.clone())?;
         // instance is created. debug report ready
 
-        let physical_devices = unsafe { instance.enumerate_physical_devices()? };
+        let mut physical_devices = unsafe { instance.enumerate_physical_devices()? }.into_iter().map(|physical_device| {
+            let props = unsafe {
+                instance.get_physical_device_properties(physical_device)
+            };
+            let qf_props =
+                unsafe { instance.get_physical_device_queue_family_properties(physical_device) };
 
-        // Filter devices by presentation support to a surface
-        // anrdoid: presentation is always supported to any surface
-        // win32: f(device, q_family) -> bool
-        // wayland (needs wl_display connection): f(device, q_family) -> bool
-        // x11 (needs xcb connection): f(visualID, device, q_family) -> bool
+            (physical_device, props, qf_props)
+        }).filter_map(|(d, prop, qf_prop)| {
+            // fill in presentation support information, filter out devices without presentation support on all qf
+            // android: presentation is always supported to any surface
+            // win32: f(device, q_family) -> bool
+            // wayland (needs wl_display connection): f(device, q_family) -> bool
+            // x11 (needs xcb connection): f(visualID, device, q_family) -> bool
 
-        let physical_device = *physical_devices
-            .iter()
-            .find(|&d| {
-                let properties = unsafe { instance.get_physical_device_properties(*d) };
-                properties.device_type == vk::PhysicalDeviceType::DISCRETE_GPU
-            })
-            .or_else(|| {
-                warn!("Discrete GPU was not found!");
-                physical_devices.iter().find(|&d| {
-                    let properties = unsafe { instance.get_physical_device_properties(*d) };
-                    properties.device_type == vk::PhysicalDeviceType::INTEGRATED_GPU
-                })
-            })
-            .or_else(|| {
-                warn!("Integrated GPU was not found!");
-                physical_devices.iter().find(|&d| {
-                    let properties = unsafe { instance.get_physical_device_properties(*d) };
-                    properties.device_type == vk::PhysicalDeviceType::CPU
-                })
-            })
-            .unwrap_or_else(|| {
-                panic!("No available physical device found");
-            });
+            let qf_presentation =  match platform {
+                PlatformKind::Android => {
+                    qf_prop.iter().map(|_| true).collect::<Vec<_>>()
+                }
+                PlatformKind::Windows => {
+                    let mut win32_surface = win32_surface::Instance::new(&entry, &instance);
+                    qf_prop.iter().enumerate()
+                        .map(|(i, qf_properties)| {
+                            unsafe { win32_surface.get_physical_device_win32_presentation_support(d, i as u32) }
+                        }).collect::<Vec<_>>()
+                }
+                PlatformKind::Wayland => {
+                    let con = platform_lib::wayland_connection().unwrap() as *mut wl_display;
+                    let mut wl_surface = wayland_surface::Instance::new(&entry, &instance);
+                    qf_prop.iter().enumerate()
+                        .map(|(i, qf_properties)| {
+                            unsafe { wl_surface.get_physical_device_wayland_presentation_support(d, i as u32, &mut *con) }
+                        }).collect::<Vec<_>>()
+                }
+                other => {
+                    todo!("queue family filtering not implemented on platform {:?}", other)
+                }
+            };
+
+            if qf_presentation.iter().all(|p| !*p) {
+                None
+            }
+            else {
+                Some((d, prop, qf_prop, qf_presentation))
+            }
+        }).collect::<Vec<_>>();
+
+        // sort by gpu type: discrete -> integrated -> other
+        physical_devices.sort_by_key(|(_, prop, _, _)| {
+            match prop.device_type {
+                PhysicalDeviceType::DISCRETE_GPU => 1,
+                PhysicalDeviceType::INTEGRATED_GPU => 2,
+                _ => 3,
+            }
+        });
 
         //select chosen physical device
-        let dev_name_array = unsafe {
-            instance
-                .get_physical_device_properties(physical_device)
-                .device_name
+        let Some((physical_device, physical_device_properties, queue_family_properties, qf_presentation_support)) = physical_devices.into_iter().next() else {
+            bail!("Could not find Vulkan Devices with presentation support!")
         };
-        let dev_name = unsafe { std::ffi::CStr::from_ptr(dev_name_array.as_ptr()) };
+
+        let dev_name = unsafe { std::ffi::CStr::from_ptr(physical_device_properties.device_name.as_ptr()) };
         info!("Chosen device: {}", dev_name.to_str().unwrap());
 
-        let queue_family_properties =
-            unsafe { instance.get_physical_device_queue_family_properties(physical_device) };
         let queue_family_index = queue_family_properties
             .iter()
             .enumerate()
-            .find(|(_, p)| {
-                let support_graphics = p.queue_flags.contains(vk::QueueFlags::GRAPHICS);
-                let surface = VkSurface {};
-                let support_presentation = surface.query_presentation_support(physical_device);
-
-                support_graphics && support_presentation
+            .zip(qf_presentation_support.iter())
+            .find(|((_, props), presentation_supported)| {
+                let support_graphics = props.queue_flags.contains(vk::QueueFlags::GRAPHICS);
+                support_graphics && **presentation_supported
             })
-            .map(|(i, _)| i as u32)
+            .map(|((i, _), _)| i as u32)
             .unwrap_or_else(|| {
                 panic!("No available queue family found");
             });
