@@ -14,7 +14,7 @@ tempfile = "3.27.0"
 
 [target.'cfg(all(unix, not(target_vendor = "apple"), not(target_os="android"), not(target_os="emscripten"), not(target_os="redox")))'.dependencies]
 wayland-client = { version = "0.31.14", features = ["system"] }
-wayland-protocols = { version = "0.32.12", features = ["wayland-client", "client"] }
+wayland-protocols = { version = "0.32.12", features = ["wayland-client", "client", "unstable"] }
 calloop = "0.14.4"
 calloop-wayland-source = "0.4.1"
 raw-window-handle = { version = "0.6.2", features = ["std", "alloc"] }

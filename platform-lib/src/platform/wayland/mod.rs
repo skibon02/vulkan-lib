@@ -14,6 +14,7 @@ use wayland_client::protocol::wl_surface::WlSurface;
 use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base};
 use wayland_protocols::xdg::shell::client::xdg_surface::XdgSurface;
 use wayland_protocols::xdg::shell::client::xdg_toplevel::XdgToplevel;
+use wayland_protocols::xdg::decoration::zv1::client::{zxdg_decoration_manager_v1, zxdg_toplevel_decoration_v1};
 use crate::platform;
 use crate::window::{Window, WindowAttributes};
 
@@ -77,6 +78,7 @@ pub fn start_app<T: ApplicationLogic>() {
         wm_base: None,
         display: display.clone(),
         surfaces: vec![],
+        decoration_manager: None,
         last_window_id: 0,
         event_tx,
     };
@@ -143,6 +145,7 @@ struct State {
     wm_base: Option<xdg_wm_base::XdgWmBase>,
     display: WlDisplay,
     surfaces: Vec<WindowInner>,
+    decoration_manager: Option<zxdg_decoration_manager_v1::ZxdgDecorationManagerV1>,
     last_window_id: u64,
     event_tx: mpsc::Sender<platform::event::Event>,
 }
@@ -175,11 +178,17 @@ impl Dispatch<WlRegistry, ()> for State {
                     let wm_base = registry.bind::<xdg_wm_base::XdgWmBase, _, _>(name, 1, qh, ());
                     state.wm_base = Some(wm_base);
                 }
+                "zxdg_decoration_manager_v1" => {
+                    let manager = registry.bind::<zxdg_decoration_manager_v1::ZxdgDecorationManagerV1, _, _>(name, 1, qh, ());
+                    state.decoration_manager = Some(manager);
+                }
                 _ => {}
             }
         }
     }
 }
+
+use wayland_protocols::xdg::decoration::zv1::client::zxdg_toplevel_decoration_v1::Mode;
 
 impl State {
     fn create_surface(&mut self, qh: &QueueHandle<State>, attrib: WindowAttributes, tx: Sender<WindowMessage>) -> Window {
@@ -195,6 +204,12 @@ impl State {
         let xdg_surface = wm_base.get_xdg_surface(&base_surface, qh, window_state);
         let toplevel = xdg_surface.get_toplevel(qh, window_state);
         toplevel.set_title("A fantastic window!".into());
+
+        if let Some(ref manager) = self.decoration_manager {
+            let decoration = manager.get_toplevel_decoration(&toplevel, qh, window_state);
+            decoration.set_mode(Mode::ServerSide);
+        }
+
         base_surface.commit();
 
         self.surfaces.push(WindowInner {
@@ -212,6 +227,21 @@ delegate_noop!(State: ignore wl_compositor::WlCompositor);
 delegate_noop!(State: ignore wl_shm::WlShm);
 delegate_noop!(State: ignore wl_shm_pool::WlShmPool);
 delegate_noop!(State: ignore WlDisplay);
+delegate_noop!(State: ignore zxdg_decoration_manager_v1::ZxdgDecorationManagerV1);
+
+impl Dispatch<zxdg_toplevel_decoration_v1::ZxdgToplevelDecorationV1, WindowState> for State {
+    fn event(
+        _: &mut Self,
+        _: &zxdg_toplevel_decoration_v1::ZxdgToplevelDecorationV1,
+        event: zxdg_toplevel_decoration_v1::Event,
+        win: &WindowState,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        let id = win.id;
+        info!("zxdg_toplevel_decoration ({id}): {:?}", event);
+    }
+}
 
 impl Dispatch<wl_surface::WlSurface, WindowState> for State {
     fn event(state: &mut Self, proxy: &WlSurface, event: wl_surface::Event, win: &WindowState, conn: &Connection, qhandle: &QueueHandle<Self>) {

@@ -98,13 +98,13 @@ impl ApplicationLogic for MyApp {
                     };
 
                     let mut clear_values = smallvec![
-                                ClearValue {
-                                    color: bg_clear_color,
-                                },
-                                ClearValue {
-                                    depth_stencil: ClearDepthStencilValue::default().depth(1.0)
-                                },
-                            ];
+                        ClearValue {
+                            color: bg_clear_color,
+                        },
+                        ClearValue {
+                            depth_stencil: ClearDepthStencilValue::default().depth(1.0)
+                        },
+                    ];
                     if need_resolve {
                         clear_values.push(ClearValue {
                             color: bg_clear_color,
