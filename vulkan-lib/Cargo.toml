@@ -19,6 +19,7 @@ slotmap = "1.0.7"
 parking_lot = "0.12.5"
 smallvec = "1.15.1"
 strum = { version = "0.28.0", features = ["derive"] }
+platform-lib = { path = "../platform-lib", default-features = false }
 
 [features]
 default = []

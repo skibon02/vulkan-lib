@@ -80,7 +80,6 @@ pub struct GraphicsQueue {
     physical_device: PhysicalDevice,
     device: VkDeviceRef,
     queue: vk::Queue,
-    surface: VkSurfaceRef,
     swapchain_wrapper: SwapchainWrapper,
     framebuffers: HashMap<vk::RenderPass, FramebufferSet>,
     recycled_framebuffer_sets: HashMap<usize, Vec<FramebufferSet>>,
@@ -113,7 +112,6 @@ impl GraphicsQueue {
         queue_family_index: u32,
         queue: Queue,
         physical_device: PhysicalDevice,
-        swapchain_wrapper: SwapchainWrapper,
         calibrated_timestamps: Option<CalibratedTimestamps>,
         timestamp_pool: Option<TimestampPool>,
         low_latency2: Option<LowLatency2>,
@@ -121,11 +119,11 @@ impl GraphicsQueue {
         memory_types: Vec<MemoryType>,
         memory_heaps: Vec<MemoryHeap>,
     ) -> Self {
-        let surface = swapchain_wrapper.surface();
-
-        if let Some(pt) = present_timing.as_mut() {
-            pt.on_swapchain_created(swapchain_wrapper.get_swapchain(), swapchain_wrapper.image_count());
-        }
+        // let surface = swapchain_wrapper.surface();
+        //
+        // if let Some(pt) = present_timing.as_mut() {
+        //     pt.on_swapchain_created(swapchain_wrapper.get_swapchain(), swapchain_wrapper.image_count());
+        // }
 
         let mut sparkles_gpu_channel = ExternalEventsSource::new("Vulkan GPU".to_string());
         if let Some(calibrated_timestamps) = &calibrated_timestamps {
@@ -140,8 +138,7 @@ impl GraphicsQueue {
             instance,
             physical_device,
             queue,
-            surface,
-            swapchain_wrapper,
+            swapchain_wrapper: None,
             framebuffers: HashMap::new(),
             recycled_framebuffer_sets: HashMap::new(),
             recycled_swapchain_images: HashMap::new(),
@@ -363,7 +360,7 @@ impl GraphicsQueue {
         let old_format = self.swapchain_wrapper.get_surface_format();
         let old_swapchain_images = unsafe {
             self.swapchain_wrapper
-                .recreate(self.physical_device, new_extent, self.surface.clone())
+                .recreate(self.physical_device, new_extent, self.swapchain_wrapper.surface().clone())
                 .unwrap()
         };
         let new_format = self.swapchain_wrapper.get_surface_format();

@@ -2,7 +2,7 @@ use std::ffi::{c_char, CString};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use anyhow::bail;
 use ash::Entry;
-use ash::vk::{make_api_version, ApplicationInfo, BufferCreateInfo, Extent2D, PhysicalDevice};
+use ash::vk::{make_api_version, ApplicationInfo, BufferCreateInfo, Extent2D, PhysicalDevice, API_VERSION_1_0};
 use log::{info, warn};
 use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
 use sparkles::range_event_start;
@@ -22,6 +22,7 @@ use crate::wrappers::timestamp_pool::TimestampPool;
 use crate::queue::GraphicsQueue;
 pub use ash::vk;
 pub use vk::{DescriptorType, ShaderStageFlags};
+use platform_lib::{current_platform, PlatformKind};
 use crate::queue::shared::SharedState;
 
 mod wrappers;
@@ -52,13 +53,16 @@ pub struct VulkanInstance {
 
 impl VulkanInstance {
     #[track_caller]
-    pub fn new_for_handle(window_handle: RawWindowHandle, display_handle: RawDisplayHandle, initial_size: (u32, u32), api_version: u32) -> anyhow::Result<GraphicsQueue> {
+    pub fn new_1_0(app_name: &str) -> anyhow::Result<GraphicsQueue> {
+        let api_version = API_VERSION_1_0;
+        let platform = current_platform();
+
         let Ok(entry) = (unsafe { Entry::load() }) else {
             bail!("Failed to load Vulkan entry");
         };
 
         let g = range_event_start!("[Vulkan] INIT");
-        let app_name = CString::new("Hello Vulkan")?;
+        let app_name = CString::new(app_name)?;
 
         let app_info = ApplicationInfo::default()
             .application_name(&app_name)
@@ -77,18 +81,42 @@ impl VulkanInstance {
             instance_layers.iter().map(|l| l.as_ptr()).collect();
 
         //define desired extensions
-        // 1 Debug report
-        // 2,3 Required extensions for surface support (platform_specific surface + general surface)
-        // 4 Portability enumeration (for moltenvk)
-        let surface_required_extensions =
-            ash_window::enumerate_required_extensions(display_handle)?;
-        let mut instance_extensions: Vec<*const c_char> = surface_required_extensions.to_vec();
+        let mut instance_extensions = Vec::<*const c_char>::new();
         instance_extensions.push(ash::ext::debug_report::NAME.as_ptr());
         // Instance-level dependency of VK_EXT_present_timing.
         instance_extensions.push(ash::khr::get_surface_capabilities2::NAME.as_ptr());
+        // for MoltenVK
+        instance_extensions.push(ash::khr::portability_enumeration::NAME.as_ptr());
         if cfg!(feature = "validation") {
             instance_extensions.push(ash::ext::validation_features::NAME.as_ptr());
         }
+        // platform-dependent surface extensions
+        instance_extensions.push(ash::khr::surface::NAME.as_ptr());
+        match platform {
+            PlatformKind::Windows => {
+                instance_extensions.push(ash::khr::win32_surface::NAME.as_ptr());
+            }
+            PlatformKind::Android => {
+                instance_extensions.push(ash::khr::android_surface::NAME.as_ptr());
+            }
+            PlatformKind::X11 => {
+                instance_extensions.push(ash::khr::xcb_surface::NAME.as_ptr());
+            }
+            PlatformKind::Wayland => {
+                instance_extensions.push(ash::khr::wayland_surface::NAME.as_ptr());
+            }
+            PlatformKind::X11OrWayland => {
+                instance_extensions.push(ash::khr::wayland_surface::NAME.as_ptr());
+                instance_extensions.push(ash::khr::xcb_surface::NAME.as_ptr());
+            }
+            PlatformKind::Orbital => {
+                panic!("Orbital platform not supported!")
+            }
+            other => {
+                panic!("Unsupported platform {:?}", other)
+            }
+        };
+
 
         let mut debug_report_callback_info = VkDebugReport::get_messenger_create_info();
 
@@ -110,12 +138,16 @@ impl VulkanInstance {
         let instance = caps_checker.create_instance(&entry, &app_info, &mut instance_layers_refs,
                                                     &mut instance_extensions, &mut debug_report_callback_info)?;
 
-        let surface = VkSurface::new(&entry, instance.clone(), display_handle, window_handle)?;
-
         let debug_report = VkDebugReport::new(&entry, instance.clone())?;
         // instance is created. debug report ready
 
         let physical_devices = unsafe { instance.enumerate_physical_devices()? };
+
+        // Filter devices by presentation support to a surface
+        // anrdoid: presentation is always supported to any surface
+        // win32: f(device, q_family) -> bool
+        // wayland (needs wl_display connection): f(device, q_family) -> bool
+        // x11 (needs xcb connection): f(visualID, device, q_family) -> bool
 
         let physical_device = *physical_devices
             .iter()
@@ -157,6 +189,7 @@ impl VulkanInstance {
             .enumerate()
             .find(|(_, p)| {
                 let support_graphics = p.queue_flags.contains(vk::QueueFlags::GRAPHICS);
+                let surface = VkSurface {};
                 let support_presentation = surface.query_presentation_support(physical_device);
 
                 support_graphics && support_presentation
@@ -259,19 +292,21 @@ impl VulkanInstance {
         let memory_heaps = memory_properties.memory_heaps_as_slice().to_vec();
         let memory_types = memory_properties.memory_types_as_slice().to_vec();
 
-        let extent = Extent2D {
-            width: initial_size.0,
-            height: initial_size.1,
-        };
-        let swapchain_wrapper = SwapchainWrapper::new(
-            device.clone(),
-            physical_device,
-            extent,
-            surface,
-            None,
-            low_latency2.is_some(),
-            present_timing.is_some(),
-        )?;
+        // let surface = VkSurface::new(&entry, instance.clone(), display_handle, window_handle)?;
+        // let extent = Extent2D {
+        //     width: initial_size.0,
+        //     height: initial_size.1,
+        // };
+        //
+        // let swapchain_wrapper = SwapchainWrapper::new(
+        //     device.clone(),
+        //     physical_device,
+        //     extent,
+        //     surface,
+        //     None,
+        //     low_latency2.is_some(),
+        //     present_timing.is_some(),
+        // )?;
 
         let shared_state = SharedState::new(device.clone());
         let res = Arc::new(Self {
@@ -292,7 +327,6 @@ impl VulkanInstance {
             queue_family_index,
             queue,
             physical_device,
-            swapchain_wrapper,
             calibrated_timestamps,
             timestamp_pool,
             low_latency2,
