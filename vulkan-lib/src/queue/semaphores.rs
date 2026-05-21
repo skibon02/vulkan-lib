@@ -1,12 +1,9 @@
 use std::collections::VecDeque;
-use std::sync::Arc;
 use ash::vk;
 use ash::vk::PipelineStageFlags;
-use log::{error, warn};
+use log::error;
 use slotmap::{SlotMap, DefaultKey};
-use smallvec::SmallVec;
 use crate::queue::shared::HostWaitedNum;
-use crate::resources::image::ImageResource;
 use crate::wrappers::device::VkDeviceRef;
 
 #[derive(Copy, Clone)]

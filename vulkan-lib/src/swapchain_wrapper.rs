@@ -8,13 +8,15 @@ use smallvec::SmallVec;
 use sparkles::range_event_start;
 #[cfg(feature = "present-timing")]
 use crate::extensions::present_timing::SWAPCHAIN_CREATE_PRESENT_TIMING_BIT_EXT;
-use crate::resources::image::{destroy_image_resource, ImageResource};
+use crate::queue::memory_manager::MemoryManager;
+use crate::resources::image::ImageResource;
 use crate::wrappers::device::VkDeviceRef;
 use crate::wrappers::image::{image_2d_info, imageview_info_for_image, swapchain_info};
 use crate::wrappers::surface::VkSurfaceRef;
 
 pub struct SwapchainWrapper {
     device: VkDeviceRef,
+    memory_manager: MemoryManager,
 
     swapchain: SwapchainKHR,
     pub swapchain_loader: swapchain::Device,
@@ -135,6 +137,7 @@ impl SwapchainWrapper {
             swapchain_images,
             swapchain_format: surface_format.format,
             swapchain_extent,
+            memory_manager: MemoryManager::new(device.clone()),
 
             device,
             surface: surface_ref,

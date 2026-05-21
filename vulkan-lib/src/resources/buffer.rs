@@ -99,7 +99,7 @@ impl Drop for BufferResource {
         if self.dropped.swap(true, Ordering::Relaxed) {
             return
         }
-        
+
         if let Some(instance) = try_get_instance() {
             unsafe {
                 let last_host_waited = instance.shared_state.last_host_waited_cached().num();

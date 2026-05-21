@@ -173,7 +173,7 @@ impl CapabilitiesChecker {
             info!("Activated device extension: {}", e);
         }
 
-        Ok(VkDevice::new(device, instance).into())
+        Ok(VkDevice::new(physical_device, device, instance).into())
     }
 
     pub fn is_device_extension_enabled(&self, extension_name: &CStr) -> bool {

@@ -34,31 +34,22 @@ impl SamplerResource {
 
 impl Drop for SamplerResource {
     fn drop(&mut self) {
-        if !self.dropped.load(Ordering::Relaxed) {
-            destroy_sampler(self, false);
+        if self.dropped.swap(true, Ordering::Relaxed) {
+            return
         }
-    }
-}
 
-pub(crate) fn destroy_sampler(sampler: &SamplerResource, no_usages: bool) {
-    if !sampler.dropped.swap(true, Ordering::Relaxed) {
         if let Some(instance) = try_get_instance() {
-            if !no_usages {
-                let last_host_waited = instance.shared_state.last_host_waited_cached().num();
-                if sampler.submission_usage.load().is_some_and(|u| u > last_host_waited) {
-                    warn!("Trying to destroy sampler resource, but VulkanAllocator was destroyed earlier! Calling device_wait_idle...");
-                    unsafe {
-                        instance.device.device_wait_idle().unwrap();
-                    }
-                }
-            }
-            let device = instance.device.clone();
             unsafe {
-                device.destroy_sampler(sampler.sampler, None);
+                let last_host_waited = instance.shared_state.last_host_waited_cached().num();
+                if self.submission_usage.load().is_some_and(|u| u > last_host_waited) {
+                    warn!("Sampler destroy, calling device_wait_idle...");
+                    instance.device.device_wait_idle().unwrap();
+                }
+                instance.device.destroy_sampler(self.sampler, None);
             }
         }
         else {
-            error!("VulkanInstance was destroyed! Cannot destroy sampler resource");
+            error!("VulkanInstance was destroyed! Cannot destroy buffer resource");
         }
     }
 }

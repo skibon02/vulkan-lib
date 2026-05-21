@@ -116,8 +116,6 @@ impl GraphicsQueue {
         timestamp_pool: Option<TimestampPool>,
         low_latency2: Option<LowLatency2>,
         mut present_timing: Option<PresentTiming>,
-        memory_types: Vec<MemoryType>,
-        memory_heaps: Vec<MemoryHeap>,
     ) -> Self {
         // let surface = swapchain_wrapper.surface();
         //
@@ -156,8 +154,6 @@ impl GraphicsQueue {
 
             memory_manager: MemoryManager::new(
                 device.clone(),
-                memory_types,
-                memory_heaps,
             ),
         }
     }
@@ -580,7 +576,7 @@ impl GraphicsQueue {
             // 1) accumulate barriers for all commands in the group
             for cmd in group.iter() {
                 if let DeviceCommand::RenderPassBegin {render_pass, framebuffer_index, ..} = cmd {
-                    // create framebuffers if not yet created
+                    // create framebuffers if not yet created, they must exist before cmd.usages call
                     let _ = self.get_or_create_framebuffers(render_pass);
                 }
                 for usage in cmd.usages(submission_num, self.swapchain_wrapper.get_images(), &self.framebuffers) {

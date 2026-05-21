@@ -32,9 +32,15 @@ impl Clone for MemoryManager {
 impl MemoryManager {
     pub fn new(
         device: VkDeviceRef,
-        memory_types: Vec<MemoryType>,
-        memory_heaps: Vec<MemoryHeap>,
     ) -> Self {
+        let memory_properties = unsafe {
+            device
+                .instance()
+                .get_physical_device_memory_properties(device.physical_device())
+        };
+
+        let memory_heaps = memory_properties.memory_heaps_as_slice().to_vec();
+        let memory_types = memory_properties.memory_types_as_slice().to_vec();
         Self {
             device,
             memory_types,

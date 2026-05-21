@@ -7,7 +7,7 @@ use smallvec::{smallvec, SmallVec};
 use ash::vk::{self, AccessFlags, BufferCopy, BufferImageCopy, ClearValue, DeviceSize, Format, ImageAspectFlags, ImageLayout, PipelineStageFlags};
 use log::{error, warn};
 use crate::queue::{FramebufferSet, OptionSeqNumShared};
-use crate::queue::queue_local::{QueueLocal, QueueLocalToken};
+use crate::queue::queue_local::QueueLocal;
 use crate::resources::buffer::{BufferResource, BufferResourceInner};
 use crate::resources::descriptor_set::{BoundResource, DescriptorSetResource};
 use crate::resources::image::ImageResource;

@@ -301,17 +301,6 @@ impl VulkanInstance {
 
         let queue = unsafe { device.get_device_queue(queue_family_index, 0) };
 
-
-
-        let memory_properties = unsafe {
-            device
-                .instance()
-                .get_physical_device_memory_properties(physical_device)
-        };
-
-        let memory_heaps = memory_properties.memory_heaps_as_slice().to_vec();
-        let memory_types = memory_properties.memory_types_as_slice().to_vec();
-
         // let surface = VkSurface::new(&entry, instance.clone(), display_handle, window_handle)?;
         // let extent = Extent2D {
         //     width: initial_size.0,
@@ -351,8 +340,6 @@ impl VulkanInstance {
             timestamp_pool,
             low_latency2,
             present_timing,
-            memory_types,
-            memory_heaps,
         ))
     }
 }
