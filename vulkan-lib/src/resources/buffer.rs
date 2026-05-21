@@ -96,27 +96,19 @@ impl BufferResource {
 
 impl Drop for BufferResource {
     fn drop(&mut self) {
-        if !self.dropped.load(Ordering::Relaxed) {
-            destroy_buffer_resource(self, false);
+        if self.dropped.swap(true, Ordering::Relaxed) {
+            return
         }
-    }
-}
-pub(crate) fn destroy_buffer_resource(buffer_resource: &BufferResource, no_usages: bool) {
-    if !buffer_resource.dropped.swap(true, Ordering::Relaxed) {
+        
         if let Some(instance) = try_get_instance() {
-            if !no_usages {
-                let last_host_waited = instance.shared_state.last_host_waited_cached().num();
-                if buffer_resource.submission_usage.load().is_some_and(|u| u > last_host_waited) {
-                    warn!("Trying to destroy buffer resource, but VulkanAllocator was destroyed earlier! Calling device_wait_idle...");
-                    unsafe {
-                        instance.device.device_wait_idle().unwrap();
-                    }
-                }
-            }
-            let device = instance.device.clone();
             unsafe {
-                device.destroy_buffer(buffer_resource.buffer, None);
-                device.free_memory(buffer_resource.memory, None);
+                let last_host_waited = instance.shared_state.last_host_waited_cached().num();
+                if self.submission_usage.load().is_some_and(|u| u > last_host_waited) {
+                    warn!("Buffer destroy, calling device_wait_idle...");
+                    instance.device.device_wait_idle().unwrap();
+                }
+                instance.device.destroy_buffer(self.buffer, None);
+                instance.device.free_memory(self.memory, None);
             }
         }
         else {

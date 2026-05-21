@@ -215,33 +215,25 @@ pub enum VertexAssembly {
 
 impl Drop for GraphicsPipelineResource {
     fn drop(&mut self) {
-        if !self.dropped.load(Ordering::Relaxed) {
-            destroy_pipeline(self, false);
+        if self.dropped.swap(true, Ordering::Relaxed) {
+            return
         }
-    }
-}
 
-pub(crate) fn destroy_pipeline(pipeline: &GraphicsPipelineResource, no_usages: bool) {
-    if !pipeline.dropped.swap(true, Ordering::Relaxed) {
         if let Some(instance) = try_get_instance() {
-            if !no_usages {
-                let last_host_waited = instance.shared_state.last_host_waited_cached().num();
-                if pipeline.submission_usage.load().is_some_and(|u| u > last_host_waited) {
-                    warn!("Trying to destroy pipeline resource, but VulkanAllocator was destroyed earlier! Calling device_wait_idle...");
-                    unsafe {
-                        instance.device.device_wait_idle().unwrap();
-                    }
-                }
-            }
-            let device = instance.device.clone();
             unsafe {
-                device.destroy_pipeline_cache(pipeline.pipeline_cache, None);
-                device.destroy_pipeline(pipeline.pipeline, None);
-                device.destroy_pipeline_layout(pipeline.pipeline_layout, None);
+                let last_host_waited = instance.shared_state.last_host_waited_cached().num();
+                if self.submission_usage.load().is_some_and(|u| u > last_host_waited) {
+                    warn!("Graphics pipeline destroy, calling device_wait_idle...");
+                    instance.device.device_wait_idle().unwrap();
+                }
+                let device = instance.device.clone();
+                device.destroy_pipeline_cache(self.pipeline_cache, None);
+                device.destroy_pipeline(self.pipeline, None);
+                device.destroy_pipeline_layout(self.pipeline_layout, None);
             }
         }
         else {
-            error!("VulkanInstance was destroyed! Cannot destroy pipeline resource");
+            error!("VulkanInstance was destroyed! Cannot destroy graphics pipeline resource");
         }
     }
 }

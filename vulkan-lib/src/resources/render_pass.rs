@@ -227,26 +227,18 @@ impl AttachmentsDescription {
 
 impl Drop for RenderPassResource {
     fn drop(&mut self) {
-        if !self.dropped.load(Ordering::Relaxed) {
-            destroy_render_pass(self, false);
+        if self.dropped.swap(true, Ordering::Relaxed) {
+            return
         }
-    }
-}
-pub(crate) fn destroy_render_pass(render_pass: &RenderPassResource, no_usages: bool) {
-    if !render_pass.dropped.swap(true, Ordering::Relaxed) {
+        
         if let Some(instance) = try_get_instance() {
-            if !no_usages {
-                let last_host_waited = instance.shared_state.last_host_waited_cached().num();
-                if render_pass.submission_usage.load().is_some_and(|u| u > last_host_waited) {
-                    warn!("Trying to destroy render pass resource, but VulkanAllocator was destroyed earlier! Calling device_wait_idle...");
-                    unsafe {
-                        instance.device.device_wait_idle().unwrap();
-                    }
-                }
-            }
-            let device = instance.device.clone();
             unsafe {
-                device.destroy_render_pass(render_pass.render_pass, None)
+                let last_host_waited = instance.shared_state.last_host_waited_cached().num();
+                if self.submission_usage.load().is_some_and(|u| u > last_host_waited) {
+                    warn!("Render pass destroy, calling device_wait_idle...");
+                    instance.device.device_wait_idle().unwrap();
+                }
+                instance.device.destroy_render_pass(self.render_pass, None)
             }
         }
         else {

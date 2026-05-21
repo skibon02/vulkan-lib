@@ -1,14 +1,12 @@
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use ash::vk;
 use ash::vk::{Extent3D, Format, ImageCreateFlags, ImageCreateInfo, ImageLayout, ImageTiling, ImageType, ImageUsageFlags, ImageView, MemoryAllocateInfo, SampleCountFlags};
 use log::{error, warn};
-use slotmap::DefaultKey;
 use crate::try_get_instance;
 use crate::queue::queue_local::QueueLocal;
 use crate::queue::memory_manager::{MemoryManager, MemoryTypeAlgorithm};
 use crate::queue::OptionSeqNumShared;
-use crate::resources::{LastResourceUsage, ResourceUsage};
+use crate::resources::LastResourceUsage;
 use crate::wrappers::device::VkDeviceRef;
 
 pub struct ImageResource {
@@ -18,7 +16,7 @@ pub struct ImageResource {
     format: vk::Format,
     extent: vk::Extent2D,
     pub(crate) submission_usage: OptionSeqNumShared,
-    pub(crate)inner: QueueLocal<ImageResourceInner>,
+    pub(crate) inner: QueueLocal<ImageResourceInner>,
 
     dropped: AtomicBool,
 }
@@ -66,22 +64,8 @@ impl ImageResource {
         unsafe {
             device.bind_image_memory(image, memory, 0).unwrap();
         }
-        
-        let image_view_create_info = vk::ImageViewCreateInfo::default()
-            .image(image)
-            .view_type(vk::ImageViewType::TYPE_2D)
-            .format(format)
-            .subresource_range(vk::ImageSubresourceRange::default()
-                .aspect_mask(format_aspect_flags(format))
-                .base_mip_level(0)
-                .level_count(1)
-                .base_array_layer(0)
-                .layer_count(1));
-        
-        let image_view = unsafe {
-            device.create_image_view(&image_view_create_info, None).unwrap()
-        };
 
+        let image_view = create_image_view(&device, image, format);
 
         Self {
             image,
@@ -100,20 +84,7 @@ impl ImageResource {
     }
 
     pub(crate) fn from_image(device: &VkDeviceRef, image: vk::Image, format: vk::Format, width: u32, height: u32) -> ImageResource {
-        let image_view_create_info = vk::ImageViewCreateInfo::default()
-            .image(image)
-            .view_type(vk::ImageViewType::TYPE_2D)
-            .format(format)
-            .subresource_range(vk::ImageSubresourceRange::default()
-                .aspect_mask(format_aspect_flags(format))
-                .base_mip_level(0)
-                .level_count(1)
-                .base_array_layer(0)
-                .layer_count(1));
-
-        let image_view = unsafe {
-            device.create_image_view(&image_view_create_info, None).unwrap()
-        };
+        let image_view = create_image_view(&device, image, format);
 
 
         Self {
@@ -141,6 +112,32 @@ impl ImageResource {
     }
 }
 
+impl Drop for ImageResource {
+    fn drop(&mut self) {
+        if self.dropped.swap(true, Ordering::Relaxed) {
+            return
+        }
+
+        if let Some(instance) = try_get_instance() {
+            unsafe {
+                let last_host_waited = instance.shared_state.last_host_waited_cached().num();
+                if self.submission_usage.load().is_some_and(|u| u > last_host_waited) {
+                    warn!("Image destroy, calling device_wait_idle...");
+                    instance.device.device_wait_idle().unwrap();
+                }
+                instance.device.destroy_image_view(self.image_view, None);
+                if let Some(mem) = self.memory {
+                    instance.device.destroy_image(self.image, None);
+                    instance.device.free_memory(mem, None);
+                }
+            }
+        }
+        else {
+            error!("VulkanInstance was destroyed! Cannot destroy image resource");
+        }
+    }
+}
+
 pub fn format_aspect_flags(format: Format) -> vk::ImageAspectFlags {
     match format {
         Format::D16_UNORM | Format::D32_SFLOAT => vk::ImageAspectFlags::DEPTH,
@@ -150,37 +147,20 @@ pub fn format_aspect_flags(format: Format) -> vk::ImageAspectFlags {
     }
 }
 
-impl Drop for ImageResource {
-    fn drop(&mut self) {
-        if !self.dropped.load(Ordering::Relaxed) {
-            destroy_image_resource(self, false);
-        }
-    }
-}
+fn create_image_view(device: &VkDeviceRef, image: vk::Image, format: Format) -> ImageView {
+    let image_view_create_info = vk::ImageViewCreateInfo::default()
+        .image(image)
+        .view_type(vk::ImageViewType::TYPE_2D)
+        .format(format)
+        .subresource_range(vk::ImageSubresourceRange::default()
+            .aspect_mask(format_aspect_flags(format))
+            .base_mip_level(0)
+            .level_count(1)
+            .base_array_layer(0)
+            .layer_count(1));
 
-pub(crate) fn destroy_image_resource(image_resource: &ImageResource, no_usages: bool) {
-    if !image_resource.dropped.swap(true, Ordering::Relaxed) {
-        if let Some(instance) = try_get_instance() {
-            if !no_usages {
-                let last_host_waited = instance.shared_state.last_host_waited_cached().num();
-                if image_resource.submission_usage.load().is_some_and(|u| u > last_host_waited) {
-                    warn!("Trying to destroy image resource, but VulkanAllocator was destroyed earlier! Calling device_wait_idle...");
-                    unsafe {
-                        instance.device.device_wait_idle().unwrap();
-                    }
-                }
-            }
-            let device = instance.device.clone();
-            unsafe {
-                device.destroy_image_view(image_resource.image_view, None);
-                if let Some(mem) = image_resource.memory {
-                    device.destroy_image(image_resource.image, None);
-                    device.free_memory(mem, None);
-                }
-            }
-        }
-        else {
-            error!("VulkanInstance was destroyed! Cannot destroy image resource");
-        }
-    }
+    let image_view = unsafe {
+        device.create_image_view(&image_view_create_info, None).unwrap()
+    };
+    image_view
 }

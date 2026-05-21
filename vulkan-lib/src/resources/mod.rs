@@ -2,22 +2,19 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use ash::vk;
 use ash::vk::{AccessFlags, BufferCreateFlags, BufferUsageFlags, DescriptorSetLayout, DescriptorSetLayoutBinding, DescriptorSetLayoutCreateInfo, DeviceSize, Format, ImageCreateFlags, ImageUsageFlags, PipelineStageFlags, SampleCountFlags, SamplerCreateInfo};
-use log::{error, info};
-use slotmap::DefaultKey;
-use smallvec::SmallVec;
+use log::info;
 use descriptor_pool::DescriptorSetAllocator;
-use crate::resources::buffer::{destroy_buffer_resource, BufferResource};
+use crate::resources::buffer::{BufferResource};
 use crate::resources::descriptor_set::DescriptorSetResource;
-use crate::resources::image::{destroy_image_resource, ImageResource};
-use crate::resources::pipeline::{destroy_pipeline, GraphicsPipelineDesc, GraphicsPipelineResource};
-use crate::resources::render_pass::{destroy_render_pass, AttachmentsDescription, FrameBufferAttachment, RenderPassResource};
+use crate::resources::image::ImageResource;
+use crate::resources::pipeline::{GraphicsPipelineDesc, GraphicsPipelineResource};
+use crate::resources::render_pass::{AttachmentsDescription, RenderPassResource};
 use crate::resources::sampler::SamplerResource;
 use crate::queue::memory_manager::MemoryManager;
 use crate::queue::shared::{HostWaitedNum, SharedState};
-use crate::resources::staging_buffer::{destroy_staging_buffer_resource, StagingBuffer, StagingBufferResource};
+use crate::resources::staging_buffer::{StagingBuffer, StagingBufferResource};
 use crate::shaders::DescriptorSetLayoutBindingDesc;
 use crate::VulkanInstance;
-use crate::wrappers::device::VkDeviceRef;
 
 pub mod buffer;
 pub mod image;
@@ -190,13 +187,13 @@ impl VulkanAllocator {
         println!("Samplers: {}", sampler_count);
     }
 
+    /// Destroy resources that have no references in application and guaranteed to not be used on the device
     pub fn destroy_old_resources(&mut self) {
         let last_waited = self.instance.shared_state.last_host_waited_submission().num();
 
         let mut i = 0;
         while i < self.buffers.len() {
-            if self.buffers[i].submission_usage.load().is_none_or(|n| n <= last_waited) && Arc::strong_count(&self.buffers[i]) == 1 {
-                destroy_buffer_resource(&self.buffers[i], true);
+            if self.buffers[i].submission_usage.load().is_none_or(|n| n <= last_waited) && Arc::get_mut(&mut self.buffers[i]).is_some() {
                 self.buffers.swap_remove(i);
             }
             else {
@@ -206,8 +203,7 @@ impl VulkanAllocator {
 
         let mut i = 0;
         while i < self.staging_buffers.len() {
-            if self.staging_buffers[i].submission_usage.load().is_none_or(|n| n <= last_waited) && Arc::strong_count(&self.staging_buffers[i]) == 1 {
-                destroy_staging_buffer_resource(&self.staging_buffers[i], true);
+            if self.staging_buffers[i].submission_usage.load().is_none_or(|n| n <= last_waited) && Arc::get_mut(&mut self.staging_buffers[i]).is_some() {
                 self.staging_buffers.swap_remove(i);
             }
             else {
@@ -218,8 +214,7 @@ impl VulkanAllocator {
 
         let mut i = 0;
         while i < self.images.len() {
-            if self.images[i].submission_usage.load().is_none_or(|n| n <= last_waited) && Arc::strong_count(&self.images[i]) == 1 {
-                destroy_image_resource(&self.images[i], true);
+            if self.images[i].submission_usage.load().is_none_or(|n| n <= last_waited) && Arc::get_mut(&mut self.images[i]).is_some() {
                 self.images.swap_remove(i);
             }
             else {
@@ -231,8 +226,7 @@ impl VulkanAllocator {
 
         let mut i = 0;
         while i < self.pipelines.len() {
-            if self.pipelines[i].submission_usage.load().is_none_or(|n| n <= last_waited) && Arc::strong_count(&self.pipelines[i]) == 1 {
-                destroy_pipeline(&self.pipelines[i], true);
+            if self.pipelines[i].submission_usage.load().is_none_or(|n| n <= last_waited) && Arc::get_mut(&mut self.pipelines[i]).is_some() {
                 self.pipelines.swap_remove(i);
             }
             else {
@@ -242,8 +236,7 @@ impl VulkanAllocator {
 
         let mut i = 0;
         while i < self.render_passes.len() {
-            if self.render_passes[i].submission_usage.load().is_none_or(|n| n <= last_waited) && Arc::strong_count(&self.render_passes[i]) == 1 {
-                destroy_render_pass(&self.render_passes[i], true);
+            if self.render_passes[i].submission_usage.load().is_none_or(|n| n <= last_waited) && Arc::get_mut(&mut self.render_passes[i]).is_some() {
                 self.render_passes.swap_remove(i);
             }
             else {
